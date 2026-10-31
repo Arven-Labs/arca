@@ -1,0 +1,9 @@
+# Segredos
+.env
+.env.*
+!.env.example
+
+# Chaves e material criptográfico (nunca versionar)
+*.key
+*.pem
+*.age
