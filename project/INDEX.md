@@ -10,6 +10,7 @@ Leia o arquivo relevante para o que você precisa:
 |---|---|
 | O que o MVP deve fazer, modelo de dados, backends e fases | `SPEC.md` |
 | Visão geral, stack e status | `OVERVIEW.md` |
+| O que o Warden já tem de storage e sync (Fase 0, P-01) | `FASE0-P01.md` |
 | Decisões em aberto | `PENDING.md` |
 | Decisões tomadas e seus motivos | `adr/` |
 | Log de sessões de trabalho (mais recente no topo) | `SESSIONS.md` |
