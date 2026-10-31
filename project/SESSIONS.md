@@ -7,7 +7,7 @@ Mais recente no topo.
 - **Pedido**: seguir a Fase 0 pelo P-02 (recuperação de chave).
 - **Decisão do dono**: frase BIP-39 de 24 palavras que codifica a `vault_key` (ADR 0004); abrir o achado do `sync_secrets.json` como pendência.
 - **Feito** (branch `docs/fase0-p02`): ADR 0004; `PENDING.md` com P-02 resolvida e P-11 a P-13 novos. Só leitura do `warden-sync` (`manifest.rs`, `pairing/`); nada executado.
-- **CI**: a preencher com o resultado real do PR.
+- **CI**: `guard` passou no PR #4 (visto com `gh pr checks`, 5s) antes deste ajuste do registro.
 - **Não verificado**: qual crate de BIP-39 usar e se foi auditado; se o `~/.warden` ou o `umask` já protegem o `sync_secrets.json` na prática (só li o código); rotação e revogação.
 - **Fica**: P-12 (rotação e revogação), P-13 (crate), P-11 (PR no Warden); P-03 (conflito); backends e stack (P-04 a P-08); P-10.
 
