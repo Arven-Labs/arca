@@ -18,5 +18,5 @@ A `vault_key` (32 bytes aleatórios do `OsRng`) nasce no primeiro dispositivo e 
 ## Consequências
 - Quem tem as 24 palavras tem o Vault inteiro; o vazamento é total e o usuário precisa guardá-las offline.
 - Sem a frase e sem nenhum dispositivo pareado, a perda continua irrecuperável (isso é honesto, spec §4, princípio 6).
-- A recuperação não resolve **rotação e revogação** de dispositivo perdido; isso segue em aberto (spec §6).
+- A recuperação não resolve **rotação e revogação** de dispositivo perdido; isso foi decidido no ADR 0006. **A rotação invalida a frase anterior** e gera uma nova (a frase é a própria chave), então quem rotaciona precisa guardar a frase nova e descartar a antiga.
 - **Não validado:** qual crate de BIP-39 usar e se foi auditado. Verificar no repositório e nos advisories antes da Fase 1, e nunca implementar o codec à mão. Revisão de segurança do fluxo na Fase 4.
