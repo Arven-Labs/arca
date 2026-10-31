@@ -2,6 +2,15 @@
 
 Mais recente no topo.
 
+### 2026-10-31 — Sessão 8 (Fase 0, P-08: stack)
+
+- **Pedido**: seguir a Fase 0 pelo P-08 (stack) e fechá-la.
+- **Decisão do dono**: Rust; XChaCha20-Poly1305; manifest JSON versionado com blobs binários; `bip39` como candidato; cliente S3 adiado para a Fase 3 (ADR 0008).
+- **Feito** (branch `docs/fase0-stack`): ADR 0008; `PENDING.md` com P-08 resolvida, P-13 reformulada e P-15 e P-16 novas; `OVERVIEW.md` com a stack e o status da Fase 0. Pesquisa: crates.io e API de advisories do GitHub; leitura dos `Cargo.toml` do Warden.
+- **CI**: a preencher com o resultado real do PR.
+- **Não verificado**: auditoria formal do `bip39` e do `chacha20poly1305`; se o `aes-gcm` 0.10 do Warden já está acima das correções dos advisories antigos; Android `armv7` por crate; custo de XChaCha20 sem aceleração em celular.
+- **Fica**: spec técnica de `BlobStore` e do manifest (spec §16, fecha a Fase 0); P-05 (histórico de versões); P-06; P-10, P-11, P-14; P-13 a P-16.
+
 ### 2026-10-31 — Sessão 7 (Fase 0, backends: P-04, P-06, P-07)
 
 - **Pedido**: seguir a Fase 0 pelos backends (backup externo, orçamento e P2P).
