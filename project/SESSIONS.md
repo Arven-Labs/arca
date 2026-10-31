@@ -7,7 +7,7 @@ Mais recente no topo.
 - **Pedido**: abrir a sessão e começar a Fase 0 pelo P-01 (o que o `StorageProvider` do Warden já implementa).
 - **Decisão do dono**: a v1 atende os apps de hoje e o desenho evolui depois; consumidor da v1 só o Warden (ADR 0003).
 - **Feito** (branch `docs/fase0-p01`): `project/FASE0-P01.md` (mapa do `warden-sync`); ADR 0003; `PENDING.md` com P-01 resolvida, P-03 reescrita e P-10 nova. Achado: o `StorageProvider` foi removido do Warden na Sessão 105; a arca é a abstração nova, extraída do `warden-sync`.
-- **CI**: a preencher com o resultado real do PR.
+- **CI**: `guard` passou no PR #3 (visto com `gh pr checks`, 5s) antes deste ajuste do registro; reconferir após o último push.
 - **Não verificado**: que a `main` do Warden bata com a branch lida (`deps/desktop-nanoid`); o `GitSyncEngine` além dos comentários; nada foi executado.
 - **Fica**: P-10 (corrigir `SPEC.md` §3 e §9, depende do dono); P-02 (recuperação de chave); P-03; backends e stack (P-04 a P-08).
 
