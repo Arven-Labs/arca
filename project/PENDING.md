@@ -6,7 +6,6 @@ Decisões em aberto, vindas do `SPEC.md` §15 (nome e licença já decididos: AD
 
 | ID | Pendência | Observação |
 |---|---|---|
-| P-03 | Conflitos: manter last-writer-wins com aviso (como o `warden-sync`), com cópia de segurança do sobrescrito, ou CRDT (Automerge ou Loro)? | Ponto de partida real é LWW com aviso (`FASE0-P01.md`) |
 | P-10 | Corrigir `SPEC.md` §3 e §9 (premissa do `StorageProvider`, removido no Warden) | Depende do dono; ver ADR 0003 |
 | P-04 | Backup externo obrigatório ou opcional no MVP? | |
 | P-05 | Quanto histórico de versões manter e por quanto tempo? | |
@@ -17,6 +16,7 @@ Decisões em aberto, vindas do `SPEC.md` §15 (nome e licença já decididos: AD
 | P-11 | `sync_secrets.json` do Warden grava a `vault_key` em claro sem permissão `0o600` | `warden/crates/warden-sync/src/manifest.rs` `save_secrets` usa `std::fs::write`; já os logins OAuth no mesmo crate recebem `0o600` (`oauth.rs:95`). Correção é um PR no Warden; verificar também o `umask` e a pasta `~/.warden` |
 | P-12 | Rotação e revogação de dispositivo perdido | A frase BIP-39 (ADR 0004) não resolve; definir o que acontece com o histórico já cifrado |
 | P-13 | Crate de BIP-39 (qual, auditoria, manutenção) | Verificar antes da Fase 1; ADR 0004 |
+| P-14 | Hipótese: pushes concorrentes de dois dispositivos divergem em silêncio no `warden-sync` (Arweave) | **Não reproduzida**, só leitura de `push.rs` (contador local + 1, delta sem consultar o remoto) e `pull.rs` (ignora contador menor ou igual). Falta checar o `SyncRunner` (`warden-bootstrap::auto_sync`) e o `GitSyncEngine`, e escrever um teste com dois dispositivos falsos (há `fake_arweave_gateway` em `warden-sync/tests`). Se confirmada, é bug do Warden; ADR 0005 |
 
 ## Resolvidas
 
@@ -27,3 +27,4 @@ Decisões em aberto, vindas do `SPEC.md` §15 (nome e licença já decididos: AD
 | P-01 | O que o `StorageProvider` do Warden já implementa | Foi removido; o que existe é o `warden-sync`. `FASE0-P01.md` |
 | (escopo v1) | Consumidores da v1 | Só o Warden, formato versionado, sem chunking, ADR 0003 |
 | P-02 | Recuperação de chave | Frase BIP-39 de 24 palavras que codifica a `vault_key`, ADR 0004 |
+| P-03 | Política de conflito | Detectar divergência (versão base no envio) e preservar o perdedor como `.conflito-*`, sem merge dentro do arquivo, ADR 0005 |
