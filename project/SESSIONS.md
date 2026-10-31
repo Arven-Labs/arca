@@ -2,6 +2,15 @@
 
 Mais recente no topo.
 
+### 2026-10-31 — Sessão 5 (Fase 0, P-14)
+
+- **Pedido**: reproduzir a hipótese do P-14 (envios concorrentes divergem em silêncio).
+- **Decisão do dono**: teste `#[ignore]` num PR do Warden (plano aprovado em plan mode).
+- **Feito**: no Warden, worktree isolado do `origin/main` (`0685c91`, porque o checkout do dono estava em `deps/k256-0.14` com arquivos modificados), branch `test/p14-concurrent-push`, PR [warden#40](https://github.com/Arven-Labs/warden/pull/40) com `crates/warden-sync/tests/concurrent_push.rs`. Rodado com `--ignored`: **falhou como previsto** (A: "older than (or the same as)"; B: "already up to date"; nenhum recebeu o arquivo do outro). Na arca: P-14 e ADR 0005 atualizados.
+- **CI**: arca, `guard` passou no PR #6 (visto com `gh pr checks`, 4s) antes deste ajuste do registro. Warden #40: `guard` e `Changed areas` passaram; `Rust (clippy and tests)` e os demais estavam pendentes na última leitura, **não aguardei o fim**.
+- **Não verificado**: `cargo test --workspace` do Warden; Arweave e celular reais (só fakes); o `GitSyncEngine` contra a mesma corrida; o CI completo do warden#40.
+- **Fica**: decidir a correção no Warden (versão base no envio, ADR 0005); registrar o P-14 no `PENDING.md` do Warden; P-12 (rotação e revogação); P-11 e P-13; backends e stack (P-04 a P-08); P-10.
+
 ### 2026-10-31 — Sessão 4 (Fase 0, P-03)
 
 - **Pedido**: seguir a Fase 0 pelo P-03 (política de conflito).
