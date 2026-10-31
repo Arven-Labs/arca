@@ -6,9 +6,9 @@ Decisões em aberto, vindas do `SPEC.md` §15 (nome e licença já decididos: AD
 
 | ID | Pendência | Observação |
 |---|---|---|
-| P-01 | O que o `StorageProvider` do Warden já implementa (sync, versionamento, criptografia)? | Primeira tarefa da Fase 0; ler o código do Warden |
-| P-02 | Recuperação de chave: frase de recuperação ou chave exportável? | Ponto mais crítico do MVP (spec §6) |
-| P-03 | Conflitos: CRDT (Automerge ou Loro) ou last-writer-wins com conflito explícito? | Spec §5 sugere começar simples |
+| P-02 | Recuperação de chave: frase de recuperação ou chave exportável? | Ponto mais crítico do MVP (spec §6). Hoje não há nenhuma (`FASE0-P01.md`) |
+| P-03 | Conflitos: manter last-writer-wins com aviso (como o `warden-sync`), com cópia de segurança do sobrescrito, ou CRDT (Automerge ou Loro)? | Ponto de partida real é LWW com aviso (`FASE0-P01.md`) |
+| P-10 | Corrigir `SPEC.md` §3 e §9 (premissa do `StorageProvider`, removido no Warden) | Depende do dono; ver ADR 0003 |
 | P-04 | Backup externo obrigatório ou opcional no MVP? | |
 | P-05 | Quanto histórico de versões manter e por quanto tempo? | |
 | P-06 | Orçamento mensal aceitável para o backup externo | Pesquisar preços atuais antes (spec §10, item 5) |
@@ -22,3 +22,5 @@ Decisões em aberto, vindas do `SPEC.md` §15 (nome e licença já decididos: AD
 |---|---|---|
 | (nome) | Nome definitivo do projeto | arca, ADR 0001 |
 | (licença) | Licença e visibilidade do repositório | MIT, público, ADR 0002 |
+| P-01 | O que o `StorageProvider` do Warden já implementa | Foi removido; o que existe é o `warden-sync`. `FASE0-P01.md` |
+| (escopo v1) | Consumidores da v1 | Só o Warden, formato versionado, sem chunking, ADR 0003 |
