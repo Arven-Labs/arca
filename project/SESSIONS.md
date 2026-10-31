@@ -2,6 +2,15 @@
 
 Mais recente no topo.
 
+### 2026-10-31 — Sessão 4 (Fase 0, P-03)
+
+- **Pedido**: seguir a Fase 0 pelo P-03 (política de conflito).
+- **Decisão do dono**: detectar divergência e preservar o perdedor como cópia, sem merge dentro do arquivo (ADR 0005); abrir a hipótese da corrida de contador como P-14.
+- **Feito** (branch `docs/fase0-p03`): ADR 0005; `PENDING.md` com P-03 resolvida e P-14 nova. Só leitura de `push.rs`, `pull.rs` e `diff.rs` do `warden-sync`; nada executado.
+- **CI**: `guard` passou no PR #5 (visto com `gh pr checks`, 4s) antes deste ajuste do registro.
+- **Não verificado**: a corrida de contador **não foi reproduzida** (é leitura de código); o `SyncRunner` do auto-sync e o `GitSyncEngine` não foram lidos; nada rodou.
+- **Fica**: P-14 (reproduzir no Warden com dispositivos falsos); P-12 (rotação e revogação); P-11 e P-13; backends e stack (P-04 a P-08); P-10.
+
 ### 2026-10-31 — Sessão 3 (Fase 0, P-02)
 
 - **Pedido**: seguir a Fase 0 pelo P-02 (recuperação de chave).
