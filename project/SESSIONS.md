@@ -8,7 +8,7 @@ Mais recente no topo.
 - **Decisão do dono**: rotação manual por época, com `key_epoch` no formato desde o dia 1 (ADR 0006); a rotação invalida a frase anterior (nota no ADR 0004).
 - **Feito** (branch `docs/fase0-p12`): ADR 0006; ADR 0004 com a consequência da frase; `PENDING.md` com P-12 resolvida. Só leitura de `pairing/` e `manifest.rs` do `warden-sync`; nada executado.
 - **Mesclado antes, no Warden**: [warden#40](https://github.com/Arven-Labs/warden/pull/40) (teste `#[ignore]` do P-14), mesclado com o job `Rust (clippy and tests)` ainda pendente; conferir o CI da `main` do Warden.
-- **CI**: a preencher com o resultado real do PR.
+- **CI**: `guard` passou no PR #7 (visto com `gh pr checks`, 4s) antes deste ajuste do registro. `CI` e `Web E2E` da `main` do Warden (`1c8fb0a`) ainda em andamento na última leitura.
 - **Não verificado**: permanência do dado no pin do TruthID; como impedir publicações com a chave antiga depois da rotação (Fase 4); `GitSyncEngine` na troca de época; o CI final da `main` do Warden.
 - **Fica**: P-14 (decidir a correção no Warden); P-11 e P-13; backends e stack (P-04 a P-08); P-10.
 
