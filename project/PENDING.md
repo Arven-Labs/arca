@@ -7,10 +7,8 @@ Decisões em aberto, vindas do `SPEC.md` §15 (nome e licença já decididos: AD
 | ID | Pendência | Observação |
 |---|---|---|
 | P-10 | Corrigir `SPEC.md` §3 e §9 (premissa do `StorageProvider`, removido no Warden) | Depende do dono; ver ADR 0003 |
-| P-04 | Backup externo obrigatório ou opcional no MVP? | |
 | P-05 | Quanto histórico de versões manter e por quanto tempo? | |
-| P-06 | Orçamento mensal aceitável para o backup externo | Pesquisar preços atuais antes (spec §10, item 5) |
-| P-07 | Começar só com o nó servidor e deixar P2P para depois? | Spec §14 aponta NAT, relay e descoberta como risco |
+| P-06 | Orçamento mensal aceitável para o backup externo | Sem teto definido. Preços lidos em 2026-10-31 no ADR 0007 (B2 abaixo de US$ 1/mês até 100 GB; Storj com piso de US$ 5); medir o tamanho real do Vault antes de fixar |
 | P-08 | Stack: linguagem, biblioteca de criptografia auditada, chunking e formato do manifest | Depende de P-01 a P-03; ADR depois da Fase 0 |
 | P-09 | Identidade da marca e domínio | O nome arca tem homônimos conhecidos, ver ADR 0001 |
 | P-11 | `sync_secrets.json` do Warden grava a `vault_key` em claro sem permissão `0o600` | `warden/crates/warden-sync/src/manifest.rs` `save_secrets` usa `std::fs::write`; já os logins OAuth no mesmo crate recebem `0o600` (`oauth.rs:95`). Correção é um PR no Warden; verificar também o `umask` e a pasta `~/.warden` |
@@ -26,5 +24,7 @@ Decisões em aberto, vindas do `SPEC.md` §15 (nome e licença já decididos: AD
 | P-01 | O que o `StorageProvider` do Warden já implementa | Foi removido; o que existe é o `warden-sync`. `FASE0-P01.md` |
 | (escopo v1) | Consumidores da v1 | Só o Warden, formato versionado, sem chunking, ADR 0003 |
 | P-02 | Recuperação de chave | Frase BIP-39 de 24 palavras que codifica a `vault_key`, ADR 0004 |
+| P-04 | Backup externo obrigatório ou opcional | Opcional, com aviso abaixo de 2 locais, ADR 0007 |
+| P-07 | P2P no MVP ou só o nó servidor | Só disco, hub e S3 na v1; P2P (Iroh) depois, ADR 0007 |
 | P-12 | Rotação e revogação de dispositivo perdido | Rotação manual por época: `key_epoch` no formato, snapshot completo, re-parear os restantes, frase nova; o histórico antigo segue legível por quem tem a chave velha, ADR 0006 |
 | P-03 | Política de conflito | Detectar divergência (versão base no envio) e preservar o perdedor como `.conflito-*`, sem merge dentro do arquivo, ADR 0005 |

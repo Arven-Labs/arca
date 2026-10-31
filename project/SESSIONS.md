@@ -2,6 +2,16 @@
 
 Mais recente no topo.
 
+### 2026-10-31 — Sessão 7 (Fase 0, backends: P-04, P-06, P-07)
+
+- **Pedido**: seguir a Fase 0 pelos backends (backup externo, orçamento e P2P).
+- **Decisão do dono**: backup externo opcional com aviso; backends da v1 = disco, hub e S3-compatível, com git e Arweave ficando no `warden-sync`; P2P depois, começando pelo hub; orçamento sem teto por enquanto (ADR 0007).
+- **Feito** (branch `docs/fase0-backends`): ADR 0007 com os preços e estados lidos hoje; `PENDING.md` com P-04 e P-07 resolvidas e P-06 atualizada. Pesquisa: páginas oficiais do B2, Storj, Garage e Iroh, e a API do GitHub para licença e atividade.
+- **CI**: a preencher com o resultado real do PR.
+- **Não verificado**: os preços não têm data de vigência nas páginas; a API S3 do B2 e do Storj não foi testada; o Object Lock do B2; a documentação do Garage além da página inicial; o custo real do Vault.
+- **CI do Warden**: o PR [warden#40](https://github.com/Arven-Labs/warden/pull/40) foi mesclado com o job `Rust` pendente; o `Web E2E` da `main` do Warden (`1c8fb0a`) falhou em `agents.test.mjs:82` (teste já visto como instável lá); não reexecutei.
+- **Fica**: P-08 (stack: linguagem, biblioteca de criptografia, manifest); P-05 (histórico de versões); P-10, P-11, P-13, P-14.
+
 ### 2026-10-31 — Sessão 6 (Fase 0, P-12)
 
 - **Pedido**: seguir a Fase 0 pelo P-12 (rotação e revogação de dispositivo perdido).
