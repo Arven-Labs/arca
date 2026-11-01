@@ -2,6 +2,15 @@
 
 Mais recente no topo.
 
+### 2026-11-01 — Sessão 13 (P-13: crate `bip39`)
+
+- **Pedido**: confirmar o `bip39` 3.0.0 antes da Fase 1 (plano aprovado em plan mode).
+- **Decisão do dono**: manter `bip39` `=3.0.0` (opção A), sem features extras além de `std` e `zeroize`.
+- **Feito** (branch `docs/fase0-p13`): `PENDING.md` com P-13 resolvida e seus limites; `OVERVIEW.md`; nota no ADR 0008. Medição: `.crate` baixado e comparado com a tag `v3.0.0` (`src/` idêntico); leitura de `lib.rs` (parse, checksum, `to_entropy`, `Debug`, `zeroize`); crates.io (donos, versões, dependências); issues e advisories do repo no GitHub; `advisory-db` do RustSec. Nada executado do crate.
+- **CI**: ainda não conferido neste registro (ver o PR).
+- **Não verificado**: auditoria formal (não achei); por que a 2.3.0 foi retirada; a lista de palavras contra o BIP-39 oficial (só vi que os vetores estão nos testes); build em Android `armv7`; nada implementado.
+- **Fica**: P-05; P-06; P-10; P-15; P-16. Fase 1 sem decisão bloqueante.
+
 ### 2026-10-31 — Sessão 12 (P-11 e P-14 corrigidos no Warden)
 
 - **Pedido**: fechar P-11 e P-14 antes da Fase 1.
