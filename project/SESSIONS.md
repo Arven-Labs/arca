@@ -2,6 +2,18 @@
 
 Mais recente no topo.
 
+### 2026-11-01 — Sessão 26 (Fase 1, PR 7: frase de recuperação BIP-39)
+
+- **Pedido**: PR 7 da Fase 1, o último (plano aprovado em plan mode; áreas de chaves e recuperação confirmadas pelo dono). PR 6 (#27) já mesclado antes.
+- **Decisões do dono**: as seis crates novas e suas versões (`bip39` `=3.0.0`, `bitcoin_hashes` 0.14.101, `hex-conservative` 0.2.3, `arrayvec` 0.7.8, `zeroize_derive` 1.5.0, `syn` 2.0.119); aprovou os testes e as divergências 1 a 3 abaixo antes da implementação.
+- **Feito** (branch `feat/fase1-recovery`, PR #28): `recovery.rs` (`RecoveryPhrase`, `PhraseError`, `VaultKey::to_phrase`/`from_phrase`), `VaultKey::generate` e `as_bytes` em `crypto.rs`, `SPEC-TECNICA.md` §5.2, `OVERVIEW.md`, notas nos ADRs 0004 e 0008. `Cargo.lock` com 50 crates (eram 44).
+- **Divergências do plano, aprovadas**: (1) `to_phrase` devolve `Result` (a crate não falha com 32 bytes, mas assim não há pânico no caminho da chave); (2) sem teste de "não implementa `Display`": garantido por inspeção, e listado como não verificado; (3) um `allow(dead_code)` provisório em `as_bytes`, removido na implementação.
+- **Testes** (escritos antes, 15 falhando contra `todo!()`, 171 passando no total): os 8 vetores oficiais de 256 bits (baixados do `trezor/python-mnemonic` e conferidos com um validador Python independente com a lista oficial e SHA-256), 400 ida e volta, recusas (contagem de palavras, palavra desconhecida na posição certa, checksum, acento, outro idioma, NUL, BOM, largura total), tolerância de digitação (maiúsculas, tabs, NBSP, espaço ideográfico), 2.300 textos arbitrários sem pânico, sigilo do `Debug` e dos erros, e a restauração do zero com só o armazenamento copiado e as 24 palavras. Outra frase válida falha com `Decrypt`.
+- **Verificado localmente**: `fmt`, `clippy --workspace --all-targets --locked -D warnings`, `test --workspace --locked` (171), `cargo audit --deny warnings` (50 crates, sem achados).
+- **CI**: no PR #28, `guard` (4s), `rust` (37s) e `audit` (3m0s) passaram no commit do código (vistos com `gh pr checks`); o commit deste registro roda de novo.
+- **Não verificado**: que `RecoveryPhrase` não implementa `Display` (só por inspeção); cópias na pilha e em registradores dentro da crate e do compilador; tempo constante da busca de palavra; auditoria formal da `bip39`; Windows e macOS; revisão independente (Fase 4).
+- **Fica**: a Fase 1 fecha quando o PR 7 for mesclado; Fase 2 (sync entre dispositivos) ainda sem plano; P-19 a P-25 e P-09.
+
 ### 2026-11-01 — Sessão 25 (Fase 1, PR 6: núcleo local)
 
 - **Pedido**: PR 6 da Fase 1 (plano aprovado em plan mode; áreas de segredos e E/S confirmadas pelo dono). PR 5 (#26) já mesclado antes.
