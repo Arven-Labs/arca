@@ -4,6 +4,7 @@
 
 use crate::crypto::{open, seal, EpochKeys};
 use crate::disk::{create_private_dir, write_atomic};
+use crate::envelope::Header;
 use crate::error::Error;
 use crate::heads::{tips, Head};
 use crate::manifest::{validate_device, validate_path, Class, FileEntry, Hash32, Manifest};
@@ -59,6 +60,10 @@ pub enum EngineError {
         "storage has {tips} tips and {rejected} unreadable manifests; refusing to build on it"
     )]
     Diverged { tips: usize, rejected: usize },
+    /// Existe manifest de uma época mais nova que a das chaves deste dispositivo: ele precisa
+    /// da chave nova (re-parear, ADR 0006) e não deve construir sobre uma época velha.
+    #[error("storage has a newer key epoch ({found}) than this device's keys ({have})")]
+    NeedsNewKey { have: u32, found: u32 },
     /// A restauração só escreve em pasta inexistente ou vazia.
     #[error("restore target is not empty")]
     TargetNotEmpty,
@@ -72,6 +77,15 @@ pub enum EngineError {
     Io(io::ErrorKind),
 }
 
+/// Resultado de ler um manifest com as chaves do dispositivo.
+enum Read {
+    Opened(Manifest),
+    /// É da época das chaves, mas não abriu (tag, JSON ou regra do manifest).
+    Unreadable(EngineError),
+    /// Cabeçalho de outra época: não é aberto aqui.
+    OtherEpoch(u32),
+}
+
 /// Um manifest que não pôde ser lido e por quê.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rejected {
@@ -83,6 +97,9 @@ pub struct Rejected {
 pub struct Heads {
     pub tips: Vec<Head>,
     pub rejected: Vec<Rejected>,
+    /// Manifests de épocas anteriores à maior vista (P-24): histórico, nunca pontas, não
+    /// bloqueiam o snapshot. Ordenados por hash.
+    pub superseded: Vec<ObjectId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,25 +146,64 @@ impl<S: BlobStore> Engine<S> {
         })
     }
 
-    /// Lê todos os manifests do armazenamento e calcula as pontas. Um manifest ilegível vai
-    /// para `rejected` e nunca vira ponta; backend fora do ar aborta (não é "ilegível").
+    /// Lê todos os manifests do armazenamento e calcula as pontas. Só a **maior época** vista
+    /// (lida do cabeçalho, em claro) conta (P-24): as anteriores vão para `superseded`, sem
+    /// serem abertas. Se a maior época é mais nova que a das chaves, `NeedsNewKey`. Um manifest
+    /// ilegível da época que conta vai para `rejected` e nunca vira ponta; backend fora do ar
+    /// aborta (não é "ilegível").
     pub async fn heads(&self) -> Result<Heads, EngineError> {
+        let mine = self.keys.epoch();
         let mut readable = Vec::new();
         let mut rejected = Vec::new();
+        // (id, época do cabeçalho) dos que este dispositivo não abriu
+        let mut others: Vec<(ObjectId, u32)> = Vec::new();
+        let mut mine_seen = false;
         for id in self.store.list(ObjectKind::Manifest).await? {
-            match self.read_manifest(&id).await {
-                Ok(manifest) => readable.push((id, manifest)),
+            match self.classify_manifest(&id).await {
+                Ok(Read::Opened(manifest)) => {
+                    mine_seen = true;
+                    readable.push((id, manifest));
+                }
+                Ok(Read::Unreadable(error)) => {
+                    mine_seen = true;
+                    rejected.push(Rejected { id, error });
+                }
+                Ok(Read::OtherEpoch(epoch)) => others.push((id, epoch)),
                 Err(e @ EngineError::Store(StoreError::Unavailable(_))) => return Err(e),
+                // sem época conhecida (corrompido, ausente, cabeçalho inválido)
                 Err(error) => rejected.push(Rejected { id, error }),
             }
         }
+        let newest_other = others.iter().map(|(_, epoch)| *epoch).max();
+        if let Some(found) = newest_other.filter(|epoch| *epoch > mine) {
+            return Err(EngineError::NeedsNewKey { have: mine, found });
+        }
+        // Daqui em diante nenhuma época em `others` passa da minha. Se há manifest meu (aberto
+        // ou ilegível na minha época), a minha é a maior; senão, a maior de `others` conta e,
+        // sem as chaves dela, é `rejected` com `WrongKeyEpoch`, como antes do P-24.
+        let counting = if mine_seen { Some(mine) } else { newest_other };
+        let mut superseded = Vec::new();
+        for (id, epoch) in others {
+            if Some(epoch) == counting {
+                let error = EngineError::Object(Error::WrongKeyEpoch {
+                    found: epoch,
+                    expected: mine,
+                });
+                rejected.push(Rejected { id, error });
+            } else {
+                superseded.push(id);
+            }
+        }
         rejected.sort_by_key(|r| r.id.hash);
+        superseded.sort_by_key(|id| id.hash);
         Ok(Heads {
             tips: tips(readable),
             rejected,
+            superseded,
         })
     }
 
+    /// Abre o manifest com as chaves do dispositivo (erro se for de outra época).
     async fn read_manifest(&self, id: &ObjectId) -> Result<Manifest, EngineError> {
         let bytes = verified_get(&self.store, id)
             .await?
@@ -155,10 +211,26 @@ impl<S: BlobStore> Engine<S> {
         Ok(Manifest::open(&self.keys, &bytes)?)
     }
 
+    /// Para `heads`: abre o manifest se ele é da época das chaves; senão devolve só a época
+    /// do cabeçalho.
+    async fn classify_manifest(&self, id: &ObjectId) -> Result<Read, EngineError> {
+        let bytes = verified_get(&self.store, id)
+            .await?
+            .ok_or(EngineError::MissingObject)?;
+        let (header, _) = Header::decode(&bytes)?;
+        if header.key_epoch != self.keys.epoch() {
+            return Ok(Read::OtherEpoch(header.key_epoch));
+        }
+        Ok(match Manifest::open(&self.keys, &bytes) {
+            Ok(manifest) => Read::Opened(manifest),
+            Err(e) => Read::Unreadable(e.into()),
+        })
+    }
+
     /// Fotografa as pastas de `roots` e grava o estado como um manifest novo (blobs primeiro,
     /// manifest por último). `now` são segundos Unix (UTC), injetados para testes determinísticos.
     pub async fn snapshot(&self, roots: &Roots, now: u64) -> Result<Snapshot, EngineError> {
-        let Heads { tips, rejected } = self.heads().await?;
+        let Heads { tips, rejected, .. } = self.heads().await?;
         if tips.len() > 1 || !rejected.is_empty() {
             return Err(EngineError::Diverged {
                 tips: tips.len(),
@@ -861,6 +933,151 @@ mod tests {
                 })
             }]
         );
+    }
+
+    // ---------- épocas (P-24) ----------
+
+    /// Grava um manifest vazio da época `epoch` (como se fosse o primeiro de uma rotação, ou
+    /// um publicado por um dispositivo que ficou na chave velha).
+    async fn put_epoch_manifest(
+        rig: &Rig,
+        epoch: u32,
+        base: Option<ObjectId>,
+        counter: u64,
+    ) -> ObjectId {
+        let m = Manifest {
+            format_version: FORMAT_VERSION as u16,
+            key_epoch: epoch,
+            base_version: base.map(|id| Hash32(id.hash)),
+            merged_from: vec![],
+            counter,
+            device: "pc".to_string(),
+            created_at: 1,
+            files: vec![],
+        };
+        let sealed = m.seal(&keys(epoch)).unwrap();
+        rig.store.put(&sealed.id, &sealed.bytes).await.unwrap();
+        sealed.id
+    }
+
+    fn engine_at(rig: &Rig, epoch: u32) -> Engine<Backend> {
+        Engine::new(rig.store.clone(), keys(epoch), "pc").unwrap()
+    }
+
+    /// Época 1 com um snapshot real e, depois da rotação, a época 2 (cadeia nova, base nula).
+    async fn rotated(rig: &Rig, vault: &Path) -> (ObjectId, ObjectId) {
+        write(vault, "a.md", b"1");
+        let (old, ..) = created(
+            rig.engine("pc")
+                .snapshot(&vault_only(vault), 1)
+                .await
+                .unwrap(),
+        );
+        let new = put_epoch_manifest(rig, 2, None, 1).await;
+        (old, new)
+    }
+
+    #[tokio::test]
+    async fn after_a_rotation_only_the_newest_epoch_has_tips_and_the_old_ones_are_superseded() {
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        let (old, new) = rotated(&rig, &vault).await;
+
+        let heads = engine_at(&rig, 2).heads().await.unwrap();
+        assert_eq!(ids_of(&heads), [new]);
+        assert!(heads.rejected.is_empty());
+        assert_eq!(heads.superseded, [old]);
+    }
+
+    #[tokio::test]
+    async fn snapshot_builds_on_the_new_epoch_despite_the_superseded_ones() {
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        let (_, new) = rotated(&rig, &vault).await;
+
+        let (_, m, _, _) = created(
+            engine_at(&rig, 2)
+                .snapshot(&vault_only(&vault), 2)
+                .await
+                .unwrap(),
+        );
+        assert_eq!(m.key_epoch, 2);
+        assert_eq!(m.base_version, Some(Hash32(new.hash)));
+        assert_eq!(file_paths(&m), ["a.md"]);
+    }
+
+    /// Um dispositivo que ficou na chave velha (e publicou depois da rotação, com contador
+    /// maior) nunca vira ponta nem desfaz a época nova.
+    #[tokio::test]
+    async fn an_old_epoch_manifest_published_after_the_rotation_never_becomes_a_tip() {
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        let (old, new) = rotated(&rig, &vault).await;
+        let late = put_epoch_manifest(&rig, 1, Some(old), 99).await;
+
+        let heads = engine_at(&rig, 2).heads().await.unwrap();
+        assert_eq!(ids_of(&heads), [new]);
+        let mut superseded = vec![old, late];
+        superseded.sort_by_key(|id| id.hash);
+        assert_eq!(heads.superseded, superseded);
+    }
+
+    #[tokio::test]
+    async fn a_device_on_an_old_key_is_told_it_needs_the_new_key_and_writes_nothing() {
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        rotated(&rig, &vault).await;
+        let before = rig.count(ObjectKind::Manifest).await;
+
+        let stale = rig.engine("pc"); // chaves da época 1
+        let expected = EngineError::NeedsNewKey { have: 1, found: 2 };
+        assert_eq!(stale.heads().await, Err(expected.clone()));
+        write(&vault, "b.md", b"2");
+        assert_eq!(stale.snapshot(&vault_only(&vault), 3).await, Err(expected));
+        assert_eq!(rig.count(ObjectKind::Manifest).await, before);
+        assert_eq!(rig.count(ObjectKind::Blob).await, 1);
+    }
+
+    /// A chave velha ainda lê o passado: restaurar uma versão da época 1 funciona depois da
+    /// rotação (ADR 0006: o que foi publicado continua legível por quem tem a chave antiga).
+    #[tokio::test]
+    async fn restoring_an_old_epoch_version_still_works_with_the_old_keys() {
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        let (old, _) = rotated(&rig, &vault).await;
+
+        let target = rig.tmp.path().join("restaurado");
+        rig.engine("pc")
+            .restore(&old, &vault_only(&target))
+            .await
+            .unwrap();
+        assert_eq!(tree(&target), tree(&vault));
+    }
+
+    /// Um manifest ilegível dentro da maior época continua bloqueando o snapshot (P-14).
+    #[tokio::test]
+    async fn an_unreadable_manifest_in_the_newest_epoch_still_blocks() {
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        let (_, new) = rotated(&rig, &vault).await;
+        let broken = put_epoch_manifest(&rig, 2, Some(new), 2).await;
+        fs::write(rig.store_dir().join(broken.to_string()), b"adulterado").unwrap();
+
+        let eng = engine_at(&rig, 2);
+        let heads = eng.heads().await.unwrap();
+        assert_eq!(ids_of(&heads), [new]);
+        assert_eq!(heads.rejected.len(), 1);
+        assert_eq!(
+            eng.snapshot(&vault_only(&vault), 2).await,
+            Err(EngineError::Diverged {
+                tips: 1,
+                rejected: 1
+            })
+        );
+    }
+
+    fn ids_of(heads: &Heads) -> Vec<ObjectId> {
+        heads.tips.iter().map(|h| h.id).collect()
     }
 
     #[tokio::test]
