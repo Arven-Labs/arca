@@ -48,11 +48,11 @@ jobs:
 
       - name: Toolchain
         run: |
-          rustup toolchain install 1.87.0 --profile minimal
-          rustc +1.87.0 --version
+          rustup toolchain install 1.88.0 --profile minimal
+          rustc +1.88.0 --version
 
       - name: Check
-        run: cargo +1.87.0 check --workspace --locked
+        run: cargo +1.88.0 check --workspace --locked
 
   # Advisories do RustSec contra o Cargo.lock. A ferramenta é compilada do crates.io
   # numa versão fixa (sem ação de terceiros); o custo é alguns minutos por execução.
