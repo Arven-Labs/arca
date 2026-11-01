@@ -2,6 +2,15 @@
 
 Mais recente no topo.
 
+### 2026-11-01 — Sessão 14 (P-10: `SPEC.md` corrigida)
+
+- **Pedido**: finalizar a Fase 0 (dono: "prefiro finalizar a 0" em vez de começar a Fase 1).
+- **Feito** (branch `docs/fase0-p10`): `SPEC.md` §2 (referência ao `StorageProvider`), §3 (reescrito: o `StorageProvider` foi removido, a arca é a abstração nova, perguntas respondidas com ponteiros) e §9 (interface `BlobStore`, substituição gradual do `warden-sync`); `PENDING.md` com P-10 resolvida; `OVERVIEW.md`. Só docs; nada executado.
+- **Deixado como estava**: §11 e §15 do `SPEC.md` (registro histórico da Fase 0).
+- **CI**: ainda não conferido neste registro (ver o PR).
+- **Não verificado**: se o §9 ("substituição gradual") é a intenção do dono para o `warden-sync`; é a leitura de P-16, ainda em aberto.
+- **Fica**: P-05; P-06; P-15; P-16. Nenhuma bloqueia a Fase 1; P-15 é da Fase 3 e P-16 da troca de caminho no Warden.
+
 ### 2026-11-01 — Sessão 13 (P-13: crate `bip39`)
 
 - **Pedido**: confirmar o `bip39` 3.0.0 antes da Fase 1 (plano aprovado em plan mode).

@@ -14,19 +14,20 @@ A camada nasce dentro do Warden como primeiro consumidor, mas com interface desa
 
 - **Não criar rede de armazenamento nova.** Integrar o que já existe.
 - **Local-first:** toda leitura e escrita acontece no disco local; a rede só replica em segundo plano.
-- **Abstração por trait/interface** (`BlobStore`), com backends plugáveis, no mesmo espírito do `StorageProvider` já decidido para o Warden.
+- **Abstração por trait/interface** (`BlobStore`), com backends plugáveis, extraída do `warden-sync` (o `StorageProvider` do Warden foi removido; ver §3).
 - **Sem token próprio.** Sem blockchain no caminho crítico.
 - **Extrair a abstração a partir do Warden**, não projetá-la no vácuo. O Anchor entra depois como segundo consumidor para validar que a camada é genérica.
 
-## 3. Relação com o StorageProvider do Warden
+## 3. Relação com o Warden (`warden-sync`)
 
-O Warden já prevê um `StorageProvider` com opções local, nó remoto próprio, servidor hospedado pago e Vault via TruthID. O Arven Storage deve ser a implementação de referência dessa interface, não um sistema paralelo.
+O `StorageProvider` que este documento previa **não existe mais**: foi removido de propósito na Sessão 105 do Warden (ADR 0003; levantamento em `FASE0-P01.md`). O que existe é o crate `warden-sync` (`SyncEngine` sobre Arweave, `GitSyncEngine`, `manifest`, `bundle`, `diff`, `pairing`), que sincroniza o Vault por snapshots cifrados. A arca não implementa uma interface existente: é a abstração nova (`BlobStore`), extraída do `warden-sync`.
 
-**A verificar no código do Warden antes de começar:**
+**Perguntas desta seção, respondidas na Fase 0:**
 
-- O que o `StorageProvider` já cobre hoje (sync, versionamento, criptografia?).
-- Como o espelhamento em IPFS planejado se encaixa, ou se pode ser substituído.
-- Como o nó servidor central se relaciona com a replicação (servidor como réplica privilegiada, não como autoridade).
+- O que o Warden cobre hoje (sync, versionamento, criptografia): `FASE0-P01.md`.
+- Convivência e migração entre o `warden-sync` e a arca: P-16 (em aberto).
+- O servidor central é uma réplica, não a autoridade: ADR 0007 (hub como réplica) e ADR 0005 (manifests imutáveis com `base_version`).
+- O espelhamento em IPFS não está entre os backends da v1 (disco, hub e S3): ADR 0007.
 
 ## 4. Princípios
 
@@ -90,7 +91,7 @@ O celular, como já decidido, nunca atua como servidor; pode ser cliente de leit
 
 ## 9. Integração com o Warden
 
-- Implementar como módulo/crate dedicado, consumido pelo Warden via interface estável.
+- Implementar como módulo/crate dedicado, consumido pelo Warden via interface estável (`BlobStore`, `SPEC-TECNICA.md`), em substituição gradual ao `warden-sync` (P-16).
 - Configuração por perfil: quais backends, quantas réplicas, política de retenção de versões antigas.
 - O índice de busca semântica (embeddings) deve ser **reconstruível a partir do Vault**, não sincronizado como dado primário. Isso evita sincronizar artefato pesado e derivado.
 - Compatibilidade com o modo hospedado: a mesma camada deve funcionar com o backend em servidor do Fabio, respeitando o objetivo de baixo consumo de RAM por usuário.
