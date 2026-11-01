@@ -9,18 +9,19 @@ Decisões em aberto, vindas do `SPEC.md` §15 (nome e licença já decididos: AD
 | P-09 | Identidade da marca e domínio | O nome arca tem homônimos conhecidos, ver ADR 0001 |
 | P-19 | Tornar os jobs `rust` e `audit` checks obrigatórios no ruleset `protect-main` (hoje só o `guard` é) | Muda o `ruleset-protect-main.json` e o `padrao/` do workspace; decisão do dono. O `audit` ainda não foi visto falhando diante de um advisory, só o caso verde |
 | P-20 | `.github/dependabot.yml` para `cargo` e `github-actions` | PR à parte; o repo já tem alertas do Dependabot ligados (0 abertos em 2026-11-01), faltam as atualizações automáticas |
-| P-21 | Declarar o `rust-version` (MSRV) do `arca-core` | Ninguém mediu. O código usa `as_chunks` (estável em versões recentes) e async fn em trait na Fase 1; medir antes de declarar |
 | P-22 | Causa do incidente do PR 2 (Sessão 20): edições em arquivos rastreados voltaram ao `HEAD` sem `reset` nem `checkout` no reflog | Não reproduzido. Se voltar a acontecer, investigar o ambiente (hook, editor, sincronização) antes de continuar |
 | P-23 | Identidade de uma entrada do manifest: hoje é só o `path`, então o mesmo `path` em classes diferentes (por exemplo `config.toml` na raiz do Vault e o da classe `config`) é duplicata e o snapshot recusa com `PathCollision` | Decisão do dono no PR 6: manter e registrar. Mudar para `(classe, path)` altera `Manifest::validate` (ordem e unicidade) e o formato; decidir com o contrato do Warden na Fase 2, antes de haver dado real |
 | P-24 | Política para manifests de épocas antigas depois de uma rotação: hoje contam como ilegíveis (`rejected`) e bloqueiam o `snapshot` | Só aparece quando a rotação (ADR 0006) for implementada; definir na Fase 2 junto com o "último manifest aceito" |
 | P-25 | Limpeza de `.tmp-*` órfãos no `DiskStore` e no destino de restauração | Não existe na v1; um `put` interrompido deixa no máximo um temporário. Baixa prioridade |
 
-Nenhuma bloqueia o PR 7 da Fase 1.
+Nenhuma bloqueia o início da Fase 2, mas a P-23 e a P-24 precisam ser decididas nela.
 
 ## Resolvidas
 
 | ID | Pendência | Resolução |
 |---|---|---|
+| P-21 | Declarar o `rust-version` (MSRV) do `arca-core` | `rust-version = "1.88"` no workspace, medido em 2026-11-01: `cargo +1.88.0 check --workspace --locked` passa; com 1.85.0 o cargo recusa (`sha2` 0.11.1 exige 1.88 e `ctutils` 0.4.7, 1.87). 1.86 e 1.87 não foram compiladas: a exigência declarada do `sha2` já as exclui, e `slice::as_chunks` (usado em `object.rs`, `manifest.rs`) é estável desde 1.88. Job `msrv` no `rust.yml` (não obrigatório no ruleset). **Limites:** vale para a biblioteca; os testes usam APIs mais novas (`is_multiple_of`) e rodam só na toolchain estável; o mínimo sobe se uma dependência nova pedir mais |
+
 | (nome) | Nome definitivo do projeto | arca, ADR 0001 |
 | (licença) | Licença e visibilidade do repositório | MIT, público, ADR 0002 |
 | P-01 | O que o `StorageProvider` do Warden já implementa | Foi removido; o que existe é o `warden-sync`. `FASE0-P01.md` |

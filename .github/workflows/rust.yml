@@ -37,6 +37,23 @@ jobs:
       - name: Test
         run: cargo test --workspace --locked
 
+  # Versão mínima do Rust (`rust-version` do Cargo.toml, medida em 2026-11-01: 1.88 por causa de
+  # `sha2` 0.11 e de `slice::as_chunks`). Só compila a biblioteca; os testes usam APIs mais
+  # novas e rodam no job `rust`. Se uma dependência subir o mínimo, este job vermelho avisa.
+  msrv:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal
+          rustc +1.88.0 --version
+
+      - name: Check
+        run: cargo +1.88.0 check --workspace --locked
+
   # Advisories do RustSec contra o Cargo.lock. A ferramenta é compilada do crates.io
   # numa versão fixa (sem ação de terceiros); o custo é alguns minutos por execução.
   audit:

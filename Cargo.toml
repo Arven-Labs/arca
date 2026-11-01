@@ -4,6 +4,7 @@ members = ["crates/arca-core"]
 
 [workspace.package]
 edition = "2021"
+rust-version = "1.88"
 license = "MIT"
 repository = "https://github.com/Arven-Labs/arca"
 

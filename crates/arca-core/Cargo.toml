@@ -5,6 +5,7 @@ description = "Núcleo da arca: armazenamento e sincronização local-first com 
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+rust-version.workspace = true
 publish = false
 
 [lints]

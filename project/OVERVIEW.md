@@ -4,7 +4,7 @@
 Camada local-first de armazenamento e sincronização, com criptografia no cliente. Nasce dentro do ecossistema do Warden como primeiro consumidor (sincronizar e fazer backup do Vault entre os computadores do usuário), com interface desacoplada (`BlobStore`) para servir depois Anchor, Kin e TruthID. Não cria rede nova, não tem token e não usa blockchain no caminho crítico. Detalhes no `SPEC.md`.
 
 ## Stack
-Decidida na Fase 0 (ADR 0008): Rust, XChaCha20-Poly1305, HKDF-SHA256, manifest JSON versionado (`format_version`, `key_epoch`, `base_version`, `alg`) com blobs binários cifrados, sem chunking na v1. Recuperação por frase BIP-39 (ADR 0004), conflito por detecção e cópia do perdedor (ADR 0005), rotação por época (ADR 0006), backends disco, hub e S3 opcional (ADR 0007). Cliente S3: `object_store`, escolhido após spike contra Garage local (ADR 0008, P-15).
+Decidida na Fase 0 (ADR 0008): Rust, XChaCha20-Poly1305, HKDF-SHA256, manifest JSON versionado (`format_version`, `key_epoch`, `base_version`, `alg`) com blobs binários cifrados, sem chunking na v1. Recuperação por frase BIP-39 (ADR 0004), conflito por detecção e cópia do perdedor (ADR 0005), rotação por época (ADR 0006), backends disco, hub e S3 opcional (ADR 0007). Cliente S3: `object_store`, escolhido após spike contra Garage local (ADR 0008, P-15). Rust mínimo (`rust-version`): **1.88**, medido e conferido pelo job `msrv` do CI (P-21).
 
 ## Licença
 MIT (ADR 0002).
