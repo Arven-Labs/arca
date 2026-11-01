@@ -7,7 +7,7 @@ Mais recente no topo.
 - **Pedido**: revisar o P-17 (cripto proposta na `SPEC-TECNICA.md`).
 - **Decisão do dono**: as quatro recomendações, confirmadas item a item: id = SHA-256 do texto cifrado; cabeçalho inteiro como AAD; duas subchaves HKDF por época; sem assinatura na v1 (ADR 0009). `merged_from` entrou junto, por ser só registro.
 - **Feito** (branch `docs/fase0-p17`): ADR 0009; `SPEC-TECNICA.md` com as marcações de proposta trocadas por "decidido"; `PENDING.md` com P-17 resolvida; `OVERVIEW.md`. Só edição de docs; nada executado.
-- **CI**: a preencher depois de abrir o PR.
+- **CI**: `guard` passou no PR #11 (visto com `gh pr checks`, 6s) antes deste ajuste do registro.
 - **Não verificado**: nada implementado nem testado; rótulos do HKDF não conferidos contra os do `warden-sync` e do TruthID; rollback só mitigado após o primeiro acesso; revisão independente fica para a Fase 4.
 - **Fica**: P-18 (escopo de `config.toml` e logins); P-05; P-06; P-10, P-11, P-14; P-13, P-15, P-16.
 
