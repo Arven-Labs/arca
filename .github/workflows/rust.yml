@@ -1,8 +1,9 @@
 name: Rust
 
 # Formatação, lint e testes do workspace. Roda em todo push na main e em todo PR.
-# Não usa segredos. O check `guard` (ci-private-files.yml) continua sendo o único
-# obrigatório no ruleset `protect-main`; este job entra lá por decisão do dono.
+# Não usa segredos. Os checks `guard` (ci-private-files.yml), `rust` e `audit` são
+# obrigatórios no ruleset `protect-main` (ver .github/ruleset-protect-main.json): renomear
+# um desses jobs trava todo PR até o ruleset ser corrigido. O `msrv` não é obrigatório.
 on:
   push:
     branches: [main]

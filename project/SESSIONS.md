@@ -2,6 +2,18 @@
 
 Mais recente no topo.
 
+### 2026-11-01 — Sessão 29 (P-19 e P-20: ruleset com `rust` e `audit`)
+
+- **Pedido**: PR B do plano das pendências (CI e infraestrutura, AGENTS.md §4; plano aprovado em plan mode). O PR A (P-21, #30) já estava mesclado.
+- **Decisões do dono**: `guard`, `rust` e `audit` obrigatórios; P-20 fechada por decisão (ADR 0006).
+- **Feito** (branch `ci/ruleset-rust-audit`, PR #31): `.github/ruleset-protect-main.json` (igual ao `padrao/ruleset-protect-main.json` do workspace, exceto `required_status_checks`; conferido por script); comentário do `rust.yml` corrigido; P-19 e P-20 em Resolvidas no `PENDING.md`; parágrafo "Repositório" do `OVERVIEW.md`.
+- **Pré-condição do `padrao/README.md` conferida**: os checks `guard`, `Rust` (`rust`, `audit`, `msrv`) rodaram verdes na `main` em `9e67150` (vistos com `gh run list`).
+- **Prova parcial do `audit`**: num projeto de teste fora do repo, `cargo audit --deny warnings` sai com código 1 diante de `time =0.1.43` (RUSTSEC-2020-0071: "1 vulnerability found"). Não provei o job do CI falhando.
+- **CI**: no PR #31, `guard` (6s), `rust` (18s), `audit` (3m2s) e `msrv` (22s) passaram no commit de código (vistos com `gh pr checks`); o commit deste registro roda de novo.
+- **Ruleset aplicado no GitHub?** **Não, ainda.** O `PUT` em `repos/Arven-Labs/arca/rulesets/26286748` só acontece depois do merge do #31 e com o OK do dono na hora. Estado atual no GitHub: só `guard` obrigatório. Rollback: `PUT` do `padrao/ruleset-protect-main.json`.
+- **Não verificado**: o `audit` do CI falhando; o comportamento do ruleset com os três checks (só aparece depois do `PUT`).
+- **Fica**: aplicar o ruleset; P-09 e P-22 a P-25.
+
 ### 2026-11-01 — Sessão 28 (P-21: MSRV medido e job `msrv`)
 
 - **Pedido**: tratar as pendências P-19 a P-21 (plano aprovado em plan mode; CI e infraestrutura são área do AGENTS.md §4). Este é o PR A (P-21); o PR B (P-19, fechamento da P-20) vem depois deste.
