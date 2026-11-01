@@ -8,7 +8,7 @@ O P-05 perguntava quanto histórico de versões manter e por quanto tempo. Pelo 
 ## Decisão
 - A v1 **não apaga objetos dos backends**. Nenhum comando de GC é entregue; todos os manifests e blobs ficam.
 - A interface `BlobStore` mantém `delete` (`SPEC-TECNICA.md` §4), mas o núcleo da v1 **não o chama**. Ele existe para o GC futuro.
-- O GC é decidido na **Fase 3**, junto com o P-06 e com o tamanho real do Vault medido. Ponto de reavaliação: o backup passar de cerca de 5 GB ou de US$ 1/mês (valor de partida, o dono ajusta).
+- O GC é decidido na **Fase 3**, junto com o tamanho real do Vault medido. Ponto de reavaliação: o custo do backup chegar ao teto de US$ 1/mês fixado no P-06 (ADR 0007).
 - A limpeza das cópias de conflito de `config` e `secret` em `.arca/conflitos/` (ADR 0010) é outra coisa: apaga arquivos **locais** do dispositivo, não objetos dos backends, e continua valendo.
 
 ## Alternativas descartadas
