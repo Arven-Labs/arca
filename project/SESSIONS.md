@@ -2,6 +2,18 @@
 
 Mais recente no topo.
 
+### 2026-11-01 — Sessão 32 (P-24: só a maior época conta; ADR 0013)
+
+- **Pedido**: segundo PR do plano (P-23 e P-24), depois do #33 mesclado. Plano aprovado em plan mode.
+- **Decisão do dono**: só a maior época vale. Descartadas: encadear a rotação ao passado e adiar.
+- **Desvio do plano, aprovado**: a regra ficou em `Engine::heads` (a época vem do cabeçalho, que só o engine lê); `heads::tips` não mudou.
+- **Testes primeiro** (revisados pelo dono): 6 em `engine.rs`; 5 falharam antes e 1 (`restoring_an_old_epoch_version_still_works_with_the_old_keys`) já passava e trava o comportamento.
+- **Feito**: `Engine::heads` classifica pelo cabeçalho (`classify_manifest`); `Heads.superseded`; `EngineError::NeedsNewKey`; `read_manifest` segue estrito para o `restore`. ADR 0013 (cobre P-23 e P-24), spec §4.1 e §8, `PENDING.md`, `OVERVIEW.md`.
+- **Verificado localmente**: `cargo test --workspace` (182 passam), `cargo clippy --all-targets -D warnings`, `cargo fmt --check`. CI do PR: ver o PR.
+- **Não verificado**: a rotação em si (não implementada); rollback; só Linux.
+- **Limite novo, registrado no ADR**: a época do cabeçalho não é autenticada; quem grava no armazenamento pode forçar `NeedsNewKey` (negação de serviço).
+- **Fica**: P-09, P-22, P-25; Fase 2.
+
 ### 2026-11-01 — Sessão 31 (P-23: identidade `(classe, path)`)
 
 - **Pedido**: fechar P-23 e P-24 antes da Fase 2 (plano aprovado em plan mode, dois PRs). Este é o PR do P-23.
