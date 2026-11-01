@@ -2,6 +2,19 @@
 
 Mais recente no topo.
 
+### 2026-11-01 — Sessão 24 (Fase 1, PR 5: BlobStore e disco)
+
+- **Pedido**: PR 5 da Fase 1 (plano aprovado em plan mode). PR 4 (#25) já mesclado antes.
+- **Decisões do dono**: enum `Backend` já neste PR, com a variante `Disk`; permissões e `fsync` de diretório só em unix (outras plataformas compilam sem o endurecimento e sem teste); `tokio` 1.53.3 (`rt`); aprovou os testes e as divergências 1 a 4 abaixo.
+- **Feito** (branch `feat/fase1-blobstore`, PR #26): `store.rs` (`BlobStore`, `StoreError`, `Capabilities`, `verified_get`), `disk.rs` (`DiskStore`), `backend.rs` (`Backend`), `testutil.rs`, `SPEC-TECNICA.md` §4, `OVERVIEW.md`, nota no ADR 0008. `Cargo.lock` com 44 crates (eram 41).
+- **Divergências do plano, aprovadas**: (1) `put` com tipo trocado no id não dá `IdMismatch`: o hash cobre só os bytes, então é um id válido de outro tipo; (2) impls como `async fn`, o trait declara `impl Future + Send` (o clippy reclamava da forma longa); (3) `DiskStore::open` é síncrono; (4) com `blob/` apagada, `list` e `put` dão `Unavailable(NotFound)`.
+- **Testes** (escritos antes, 27 falhando contra `todo!()`, 105 passando no total): round-trip nos dois tipos de 0 a 3 MiB, idempotência, conserto de arquivo corrompido, `list` contra lixo na pasta (temporário, maiúsculas, nome curto, `.bak`, subdiretório, symlink), permissões, pasta somente leitura, erros sem caminho, 64 `put` concorrentes, `verified_get` contra backend que mente e arquivo adulterado, e ponta a ponta `Manifest::seal` → `put` → `verified_get` → `open`.
+- **Verificado localmente**: `fmt`, `clippy --workspace --all-targets --locked -D warnings`, `test --workspace --locked` (105), `cargo audit --deny warnings` (44 crates, sem achados).
+- **CI**: no PR #26, `guard` (5s), `rust` (22s) e `audit` (2m18s) passaram no commit do código (vistos com `gh pr checks`); o commit deste registro roda de novo.
+- **Observação**: numa rodada a suíte levou ~32s e na seguinte 5,6s, sem mudança de código; medi os testes um a um e nenhum novo passa de 4s (o `file_count_limit` do PR 4 leva 8s sozinho em debug). Atribuí à carga da máquina, sem confirmar.
+- **Não verificado**: queda de energia (o `fsync` não é testável aqui); execução como root (o teste de pasta somente leitura se encerra sozinho); Windows e macOS (o CI só roda Ubuntu); disco cheio; o que o `tokio` faz por dentro; revisão independente (Fase 4).
+- **Fica**: PRs 6 e 7 da Fase 1 (núcleo local, frase BIP-39); limpeza de `.tmp-*` órfãos (não existe na v1); P-19 a P-22.
+
 ### 2026-11-01 — Sessão 23 (Fase 1, PR 4: manifest)
 
 - **Pedido**: PR 4 da Fase 1 (plano aprovado em plan mode; área de parsing de entrada externa).
