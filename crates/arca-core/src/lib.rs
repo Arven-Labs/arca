@@ -10,6 +10,7 @@ pub mod envelope;
 pub mod error;
 pub mod heads;
 pub mod manifest;
+pub mod merge;
 pub mod object;
 pub mod recovery;
 pub mod scan;

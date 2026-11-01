@@ -16,19 +16,57 @@ pub struct Head {
 /// Pontas entre `manifests`: os que nenhum outro cita em `base_version` nem em
 /// `merged_from`. Uma base ausente da lista (histórico parcial) é permitida. A saída é
 /// determinística, ordenada por `(counter, hash do id)`, qualquer que seja a ordem de entrada.
-pub fn tips(manifests: Vec<(ObjectId, Manifest)>) -> Vec<Head> {
+///
+/// **Fusões equivalentes contam como uma só** (Fase 2): dois dispositivos que fundem as mesmas
+/// pontas ao mesmo tempo geram manifests com o mesmo `base_version`, `merged_from` e `files`, mas
+/// ids diferentes (nonce aleatório). Eles formam um grupo: o grupo é uma ponta (a de menor hash)
+/// enquanto nenhum membro for citado; se alguém construir sobre **qualquer** membro, o grupo
+/// inteiro fica coberto. Só vale para manifests com `merged_from`; dois snapshots comuns
+/// iguais seguem como duas pontas (divergência real).
+pub fn tips(mut manifests: Vec<(ObjectId, Manifest)>) -> Vec<Head> {
     let cited: HashSet<[u8; 32]> = manifests
         .iter()
         .flat_map(|(_, m)| m.base_version.iter().chain(&m.merged_from))
         .map(|hash| hash.0)
         .collect();
-    let mut heads: Vec<Head> = manifests
+    // por hash crescente: o primeiro de cada grupo é o de menor hash
+    manifests.sort_by_key(|(id, _)| id.hash);
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for (i, (_, manifest)) in manifests.iter().enumerate() {
+        let twin = groups
+            .iter_mut()
+            .find(|group| equivalent_merges(&manifests[group[0]].1, manifest));
+        match twin {
+            Some(group) => group.push(i),
+            None => groups.push(vec![i]),
+        }
+    }
+    let mut heads: Vec<Head> = groups
         .into_iter()
-        .filter(|(id, _)| !cited.contains(&id.hash))
-        .map(|(id, manifest)| Head { id, manifest })
+        .filter(|group| !group.iter().any(|i| cited.contains(&manifests[*i].0.hash)))
+        .map(|group| {
+            let (id, manifest) = manifests[group[0]].clone();
+            Head { id, manifest }
+        })
         .collect();
     heads.sort_by_key(|h| (h.manifest.counter, h.id.hash));
     heads
+}
+
+/// Mesmos pais (`base_version` e o conjunto de `merged_from`), mesma época e mesmos `files`,
+/// ambos manifests de fusão.
+fn equivalent_merges(a: &Manifest, b: &Manifest) -> bool {
+    fn parents(m: &Manifest) -> Vec<[u8; 32]> {
+        let mut parents: Vec<[u8; 32]> = m.merged_from.iter().map(|h| h.0).collect();
+        parents.sort_unstable();
+        parents
+    }
+    !a.merged_from.is_empty()
+        && !b.merged_from.is_empty()
+        && a.key_epoch == b.key_epoch
+        && a.base_version == b.base_version
+        && parents(a) == parents(b)
+        && a.files == b.files
 }
 
 #[cfg(test)]
@@ -150,6 +188,124 @@ mod tests {
         assert_eq!(heads.len(), 3);
     }
 
+    // ---------- fusões equivalentes (P-24/Fase 2: ADR 0014) ----------
+
+    /// Manifest de fusão: como `mf`, mas com `files` e dispositivo à escolha.
+    fn merge_mf(base: &str, merged: &[&str], device: &str, files: &[(&str, u8)]) -> Manifest {
+        let mut m = mf(5, Some(base), merged);
+        m.device = device.to_string();
+        m.files = files
+            .iter()
+            .map(|(path, byte)| crate::manifest::FileEntry {
+                path: path.to_string(),
+                class: crate::manifest::Class::Vault,
+                blob: Hash32([*byte; 32]),
+                size: 1,
+                sha256: Hash32([*byte; 32]),
+            })
+            .collect();
+        m
+    }
+
+    fn history() -> Vec<(ObjectId, Manifest)> {
+        vec![
+            (id("a"), mf(1, None, &[])),
+            (id("b"), mf(2, Some("a"), &[])),
+            (id("c"), mf(2, Some("a"), &[])),
+        ]
+    }
+
+    fn smaller(x: &str, y: &str) -> ObjectId {
+        if id(x).hash < id(y).hash {
+            id(x)
+        } else {
+            id(y)
+        }
+    }
+
+    /// Dois dispositivos fundiram as mesmas pontas ao mesmo tempo: mesmo `base_version`, mesmo
+    /// `merged_from`, mesmos `files`, ids diferentes. É uma ponta só, a de menor hash.
+    #[test]
+    fn equivalent_merges_count_as_one_tip_the_smaller_hash() {
+        let mut all = history();
+        all.push((id("m1"), merge_mf("b", &["c"], "pc-a", &[("x.md", 1)])));
+        all.push((id("m2"), merge_mf("b", &["c"], "pc-b", &[("x.md", 1)])));
+        assert_eq!(ids(&tips(all)), [smaller("m1", "m2")]);
+    }
+
+    #[test]
+    fn the_order_of_merged_from_does_not_matter_for_equivalence() {
+        let mut all = history();
+        all.push((id("d"), mf(2, Some("a"), &[])));
+        all.push((id("m1"), merge_mf("b", &["c", "d"], "pc-a", &[])));
+        all.push((id("m2"), merge_mf("b", &["d", "c"], "pc-b", &[])));
+        assert_eq!(ids(&tips(all)), [smaller("m1", "m2")]);
+    }
+
+    #[test]
+    fn merges_with_different_files_are_two_tips() {
+        let mut all = history();
+        all.push((id("m1"), merge_mf("b", &["c"], "pc-a", &[("x.md", 1)])));
+        all.push((id("m2"), merge_mf("b", &["c"], "pc-b", &[("x.md", 2)])));
+        assert_eq!(tips(all).len(), 2);
+    }
+
+    #[test]
+    fn merges_with_different_parents_are_two_tips() {
+        let mut all = history();
+        all.push((id("d"), mf(2, Some("a"), &[])));
+        all.push((id("m1"), merge_mf("b", &["c"], "pc-a", &[])));
+        all.push((id("m2"), merge_mf("b", &["d"], "pc-b", &[])));
+        assert_eq!(tips(all).len(), 2);
+    }
+
+    /// Dois snapshots comuns iguais, do mesmo pai, não são "fusões": seguem como duas pontas
+    /// (a regra do colapso só vale para manifests com `merged_from`).
+    #[test]
+    fn identical_plain_snapshots_are_still_two_tips() {
+        let mut all = history();
+        all.push((id("s1"), merge_mf("b", &[], "pc-a", &[("x.md", 1)])));
+        all.push((id("s2"), merge_mf("b", &[], "pc-b", &[("x.md", 1)])));
+        assert_eq!(tips(all).len(), 3); // c, s1 e s2
+    }
+
+    /// Alguém construiu em cima de **um** dos gêmeos: o outro não pode voltar a aparecer como
+    /// ponta, seja ele o de menor hash ou não.
+    #[test]
+    fn building_on_either_twin_covers_both() {
+        for built_on in ["m1", "m2"] {
+            let mut all = history();
+            all.push((id("m1"), merge_mf("b", &["c"], "pc-a", &[("x.md", 1)])));
+            all.push((id("m2"), merge_mf("b", &["c"], "pc-b", &[("x.md", 1)])));
+            all.push((id("n"), mf(6, Some(built_on), &[])));
+            assert_eq!(ids(&tips(all)), [id("n")], "sobre {built_on}");
+        }
+    }
+
+    #[test]
+    fn equivalent_merges_collapse_in_any_input_order() {
+        let items = vec![
+            (id("a"), mf(1, None, &[])),
+            (id("b"), mf(2, Some("a"), &[])),
+            (id("c"), mf(2, Some("a"), &[])),
+            (id("m1"), merge_mf("b", &["c"], "pc-a", &[("x.md", 1)])),
+            (id("m2"), merge_mf("b", &["c"], "pc-b", &[("x.md", 1)])),
+            (id("m3"), merge_mf("b", &["c"], "pc-c", &[("x.md", 1)])),
+        ];
+        let expected = [[id("m1"), id("m2"), id("m3")]
+            .into_iter()
+            .min_by_key(|i| i.hash)
+            .unwrap()];
+        let mut rng = Rng(0x1234_5678_9ABC_DEF1);
+        for _ in 0..50 {
+            let mut shuffled = items.clone();
+            for k in (1..shuffled.len()).rev() {
+                shuffled.swap(k, (rng.next() as usize) % (k + 1));
+            }
+            assert_eq!(ids(&tips(shuffled)), expected);
+        }
+    }
+
     // ---------- propriedade ----------
 
     struct Rng(u64);
@@ -182,14 +338,29 @@ mod tests {
                 items.push((id(&names[i]), mf(i as u64, base, &merged)));
             }
 
-            // esperado: ninguém cita o hash
+            // esperado, de forma ingênua: o grupo de fusões equivalentes (mesma base e mesmo
+            // `merged_from`; aqui todos têm `files` vazios) é uma ponta, a de menor hash, se
+            // ninguém cita nenhum membro dele
+            let cited_by_someone = |hash: [u8; 32]| {
+                items.iter().any(|(_, m)| {
+                    m.base_version == Some(Hash32(hash)) || m.merged_from.contains(&Hash32(hash))
+                })
+            };
             let mut expected: Vec<ObjectId> = items
                 .iter()
-                .filter(|(own, _)| {
-                    !items.iter().any(|(_, m)| {
-                        m.base_version == Some(Hash32(own.hash))
-                            || m.merged_from.contains(&Hash32(own.hash))
-                    })
+                .filter(|(own, m)| {
+                    let twins: Vec<[u8; 32]> = items
+                        .iter()
+                        .filter(|(other, o)| {
+                            other == own
+                                || (!m.merged_from.is_empty()
+                                    && o.base_version == m.base_version
+                                    && o.merged_from == m.merged_from)
+                        })
+                        .map(|(other, _)| other.hash)
+                        .collect();
+                    twins.iter().all(|t| *t >= own.hash)
+                        && !twins.iter().any(|t| cited_by_someone(*t))
                 })
                 .map(|(own, _)| *own)
                 .collect();
