@@ -9,7 +9,7 @@ Fecha o item "spec técnica de interface e formato do manifest" da Fase 0 (`SPEC
 ## 1. Escopo da v1
 - Consumidor único: o Warden (ADR 0003). Unidade de sincronização: o **arquivo inteiro**. Sem chunking e sem deduplicação.
 - Backends: disco, hub (`warden-server`) e S3-compatível opcional (ADR 0007). git e Arweave continuam no `warden-sync`.
-- Fora da v1: histórico de versões com retenção (P-05), P2P, merge dentro de arquivo, chave por dispositivo.
+- Fora da v1: coleta de lixo e retenção do histórico (guarda tudo, ADR 0011), P2P, merge dentro de arquivo, chave por dispositivo.
 
 ## 2. Camadas
 
@@ -47,7 +47,7 @@ trait BlobStore {
     async fn get(&self, id: &ObjectId) -> Result<Option<Bytes>, StoreError>;
     async fn has(&self, id: &ObjectId) -> Result<bool, StoreError>;
     async fn list(&self, kind: ObjectKind) -> Result<Vec<ObjectId>, StoreError>;
-    async fn delete(&self, id: &ObjectId) -> Result<(), StoreError>;              // só pelo GC (P-05)
+    async fn delete(&self, id: &ObjectId) -> Result<(), StoreError>;              // só por um GC futuro; a v1 não chama (ADR 0011)
     fn capabilities(&self) -> Capabilities;
 }
 // ObjectId = (ObjectKind::{Blob, Manifest}, hash de 32 bytes)
@@ -183,7 +183,7 @@ Tudo que vem de um backend ou do disco é entrada não confiável. Testes obriga
 - Classe desligada no consumidor: entradas dessa classe não são aplicadas em disco.
 
 ## 11. O que esta spec não resolve
-- Retenção e coleta de lixo (P-05) e limite de tamanho por objeto.
+- Coleta de lixo: adiada para a Fase 3, a v1 guarda tudo (ADR 0011). Limite de tamanho por objeto.
 - Contrato HTTP do hub e fluxo de pareamento (Fase 2); cliente S3 (P-15).
 - Os rótulos exatos do HKDF (Fase 1, ADR 0009) e a configuração por classe no Warden (Fase 2, ADR 0010).
 - Revisão de segurança independente (Fase 4). Nada aqui foi implementado nem testado; é desenho.

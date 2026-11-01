@@ -92,7 +92,7 @@ O celular, como já decidido, nunca atua como servidor; pode ser cliente de leit
 ## 9. Integração com o Warden
 
 - Implementar como módulo/crate dedicado, consumido pelo Warden via interface estável (`BlobStore`, `SPEC-TECNICA.md`), em substituição gradual ao `warden-sync` (P-16).
-- Configuração por perfil: quais backends, quantas réplicas, política de retenção de versões antigas.
+- Configuração por perfil: quais backends, quantas réplicas. A política de retenção de versões antigas fica para a Fase 3: a v1 guarda tudo (ADR 0011).
 - O índice de busca semântica (embeddings) deve ser **reconstruível a partir do Vault**, não sincronizado como dado primário. Isso evita sincronizar artefato pesado e derivado.
 - Compatibilidade com o modo hospedado: a mesma camada deve funcionar com o backend em servidor do Fabio, respeitando o objetivo de baixo consumo de RAM por usuário.
 
@@ -170,7 +170,7 @@ Ordem priorizada (local-first reduz a importância de latência de rede):
 - Frase de recuperação ou chave exportável?
 - CRDT ou last-writer-wins com conflito explícito no MVP?
 - O backup externo é obrigatório no MVP ou opcional?
-- Quanto histórico de versões manter, e por quanto tempo?
+- Quanto histórico de versões manter, e por quanto tempo? (Respondida: tudo, sem GC na v1, ADR 0011.)
 - Qual o orçamento mensal aceitável para backup externo?
 - Vale começar só com o nó servidor e deixar P2P para depois?
 
