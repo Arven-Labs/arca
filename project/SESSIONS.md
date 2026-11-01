@@ -8,7 +8,8 @@ Mais recente no topo.
 - **Pré-condição**: o #31 estava mesclado (`d3ea7d7`) e `CI Private Files` e `Rust` tinham rodado verdes na `main` nesse commit (vistos com `gh run list`).
 - **Feito**: `gh api -X PUT repos/Arven-Labs/arca/rulesets/26286748 --input .github/ruleset-protect-main.json`. O estado anterior (só `guard`) foi guardado em `/tmp/claude-1000/-home-masterlxz-Documents-workspace/5ac7359c-c197-49e8-897d-120ed8e48668/scratchpad/ruleset-before.json` e é o mesmo do `padrao/ruleset-protect-main.json`.
 - **Conferido com `GET` depois**: `enforcement: active`; `~DEFAULT_BRANCH`; bypass `RepositoryRole` 5 com `pull_request`; regras `deletion`, `non_fast_forward`, `pull_request` (0 aprovações; merge, squash e rebase) e `required_status_checks` = `guard`, `rust`, `audit` (`strict_required_status_checks_policy: false`).
-- **Feito** (branch `docs/ruleset-aplicado`, PR deste registro): `PENDING.md` (P-19 com a data da aplicação), `OVERVIEW.md`, esta entrada. Este PR é também o primeiro teste do novo ruleset: o resultado de `gh pr checks --required` está abaixo.
+- **Feito** (branch `docs/ruleset-aplicado`, PR deste registro): `PENDING.md` (P-19 com a data da aplicação), `OVERVIEW.md`, esta entrada. Este PR (#32) é também o primeiro teste do novo ruleset.
+- **Teste do ruleset no #32** (visto com `gh pr checks 32 --required` e `gh pr view 32 --json mergeStateStatus`): os checks obrigatórios listados pelo GitHub foram `audit`, `guard` e `rust` (o `msrv` não aparece, como esperado); com os três pendentes o PR ficou `BLOCKED`; depois de `guard` (5s), `rust` (31s) e `audit` (3m1s) passarem virou `CLEAN`.
 - **Rollback**: `gh api -X PUT repos/Arven-Labs/arca/rulesets/26286748 --input ../padrao/ruleset-protect-main.json` (a partir de `arca/`).
 - **Não verificado**: o `audit` do CI falhando diante de um advisory (só localmente); como o ruleset se comporta quando um check obrigatório não reporta.
 - **Fica**: P-09 e P-22 a P-25; Fase 2.
