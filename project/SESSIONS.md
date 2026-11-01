@@ -2,6 +2,15 @@
 
 Mais recente no topo.
 
+### 2026-10-31 — Sessão 10 (Fase 0, P-17: detalhes criptográficos)
+
+- **Pedido**: revisar o P-17 (cripto proposta na `SPEC-TECNICA.md`).
+- **Decisão do dono**: as quatro recomendações, confirmadas item a item: id = SHA-256 do texto cifrado; cabeçalho inteiro como AAD; duas subchaves HKDF por época; sem assinatura na v1 (ADR 0009). `merged_from` entrou junto, por ser só registro.
+- **Feito** (branch `docs/fase0-p17`): ADR 0009; `SPEC-TECNICA.md` com as marcações de proposta trocadas por "decidido"; `PENDING.md` com P-17 resolvida; `OVERVIEW.md`. Só edição de docs; nada executado.
+- **CI**: a preencher depois de abrir o PR.
+- **Não verificado**: nada implementado nem testado; rótulos do HKDF não conferidos contra os do `warden-sync` e do TruthID; rollback só mitigado após o primeiro acesso; revisão independente fica para a Fase 4.
+- **Fica**: P-18 (escopo de `config.toml` e logins); P-05; P-06; P-10, P-11, P-14; P-13, P-15, P-16.
+
 ### 2026-10-31 — Sessão 9 (Fase 0: spec técnica de `BlobStore` e do manifest)
 
 - **Pedido**: fechar a Fase 0 com a spec técnica de interface e formato (spec §16).

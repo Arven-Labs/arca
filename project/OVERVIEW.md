@@ -13,7 +13,7 @@ MIT (ADR 0002).
 
 | Fase | Descrição | Status |
 |---|---|---|
-| 0 | Descoberta (mapear o `StorageProvider` do Warden, backends, conflito, recuperação de chave) | Feita: decisões dos ADRs 0003 a 0008 e spec técnica de `BlobStore` e do manifest (`SPEC-TECNICA.md`); os detalhes de criptografia propostos aguardam confirmação (P-17) |
+| 0 | Descoberta (mapear o `StorageProvider` do Warden, backends, conflito, recuperação de chave) | Feita: decisões dos ADRs 0003 a 0008 e spec técnica de `BlobStore` e do manifest (`SPEC-TECNICA.md`); detalhes de criptografia confirmados no ADR 0009 (P-17). Fecha com a Fase 0 no que depende de decisão; restam pendências que não bloqueiam a Fase 1, exceto o P-18 |
 | 1 | Núcleo local (chunking, criptografia, manifest versionado, restauração) | Não iniciada |
 | 2 | Sync entre dispositivos | Não iniciada |
 | 3 | Backup externo | Não iniciada |
