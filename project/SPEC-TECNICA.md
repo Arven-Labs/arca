@@ -39,19 +39,24 @@ Objetos nunca são alterados: mudar um arquivo cria um blob novo. Não há "pont
 
 ## 4. Interface `BlobStore`
 
-Esboço (decidido: a interface existe e é a fronteira de backend; os nomes e tipos exatos são da Fase 1):
+**Implementado em `arca-core::store` (Fase 1, PR 5).** Assinaturas reais (os métodos devolvem `impl Future + Send`; as implementações escrevem `async fn`):
 
 ```rust
 trait BlobStore {
-    async fn put(&self, id: &ObjectId, bytes: Bytes) -> Result<(), StoreError>;   // idempotente
-    async fn get(&self, id: &ObjectId) -> Result<Option<Bytes>, StoreError>;
+    async fn put(&self, id: &ObjectId, bytes: &[u8]) -> Result<(), StoreError>;       // idempotente; IdMismatch se os bytes não têm o hash de id
+    async fn get(&self, id: &ObjectId) -> Result<Option<Vec<u8>>, StoreError>;        // NÃO verifica o hash
     async fn has(&self, id: &ObjectId) -> Result<bool, StoreError>;
-    async fn list(&self, kind: ObjectKind) -> Result<Vec<ObjectId>, StoreError>;
-    async fn delete(&self, id: &ObjectId) -> Result<(), StoreError>;              // só por um GC futuro; a v1 não chama (ADR 0011)
-    fn capabilities(&self) -> Capabilities;
+    async fn list(&self, kind: ObjectKind) -> Result<Vec<ObjectId>, StoreError>;      // ordem não especificada
+    async fn delete(&self, id: &ObjectId) -> Result<(), StoreError>;                  // id ausente é Ok; só por um GC futuro, a v1 não chama (ADR 0011)
+    fn capabilities(&self) -> Capabilities;                                           // v1: { consistent_list }
 }
-// ObjectId = (ObjectKind::{Blob, Manifest}, hash de 32 bytes)
+// ObjectId = (ObjectKind::{Blob, Manifest}, SHA-256 dos bytes cifrados)
+// StoreError = Unavailable(io::ErrorKind) | Corrupt | IdMismatch   (sem caminho nem bytes)
+// verified_get(store, id): get + recalcula o SHA-256; diferente => Corrupt. É a única leitura que o núcleo usa.
+// enum Backend { Disk(DiskStore) }: `async fn` em trait não é dyn-compatível; hub e S3 entram como variantes.
 ```
+
+Sem a crate `bytes` (`&[u8]` e `Vec<u8>`). O hash cobre só os bytes, então o `put` não consegue saber se o `kind` do id é o certo; quem confere o tipo é o `open` do envelope.
 
 Regras:
 - **`put` é idempotente**: gravar o mesmo id duas vezes é sucesso. Combina com objetos imutáveis e com retry.
@@ -62,7 +67,7 @@ Regras:
 - **Replicação**: o núcleo escreve em todos os backends configurados e considera o envio concluído quando o **primeiro** confirma; os demais seguem em segundo plano e o status mostra quantos locais têm a cópia (aviso abaixo de 2 locais, ADR 0007).
 
 Esboços por backend:
-- **Disco**: um arquivo por objeto (`<tipo>/<hex>`), gravado em arquivo temporário e `rename` atômico, permissão `0o600` (e `0o700` na pasta). Sempre presente, é a cópia local.
+- **Disco** (`arca-core::disk::DiskStore`, implementado): um arquivo por objeto (`<raiz>/<tipo>/<hex>`), gravado em `.tmp-<aleatório>` no mesmo diretório (`create_new`), `fsync`, `rename` atômico e `fsync` do diretório; permissão `0o600` nos arquivos e `0o700` nas pastas criadas (uma raiz que já existia não é alterada). `list` ignora temporários, nomes que não são `<64 hex minúsculos>`, subdiretórios e symlinks. Um `put` interrompido deixa no máximo um `.tmp-*` órfão, nunca um objeto parcial; **não há limpeza automática** de temporários na v1. Sempre presente, é a cópia local. **Limites:** permissões e `fsync` de diretório só em unix (em outras plataformas compila sem o endurecimento e sem teste); um atacante local com escrita na pasta (symlink, corrida) está fora do modelo, a defesa é o `0o700`; queda de energia não foi testada.
 - **Hub** (`warden-server`): réplica, não autoridade (ADR 0007). Contrato HTTP fica para a Fase 2.
 - **S3-compatível**: chave do objeto = `<tipo>/<hex>`. Cliente: `object_store` (ADR 0008, P-15).
 

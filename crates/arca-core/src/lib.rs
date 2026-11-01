@@ -2,11 +2,17 @@
 //! criptografia no cliente. A lógica entra aos poucos, um PR por intenção (Fase 1).
 #![forbid(unsafe_code)]
 
+pub mod backend;
 pub mod crypto;
+pub mod disk;
 pub mod envelope;
 pub mod error;
 pub mod manifest;
 pub mod object;
+pub mod store;
+
+#[cfg(test)]
+mod testutil;
 
 pub use crypto::{open, seal, EpochKeys, Sealed, VaultKey};
 pub use envelope::{Alg, Header, HEADER_LEN, MAGIC, NONCE_LEN};
