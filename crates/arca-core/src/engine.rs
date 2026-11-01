@@ -75,6 +75,11 @@ pub enum EngineError {
     /// ainda sem snapshot), ou o caminho passa por um symlink: nada foi escrito nem apagado.
     #[error("the folder has local changes in files the apply would touch; take a snapshot first")]
     LocalChanges,
+    /// A pasta de conflitos não é segura: está dentro de uma pasta de classe ligada, tem `..`
+    /// no caminho, ou ela (ou a pasta da classe nela) é um symlink. Um segredo perdedor ao lado
+    /// dos logins vivos poderia ser lido como outro login.
+    #[error("the conflicts folder must be a real folder outside every enabled class folder")]
+    UnsafeConflictsDir,
     /// Uma entrada do manifest tem nome de temporário da arca (`.arca-new-*`, `.arca-old-*`,
     /// `.tmp-*`): o `apply` recusa em vez de colidir com os próprios arquivos de trabalho.
     #[error("a manifest entry uses a name reserved for temporary files")]
@@ -160,6 +165,15 @@ pub enum MergeOutcome {
         /// Pontas que existem depois desta fusão; repetir `merge` até chegar a 1.
         tips_after: usize,
     },
+}
+
+/// Resultado de `Engine::save_conflict_losers`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SavedLosers {
+    /// Cópias gravadas agora.
+    pub saved: usize,
+    /// Já estavam lá com o mesmo conteúdo (chamada repetida).
+    pub already: usize,
 }
 
 /// Resultado de `Engine::apply`: o que mudou na pasta viva, por entrada do manifest.
@@ -558,6 +572,86 @@ impl<S: BlobStore> Engine<S> {
         Ok(applied)
     }
 
+    /// Grava, em `dir/<classe>/<path>.conflito-<dispositivo>-<16 hex do sha256>`, o texto claro
+    /// dos perdedores de conflito das classes `config` e `secret` (ADR 0010), fora das pastas
+    /// das classes. Idempotente; `dir` dentro de uma pasta de classe ligada é recusado.
+    pub async fn save_conflict_losers(
+        &self,
+        conflicts: &[Conflict],
+        dir: &Path,
+        roots: &Roots,
+    ) -> Result<SavedLosers, EngineError> {
+        // `vault` já tem a cópia no manifest; remoção-vs-edição não tem perdedor com texto
+        let losers: Vec<(&Conflict, &FileEntry)> = conflicts
+            .iter()
+            .filter(|c| matches!(c.class, Class::Config | Class::Secret))
+            .filter_map(|c| c.loser.as_ref().map(|loser| (c, loser)))
+            .collect();
+        if losers.is_empty() {
+            return Ok(SavedLosers {
+                saved: 0,
+                already: 0,
+            });
+        }
+
+        let live_roots: Vec<PathBuf> = roots
+            .enabled()
+            .into_iter()
+            .map(|(_, root)| root.to_path_buf())
+            .collect();
+        let conflicts_dir = dir.to_path_buf();
+        let (checked_dir, checked_roots) = (conflicts_dir.clone(), live_roots.clone());
+        run(move || check_conflicts_dir(&checked_dir, &checked_roots)).await?;
+
+        // busca e confere tudo antes de gravar qualquer coisa
+        let mut to_write: Vec<(PathBuf, Zeroizing<Vec<u8>>)> = Vec::new();
+        for (conflict, loser) in losers {
+            validate_device(&conflict.loser_device)?;
+            let plain = self.plain_blob(loser).await?;
+            let class_dir = match conflict.class {
+                Class::Config => "config",
+                _ => "secret",
+            };
+            let hex: String = loser.sha256.0[..8]
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            let relative = format!(
+                "{class_dir}/{}.conflito-{}-{hex}",
+                conflict.path, conflict.loser_device
+            );
+            to_write.push((safe_join(&conflicts_dir, &relative)?, plain));
+        }
+
+        run(move || {
+            // depois do download dos blobs (que pode demorar): confere a pasta de novo
+            check_conflicts_dir(&conflicts_dir, &live_roots)?;
+            // passo 1: decide tudo, sem escrever. Um destino que já existe como arquivo conta
+            // como já salvo (inclusive uma cópia que a pessoa editou: nunca é tocada); algo que
+            // não é arquivo para o lote inteiro aqui, antes de gravar o primeiro.
+            let mut pending: Vec<&(PathBuf, Zeroizing<Vec<u8>>)> = Vec::new();
+            let mut seen = HashSet::new();
+            let mut saved = SavedLosers {
+                saved: 0,
+                already: 0,
+            };
+            for item in &to_write {
+                if !seen.insert(item.0.clone()) || !needs_write(&conflicts_dir, &item.0)? {
+                    saved.already += 1;
+                } else {
+                    pending.push(item);
+                }
+            }
+            // passo 2: grava
+            for (dest, plain) in pending {
+                write_loser(dest, plain)?;
+                saved.saved += 1;
+            }
+            Ok(saved)
+        })
+        .await
+    }
+
     /// Restaura o manifest `id` nas pastas de `roots`, que têm de não existir ou estar vazias.
     pub async fn restore(&self, id: &ObjectId, roots: &Roots) -> Result<Restored, EngineError> {
         let manifest = self.read_manifest(id).await?;
@@ -645,6 +739,120 @@ where
     tokio::task::spawn_blocking(f)
         .await
         .map_err(|_| EngineError::Io(io::ErrorKind::Other))?
+}
+
+/// Caminho com os links resolvidos: canonicaliza o ancestral existente mais próximo e reanexa
+/// o resto (que ainda não existe). Compara-se isto, e não o texto, com as raízes das classes.
+fn resolve(path: &Path) -> io::Result<PathBuf> {
+    let mut existing = path.to_path_buf();
+    let mut tail = Vec::new();
+    loop {
+        match fs::canonicalize(&existing) {
+            Ok(mut resolved) => {
+                resolved.extend(tail.iter().rev());
+                return Ok(resolved);
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                let Some(name) = existing.file_name().map(|n| n.to_os_string()) else {
+                    return Err(e);
+                };
+                tail.push(name);
+                if !existing.pop() {
+                    return Err(e);
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// A pasta de conflitos tem de ser uma pasta real fora de toda pasta de classe ligada: sem
+/// `..`, sem resolver (por links) para dentro de uma raiz, e sem links nas pastas de classe.
+fn check_conflicts_dir(dir: &Path, roots: &[PathBuf]) -> Result<(), EngineError> {
+    use std::path::Component;
+    if dir.components().any(|c| c == Component::ParentDir) {
+        return Err(EngineError::UnsafeConflictsDir);
+    }
+    let absolute = std::path::absolute(dir).map_err(io_error)?;
+    let resolved = resolve(&absolute).map_err(io_error)?;
+    let mut live = Vec::with_capacity(roots.len());
+    for root in roots {
+        live.push(resolve(&std::path::absolute(root).map_err(io_error)?).map_err(io_error)?);
+    }
+    // 1. `dir` não pode estar dentro de uma pasta de classe viva
+    if live.iter().any(|root| resolved.starts_with(root)) {
+        return Err(EngineError::UnsafeConflictsDir);
+    }
+    for class_dir in ["config", "secret"] {
+        let target = resolved.join(class_dir);
+        match fs::symlink_metadata(&target) {
+            Ok(meta) if !meta.file_type().is_dir() => return Err(EngineError::UnsafeConflictsDir),
+            Ok(meta) if writable_by_others(&meta) => return Err(EngineError::UnsafeConflictsDir),
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(io_error(e)),
+        }
+        // 2. o destino real é `dir/<classe>/...`: uma pasta viva dentro dele (ou igual) receberia
+        //    o segredo, mesmo com `dir` fora da raiz
+        if live.iter().any(|root| root.starts_with(&target)) {
+            return Err(EngineError::UnsafeConflictsDir);
+        }
+    }
+    // 3. pasta que grupo ou outros podem alterar permitiria trocar as cópias
+    match fs::metadata(&resolved) {
+        Ok(meta) if writable_by_others(&meta) => Err(EngineError::UnsafeConflictsDir),
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(io_error(e)),
+    }
+}
+
+/// Grupo ou outros podem criar, apagar ou renomear dentro da pasta (unix).
+#[cfg(unix)]
+fn writable_by_others(meta: &fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    meta.permissions().mode() & 0o022 != 0
+}
+
+#[cfg(not(unix))]
+fn writable_by_others(_meta: &fs::Metadata) -> bool {
+    false
+}
+
+/// Decide se um perdedor precisa ser gravado, sem escrever. `false` se o destino já é um
+/// arquivo (o mesmo perdedor, ou a cópia que a pessoa editou: nunca é tocada). Algo que não é
+/// arquivo no nome do destino é erro; link ou pasta gravável por outros no caminho é recusado.
+fn needs_write(dir: &Path, dest: &Path) -> Result<bool, EngineError> {
+    let parent = dest
+        .parent()
+        .ok_or(EngineError::Io(io::ErrorKind::InvalidInput))?;
+    // pastas entre `dir` e o arquivo (a da classe e as do `path`) não podem ser links
+    let relative = parent.strip_prefix(dir).unwrap_or(parent);
+    let mut walk = dir.to_path_buf();
+    for part in relative.components() {
+        walk.push(part);
+        match fs::symlink_metadata(&walk) {
+            Ok(meta) if meta.file_type().is_dir() && !writable_by_others(&meta) => {}
+            Ok(_) => return Err(EngineError::UnsafeConflictsDir),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => break,
+            Err(e) => return Err(io_error(e)),
+        }
+    }
+    match fs::symlink_metadata(dest) {
+        Ok(meta) if meta.file_type().is_file() => Ok(false),
+        Ok(_) => Err(EngineError::Io(io::ErrorKind::AlreadyExists)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(true),
+        Err(e) => Err(io_error(e)),
+    }
+}
+
+/// Grava um perdedor (`needs_write` já decidiu): pastas `0700`, arquivo `0600`, atômico.
+fn write_loser(dest: &Path, plain: &[u8]) -> Result<(), EngineError> {
+    let parent = dest
+        .parent()
+        .ok_or(EngineError::Io(io::ErrorKind::InvalidInput))?;
+    create_private_dir(parent).map_err(io_error)?;
+    write_atomic(dest, plain).map_err(io_error)
 }
 
 /// Como `run`, mas passa o diário de desfazer para dentro e o devolve junto com o resultado.
@@ -1369,14 +1577,33 @@ mod tests {
     /// Um Vault base e vários dispositivos que partem dele sem se ver: cada ramo é
     /// `(dispositivo, created_at, edições)`. No fim, `rig` tem o base e todas as pontas.
     async fn diverge(base: &[(&str, &[u8])], branches: Vec<Branch<'_>>) -> Diverged {
+        diverge_in(Class::Vault, base, branches).await
+    }
+
+    /// Só a pasta da classe `class` é ligada.
+    fn roots_of(class: Class, path: &Path) -> Roots {
+        let mut roots = Roots::default();
+        match class {
+            Class::Vault => roots.vault = Some(path.to_path_buf()),
+            Class::Config => roots.config = Some(path.to_path_buf()),
+            Class::Secret => roots.secret = Some(path.to_path_buf()),
+        }
+        roots
+    }
+
+    async fn diverge_in(
+        class: Class,
+        base: &[(&str, &[u8])],
+        branches: Vec<Branch<'_>>,
+    ) -> Diverged {
         let rig = Rig::new();
-        let vault = rig.dir("vault");
+        let folder = rig.dir("pasta-da-classe");
         for (path, data) in base {
-            write(&vault, path, data);
+            write(&folder, path, data);
         }
         let (base_id, ..) = created(
             rig.engine("base")
-                .snapshot(&vault_only(&vault), 1)
+                .snapshot(&roots_of(class, &folder), 1)
                 .await
                 .unwrap(),
         );
@@ -1385,11 +1612,11 @@ mod tests {
             let other = forked(&rig);
             let dir = other.tmp.path().join("vault-ramo");
             let eng = other.engine(device);
-            eng.restore(&base_id, &vault_only(&dir)).await.unwrap();
+            eng.restore(&base_id, &roots_of(class, &dir)).await.unwrap();
             for (path, data) in edits {
                 write(&dir, path, data);
             }
-            let (id, ..) = created(eng.snapshot(&vault_only(&dir), at).await.unwrap());
+            let (id, ..) = created(eng.snapshot(&roots_of(class, &dir), at).await.unwrap());
             tips.push(id);
             others.push(other);
         }
@@ -1685,6 +1912,633 @@ mod tests {
         }
         .to_string();
         assert!(text.contains("merge"), "{text}");
+    }
+
+    // ---------- perdedores de config e secret (Fase 2a, PR 3b) ----------
+
+    /// Grava um blob no armazenamento e devolve a entrada que o descreve (o perdedor).
+    async fn stored_loser(rig: &Rig, class: Class, path: &str, data: &[u8]) -> FileEntry {
+        let sealed = seal(&keys(1), ObjectKind::Blob, data).unwrap();
+        rig.store.put(&sealed.id, &sealed.bytes).await.unwrap();
+        FileEntry {
+            path: path.to_string(),
+            class,
+            blob: Hash32(sealed.id.hash),
+            size: data.len() as u64,
+            sha256: sha(data),
+        }
+    }
+
+    fn conflict(class: Class, path: &str, device: &str, loser: Option<FileEntry>) -> Conflict {
+        Conflict {
+            class,
+            path: path.to_string(),
+            kind: if loser.is_some() {
+                crate::merge::ConflictKind::BothEdited
+            } else {
+                crate::merge::ConflictKind::DeletedVsEdited
+            },
+            loser,
+            loser_device: device.to_string(),
+            copy_path: None,
+        }
+    }
+
+    /// Primeiros 8 bytes do sha256 do texto claro, em hex: o sufixo do nome gravado.
+    fn short_hex(data: &[u8]) -> String {
+        Sha256::digest(data)[..8]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
+
+    /// Duas pastas de classe vivas e uma pasta de conflitos fora delas.
+    struct Vault3 {
+        rig: Rig,
+        roots: Roots,
+        dir: PathBuf,
+    }
+
+    fn vault3() -> Vault3 {
+        let rig = Rig::new();
+        let roots = Roots {
+            vault: None,
+            config: Some(rig.dir("cfg-vivo")),
+            secret: Some(rig.dir("sec-vivo")),
+        };
+        let dir = rig.tmp.path().join("conflitos");
+        Vault3 { rig, roots, dir }
+    }
+
+    #[tokio::test]
+    async fn config_and_secret_losers_are_saved_outside_the_class_folders() {
+        let v = vault3();
+        let a = stored_loser(&v.rig, Class::Config, "settings.toml", b"perdedor A").await;
+        let b = stored_loser(&v.rig, Class::Secret, "oauth/slack.json", b"{token-b}").await;
+        let conflicts = [
+            conflict(Class::Config, "settings.toml", "pa", Some(a)),
+            conflict(Class::Secret, "oauth/slack.json", "pb", Some(b)),
+        ];
+        let saved = v
+            .rig
+            .engine("pc")
+            .save_conflict_losers(&conflicts, &v.dir, &v.roots)
+            .await
+            .unwrap();
+        assert_eq!(
+            saved,
+            SavedLosers {
+                saved: 2,
+                already: 0
+            }
+        );
+
+        let name_a = format!(
+            "config/settings.toml.conflito-pa-{}",
+            short_hex(b"perdedor A")
+        );
+        let name_b = format!(
+            "secret/oauth/slack.json.conflito-pb-{}",
+            short_hex(b"{token-b}")
+        );
+        assert_eq!(fs::read(v.dir.join(&name_a)).unwrap(), b"perdedor A");
+        assert_eq!(fs::read(v.dir.join(&name_b)).unwrap(), b"{token-b}");
+        // nada caiu nas pastas vivas das classes
+        assert_eq!(
+            fs::read_dir(v.roots.config.as_ref().unwrap())
+                .unwrap()
+                .count(),
+            0
+        );
+        assert_eq!(
+            fs::read_dir(v.roots.secret.as_ref().unwrap())
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn saved_losers_are_0600_and_their_folders_0700() {
+        use std::os::unix::fs::PermissionsExt;
+        let v = vault3();
+        let loser = stored_loser(&v.rig, Class::Secret, "oauth/x.json", b"segredo").await;
+        v.rig
+            .engine("pc")
+            .save_conflict_losers(
+                &[conflict(Class::Secret, "oauth/x.json", "pa", Some(loser))],
+                &v.dir,
+                &v.roots,
+            )
+            .await
+            .unwrap();
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let file = v.dir.join(format!(
+            "secret/oauth/x.json.conflito-pa-{}",
+            short_hex(b"segredo")
+        ));
+        assert_eq!(mode(&file), 0o600);
+        assert_eq!(mode(&v.dir), 0o700);
+        assert_eq!(mode(&v.dir.join("secret")), 0o700);
+        assert_eq!(mode(&v.dir.join("secret/oauth")), 0o700);
+    }
+
+    /// `vault` já tem a cópia dentro do manifest; remoção vs edição não tem perdedor com texto.
+    #[tokio::test]
+    async fn vault_conflicts_and_deletions_have_nothing_to_save() {
+        let v = vault3();
+        let entry = stored_loser(&v.rig, Class::Vault, "a.md", b"x").await;
+        let conflicts = [
+            conflict(Class::Vault, "a.md", "pa", Some(entry)),
+            conflict(Class::Config, "settings.toml", "pb", None),
+        ];
+        let saved = v
+            .rig
+            .engine("pc")
+            .save_conflict_losers(&conflicts, &v.dir, &v.roots)
+            .await
+            .unwrap();
+        assert_eq!(
+            saved,
+            SavedLosers {
+                saved: 0,
+                already: 0
+            }
+        );
+        assert!(!v.dir.exists(), "não cria a pasta sem ter o que gravar");
+    }
+
+    #[tokio::test]
+    async fn saving_twice_is_harmless() {
+        let v = vault3();
+        let loser = stored_loser(&v.rig, Class::Config, "settings.toml", b"A").await;
+        let conflicts = [conflict(Class::Config, "settings.toml", "pa", Some(loser))];
+        let eng = v.rig.engine("pc");
+        eng.save_conflict_losers(&conflicts, &v.dir, &v.roots)
+            .await
+            .unwrap();
+        let again = eng
+            .save_conflict_losers(&conflicts, &v.dir, &v.roots)
+            .await
+            .unwrap();
+        assert_eq!(
+            again,
+            SavedLosers {
+                saved: 0,
+                already: 1
+            }
+        );
+    }
+
+    /// A pessoa resolveu o conflito editando a cópia: o nome já está tomado, e a cópia dela
+    /// vale. Conta como já salvo e **nunca** é sobrescrita.
+    #[tokio::test]
+    async fn a_copy_the_person_edited_is_left_alone_and_counted_as_saved() {
+        let v = vault3();
+        let loser = stored_loser(&v.rig, Class::Config, "settings.toml", b"A").await;
+        let name = format!("settings.toml.conflito-pa-{}", short_hex(b"A"));
+        write(&v.dir.join("config"), &name, b"conteudo de outra pessoa");
+        let result = v
+            .rig
+            .engine("pc")
+            .save_conflict_losers(
+                &[conflict(Class::Config, "settings.toml", "pa", Some(loser))],
+                &v.dir,
+                &v.roots,
+            )
+            .await;
+        assert_eq!(
+            result,
+            Ok(SavedLosers {
+                saved: 0,
+                already: 1
+            })
+        );
+        assert_eq!(
+            fs::read(v.dir.join("config").join(&name)).unwrap(),
+            b"conteudo de outra pessoa"
+        );
+    }
+
+    /// Uma cópia editada não pode travar o resto do lote (achado 3 da auditoria).
+    #[tokio::test]
+    async fn an_edited_copy_does_not_stop_the_rest_of_the_batch() {
+        let v = vault3();
+        let a = stored_loser(&v.rig, Class::Config, "a.toml", b"A").await;
+        let b = stored_loser(&v.rig, Class::Secret, "b.json", b"B").await;
+        let conflicts = [
+            conflict(Class::Config, "a.toml", "pa", Some(a)),
+            conflict(Class::Secret, "b.json", "pb", Some(b)),
+        ];
+        let eng = v.rig.engine("pc");
+        eng.save_conflict_losers(&conflicts, &v.dir, &v.roots)
+            .await
+            .unwrap();
+        let a_copy = v
+            .dir
+            .join(format!("config/a.toml.conflito-pa-{}", short_hex(b"A")));
+        let b_copy = v
+            .dir
+            .join(format!("secret/b.json.conflito-pb-{}", short_hex(b"B")));
+        fs::write(&a_copy, b"editada pela pessoa").unwrap();
+        fs::remove_file(&b_copy).unwrap();
+
+        let again = eng
+            .save_conflict_losers(&conflicts, &v.dir, &v.roots)
+            .await
+            .unwrap();
+        assert_eq!(
+            again,
+            SavedLosers {
+                saved: 1,
+                already: 1
+            }
+        );
+        assert_eq!(fs::read(&a_copy).unwrap(), b"editada pela pessoa");
+        assert_eq!(fs::read(&b_copy).unwrap(), b"B");
+    }
+
+    /// Algo que não é arquivo no nome do destino (uma pasta) para o lote **antes** de gravar
+    /// o primeiro.
+    #[tokio::test]
+    async fn a_directory_at_a_destination_name_stops_the_batch_before_writing() {
+        let v = vault3();
+        let a = stored_loser(&v.rig, Class::Config, "a.toml", b"A").await;
+        let b = stored_loser(&v.rig, Class::Secret, "b.json", b"B").await;
+        fs::create_dir_all(
+            v.dir
+                .join(format!("secret/b.json.conflito-pb-{}", short_hex(b"B"))),
+        )
+        .unwrap();
+        let conflicts = [
+            conflict(Class::Config, "a.toml", "pa", Some(a)),
+            conflict(Class::Secret, "b.json", "pb", Some(b)),
+        ];
+        let result = v
+            .rig
+            .engine("pc")
+            .save_conflict_losers(&conflicts, &v.dir, &v.roots)
+            .await;
+        assert_eq!(result, Err(EngineError::Io(io::ErrorKind::AlreadyExists)));
+        assert!(
+            !v.dir.join("config").exists(),
+            "o primeiro perdedor não pode ter sido gravado"
+        );
+    }
+
+    /// Nomes e dispositivos de um `Conflict` montado à mão passam pelas mesmas validações.
+    #[tokio::test]
+    async fn hand_made_conflicts_with_unsafe_names_are_refused() {
+        let v = vault3();
+        let loser = stored_loser(&v.rig, Class::Config, "a.toml", b"A").await;
+        let eng = v.rig.engine("pc");
+        let bad_device = conflict(Class::Config, "a.toml", "pa/../x", Some(loser.clone()));
+        assert!(matches!(
+            eng.save_conflict_losers(&[bad_device], &v.dir, &v.roots)
+                .await,
+            Err(EngineError::Object(_))
+        ));
+        let bad_path = conflict(Class::Config, "../fora.toml", "pa", Some(loser));
+        assert!(matches!(
+            eng.save_conflict_losers(&[bad_path], &v.dir, &v.roots)
+                .await,
+            Err(EngineError::Object(_))
+        ));
+        assert!(!v.dir.exists());
+    }
+
+    /// Verifica tudo antes de gravar: um blob ausente ou adulterado não deixa nada para trás.
+    #[tokio::test]
+    async fn a_missing_or_tampered_loser_stops_everything_before_writing() {
+        for tamper in [false, true] {
+            let v = vault3();
+            let good = stored_loser(&v.rig, Class::Config, "a.toml", b"bom").await;
+            let mut bad = stored_loser(&v.rig, Class::Secret, "b.json", b"ruim").await;
+            if tamper {
+                bad.sha256 = sha(b"outro texto"); // o manifest mentiria sobre o conteúdo
+            } else {
+                bad.blob = Hash32([9; 32]); // blob que não existe
+            }
+            let conflicts = [
+                conflict(Class::Config, "a.toml", "pa", Some(good)),
+                conflict(Class::Secret, "b.json", "pb", Some(bad)),
+            ];
+            let result = v
+                .rig
+                .engine("pc")
+                .save_conflict_losers(&conflicts, &v.dir, &v.roots)
+                .await;
+            let expected = if tamper {
+                EngineError::Integrity
+            } else {
+                EngineError::MissingObject
+            };
+            assert_eq!(result, Err(expected));
+            assert!(!v.dir.exists(), "nada gravado, nem o que estava bom");
+        }
+    }
+
+    // ---------- perdedores: a pasta de conflitos nunca pode cair nas classes ----------
+
+    async fn save_into(v: &Vault3, dir: &Path) -> Result<SavedLosers, EngineError> {
+        let loser = stored_loser(&v.rig, Class::Secret, "x.json", b"segredo").await;
+        v.rig
+            .engine("pc")
+            .save_conflict_losers(
+                &[conflict(Class::Secret, "x.json", "pa", Some(loser))],
+                dir,
+                &v.roots,
+            )
+            .await
+    }
+
+    #[tokio::test]
+    async fn a_conflicts_folder_inside_or_equal_to_a_class_folder_is_refused() {
+        let v = vault3();
+        let sec = v.roots.secret.clone().unwrap();
+        for dir in [
+            sec.clone(),
+            sec.join("conflitos"),
+            sec.join("a/b/c"),
+            v.roots.config.clone().unwrap().join("x"),
+        ] {
+            assert_eq!(
+                save_into(&v, &dir).await,
+                Err(EngineError::UnsafeConflictsDir),
+                "{dir:?}"
+            );
+        }
+        assert_eq!(fs::read_dir(&sec).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn dot_dot_in_the_conflicts_folder_is_refused() {
+        let v = vault3();
+        let sneaky = v.rig.tmp.path().join("conflitos/../sec-vivo/dentro");
+        assert_eq!(
+            save_into(&v, &sneaky).await,
+            Err(EngineError::UnsafeConflictsDir)
+        );
+        assert_eq!(
+            fs::read_dir(v.roots.secret.as_ref().unwrap())
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+
+    /// `link` parece estar fora do Vault, mas aponta para dentro da pasta de logins.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlink_that_leads_into_a_class_folder_is_refused() {
+        let v = vault3();
+        let link = v.rig.tmp.path().join("link");
+        std::os::unix::fs::symlink(v.roots.secret.as_ref().unwrap(), &link).unwrap();
+        assert_eq!(
+            save_into(&v, &link.join("conflitos")).await,
+            Err(EngineError::UnsafeConflictsDir)
+        );
+        assert_eq!(
+            fs::read_dir(v.roots.secret.as_ref().unwrap())
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+
+    /// `dir/secret` já existe como link para outro lugar: não se segue.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlinked_class_subfolder_in_the_conflicts_folder_is_refused() {
+        let v = vault3();
+        let elsewhere = v.rig.dir("outro-lugar");
+        fs::create_dir_all(&v.dir).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, v.dir.join("secret")).unwrap();
+        assert_eq!(
+            save_into(&v, &v.dir).await,
+            Err(EngineError::UnsafeConflictsDir)
+        );
+        assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
+    }
+
+    /// O destino real é `dir/<classe>/...`: uma pasta de classe VIVA dentro de `dir/config` ou
+    /// `dir/secret` (ou igual a elas) receberia o segredo, mesmo com `dir` fora da raiz
+    /// (achado 1 da auditoria). Layout comum: `~/arca/{vault,config,secret}` com `dir = ~/arca`.
+    #[tokio::test]
+    async fn a_live_class_folder_inside_the_conflicts_class_folders_is_refused() {
+        let rig = Rig::new();
+        let dir = rig.dir("arca");
+        let live_secret = rig.dir("arca/secret");
+        for root in [
+            live_secret.clone(),
+            live_secret.join("oauth"),
+            dir.join("config"),
+        ] {
+            let roots = Roots {
+                vault: None,
+                config: None,
+                secret: Some(root.clone()),
+            };
+            let loser = stored_loser(&rig, Class::Secret, "oauth/x.json", b"segredo").await;
+            let result = rig
+                .engine("pc")
+                .save_conflict_losers(
+                    &[conflict(Class::Secret, "oauth/x.json", "pa", Some(loser))],
+                    &dir,
+                    &roots,
+                )
+                .await;
+            assert_eq!(result, Err(EngineError::UnsafeConflictsDir), "{root:?}");
+        }
+        assert_eq!(fs::read_dir(&live_secret).unwrap().count(), 0);
+    }
+
+    /// Uma pasta viva em outro lugar de `dir` (nem `config` nem `secret`) não é afetada.
+    #[tokio::test]
+    async fn a_live_folder_elsewhere_inside_the_conflicts_parent_is_fine() {
+        let rig = Rig::new();
+        let dir = rig.dir("arca");
+        let roots = Roots {
+            vault: None,
+            config: None,
+            secret: Some(rig.dir("arca/logins-vivos")),
+        };
+        let loser = stored_loser(&rig, Class::Secret, "x.json", b"segredo").await;
+        let saved = rig
+            .engine("pc")
+            .save_conflict_losers(
+                &[conflict(Class::Secret, "x.json", "pa", Some(loser))],
+                &dir,
+                &roots,
+            )
+            .await
+            .unwrap();
+        assert_eq!(saved.saved, 1);
+        assert_eq!(
+            fs::read_dir(rig.tmp.path().join("arca/logins-vivos"))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+
+    /// A raiz viva é um link para `dir/secret`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_live_class_folder_that_links_to_the_conflicts_folder_is_refused() {
+        let rig = Rig::new();
+        let dir = rig.dir("arca");
+        let real = rig.dir("arca/secret");
+        let live = rig.tmp.path().join("logins-vivos");
+        std::os::unix::fs::symlink(&real, &live).unwrap();
+        let roots = Roots {
+            vault: None,
+            config: None,
+            secret: Some(live),
+        };
+        let loser = stored_loser(&rig, Class::Secret, "x.json", b"segredo").await;
+        let result = rig
+            .engine("pc")
+            .save_conflict_losers(
+                &[conflict(Class::Secret, "x.json", "pa", Some(loser))],
+                &dir,
+                &roots,
+            )
+            .await;
+        assert_eq!(result, Err(EngineError::UnsafeConflictsDir));
+        assert_eq!(fs::read_dir(&real).unwrap().count(), 0);
+    }
+
+    /// `dir/config` como link, e subpasta do `path` como link (só `dir/secret` era testado).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlinks_in_the_config_folder_and_in_the_path_subfolders_are_refused() {
+        let v = vault3();
+        let elsewhere = v.rig.dir("outro-lugar");
+        fs::create_dir_all(&v.dir).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, v.dir.join("config")).unwrap();
+        let loser = stored_loser(&v.rig, Class::Config, "a.toml", b"A").await;
+        let result = v
+            .rig
+            .engine("pc")
+            .save_conflict_losers(
+                &[conflict(Class::Config, "a.toml", "pa", Some(loser))],
+                &v.dir,
+                &v.roots,
+            )
+            .await;
+        assert_eq!(result, Err(EngineError::UnsafeConflictsDir));
+
+        // subpasta do `path` (dir/secret/oauth) é um link
+        fs::remove_file(v.dir.join("config")).unwrap();
+        fs::create_dir_all(v.dir.join("secret")).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, v.dir.join("secret/oauth")).unwrap();
+        let loser = stored_loser(&v.rig, Class::Secret, "oauth/x.json", b"S").await;
+        let result = v
+            .rig
+            .engine("pc")
+            .save_conflict_losers(
+                &[conflict(Class::Secret, "oauth/x.json", "pa", Some(loser))],
+                &v.dir,
+                &v.roots,
+            )
+            .await;
+        assert_eq!(result, Err(EngineError::UnsafeConflictsDir));
+        assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
+    }
+
+    /// Pasta de conflitos que outros usuários podem alterar permitiria trocar ou renomear as
+    /// cópias (achado 5). Leitura é aceita (os nomes aparecem); escrita por grupo/outros não.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_conflicts_folder_that_others_can_write_to_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        for (relative, mode) in [("", 0o777), ("", 0o775), ("secret", 0o770)] {
+            let v = vault3();
+            fs::create_dir_all(v.dir.join("secret")).unwrap();
+            fs::set_permissions(v.dir.join(relative), fs::Permissions::from_mode(mode)).unwrap();
+            let loser = stored_loser(&v.rig, Class::Secret, "x.json", b"segredo").await;
+            let result = v
+                .rig
+                .engine("pc")
+                .save_conflict_losers(
+                    &[conflict(Class::Secret, "x.json", "pa", Some(loser))],
+                    &v.dir,
+                    &v.roots,
+                )
+                .await;
+            assert_eq!(
+                result,
+                Err(EngineError::UnsafeConflictsDir),
+                "{relative:?} {mode:o}"
+            );
+            assert_eq!(fs::read_dir(v.dir.join("secret")).unwrap().count(), 0);
+        }
+    }
+
+    /// Pastas só legíveis por outros (0755) são aceitas: nada pode ser trocado.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_conflicts_folder_readable_by_others_but_not_writable_is_accepted() {
+        use std::os::unix::fs::PermissionsExt;
+        let v = vault3();
+        fs::create_dir_all(&v.dir).unwrap();
+        fs::set_permissions(&v.dir, fs::Permissions::from_mode(0o755)).unwrap();
+        let loser = stored_loser(&v.rig, Class::Secret, "x.json", b"segredo").await;
+        let saved = v
+            .rig
+            .engine("pc")
+            .save_conflict_losers(
+                &[conflict(Class::Secret, "x.json", "pa", Some(loser))],
+                &v.dir,
+                &v.roots,
+            )
+            .await
+            .unwrap();
+        assert_eq!(saved.saved, 1);
+    }
+
+    /// Ponta a ponta: dois dispositivos editam o mesmo `config`; a fusão real devolve o
+    /// perdedor, e é esse texto que acaba gravado.
+    #[tokio::test]
+    async fn a_real_merge_conflict_in_config_ends_up_saved() {
+        let d = diverge_in(
+            Class::Config,
+            &[("settings.toml", b"1")],
+            vec![
+                ("pa", 10, vec![("settings.toml", b"perdedor A")]),
+                ("pb", 20, vec![("settings.toml", b"vencedor B")]),
+            ],
+        )
+        .await;
+        let eng = d.rig.engine("pc");
+        let MergeOutcome::Merged { id, conflicts, .. } = eng.merge(30).await.unwrap() else {
+            panic!("esperava Merged");
+        };
+        let live = d.rig.dir("cfg-vivo");
+        let roots = roots_of(Class::Config, &live);
+        let dir = d.rig.tmp.path().join("conflitos");
+        let saved = eng
+            .save_conflict_losers(&conflicts, &dir, &roots)
+            .await
+            .unwrap();
+        assert_eq!(
+            saved,
+            SavedLosers {
+                saved: 1,
+                already: 0
+            }
+        );
+        let name = format!(
+            "config/settings.toml.conflito-pa-{}",
+            short_hex(b"perdedor A")
+        );
+        assert_eq!(fs::read(dir.join(name)).unwrap(), b"perdedor A");
+
+        // o vencedor é o que a pasta viva recebe; o perdedor não aparece nela
+        eng.restore(&id, &roots).await.unwrap();
+        assert_eq!(tree(&live), contents(&[("settings.toml", b"vencedor B")]));
     }
 
     // ---------- aplicar numa pasta viva (Fase 2a, PR 3) ----------
@@ -2716,6 +3570,7 @@ mod tests {
             EngineError::LocalChanges,
             EngineError::ReservedName,
             EngineError::OriginalKept,
+            EngineError::UnsafeConflictsDir,
             EngineError::NeedsNewKey { have: 1, found: 2 },
         ];
         for e in errors {
