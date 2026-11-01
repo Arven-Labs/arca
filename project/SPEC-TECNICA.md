@@ -64,7 +64,7 @@ Regras:
 Esboços por backend:
 - **Disco**: um arquivo por objeto (`<tipo>/<hex>`), gravado em arquivo temporário e `rename` atômico, permissão `0o600` (e `0o700` na pasta). Sempre presente, é a cópia local.
 - **Hub** (`warden-server`): réplica, não autoridade (ADR 0007). Contrato HTTP fica para a Fase 2.
-- **S3-compatível**: chave do objeto = `<tipo>/<hex>`. Cliente escolhido na Fase 3 (P-15).
+- **S3-compatível**: chave do objeto = `<tipo>/<hex>`. Cliente: `object_store` (ADR 0008, P-15).
 
 ## 5. Envelope e manifest
 
@@ -184,6 +184,6 @@ Tudo que vem de um backend ou do disco é entrada não confiável. Testes obriga
 
 ## 11. O que esta spec não resolve
 - Coleta de lixo: adiada para a Fase 3, a v1 guarda tudo (ADR 0011). Limite de tamanho por objeto.
-- Contrato HTTP do hub e fluxo de pareamento (Fase 2); cliente S3 (P-15).
+- Contrato HTTP do hub e fluxo de pareamento (Fase 2).
 - Os rótulos exatos do HKDF (Fase 1, ADR 0009) e a configuração por classe no Warden (Fase 2, ADR 0010).
 - Revisão de segurança independente (Fase 4). Nada aqui foi implementado nem testado; é desenho.

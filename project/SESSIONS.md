@@ -2,6 +2,15 @@
 
 Mais recente no topo.
 
+### 2026-11-01 — Sessão 17 (P-15: cliente S3)
+
+- **Pedido**: fazer o spike do cliente S3 agora, em vez de na Fase 3 (plano aprovado em plan mode; só Garage local e código descartável, por decisão do dono).
+- **Decisão do dono**: `object_store` (recomendação).
+- **Feito** (branch `docs/fase0-p15`): `PENDING.md` com P-15 resolvida; ADR 0008 com a tabela e os motivos; `SPEC-TECNICA.md` e `OVERVIEW.md`. Medição: crate descartável fora do repo com os mesmos casos nos quatro clientes, Garage 2.5.0 (`dxflrs/garage:v2.5.0`) em Docker só em loopback, builds para x86_64, aarch64 e armv7 Android (NDK 28), `cargo tree` e `cargo audit` contra o `advisory-db` de 2026-10-30. Container, volume e imagem removidos; sobrou um arquivo de dados do bucket descartável no scratchpad, de dono root (`.../scratchpad/garage/data`), sem segredo, que precisa de `sudo` para apagar.
+- **CI**: `guard` passou no PR #19 (visto com `gh pr checks`, 5s) antes deste ajuste do registro.
+- **Não verificado**: HTTPS real; B2 real; execução em aparelho Android; inicialização JNI do `rustls-platform-verifier`; multipart; o tamanho no app final.
+- **Fica**: P-16. Nenhuma pendência bloqueia a Fase 1.
+
 ### 2026-11-01 — Sessão 16 (P-06: teto do backup externo)
 
 - **Pedido**: fixar o orçamento do backup externo (plano aprovado em plan mode).
