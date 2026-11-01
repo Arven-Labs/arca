@@ -12,7 +12,7 @@ use crate::scan::{scan_class, Candidate, Skipped, MAX_FILE_BYTES};
 use crate::store::{verified_get, BlobStore, StoreError};
 use crate::FORMAT_VERSION;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -59,9 +59,6 @@ pub enum EngineError {
         "storage has {tips} tips and {rejected} unreadable manifests; refusing to build on it"
     )]
     Diverged { tips: usize, rejected: usize },
-    /// O mesmo `path` em classes diferentes (o manifest não distingue; ver P-23).
-    #[error("the same path appears in more than one class")]
-    PathCollision,
     /// A restauração só escreve em pasta inexistente ou vazia.
     #[error("restore target is not empty")]
     TargetNotEmpty,
@@ -186,7 +183,7 @@ impl<S: BlobStore> Engine<S> {
             .iter()
             .filter(|f| !roots.is_enabled(f.class))
             .collect();
-        let candidates = dedupe(candidates, &carried, &mut skipped)?;
+        let candidates = dedupe(candidates, &mut skipped);
 
         // 3. ler, comparar com a ponta e enviar só o que mudou
         let mut files: Vec<FileEntry> = carried.into_iter().cloned().collect();
@@ -220,7 +217,7 @@ impl<S: BlobStore> Engine<S> {
                 sha256,
             });
         }
-        files.sort_by(|a, b| a.path.cmp(&b.path));
+        files.sort_by(|a, b| (a.class, &a.path).cmp(&(b.class, &b.path)));
 
         if let Some(head) = &prev {
             if head.manifest.files == files {
@@ -365,35 +362,25 @@ async fn read_file(
     Ok(None)
 }
 
-/// Ordena por `path` (bytes) e resolve colisões, que o manifest não representa: o mesmo
-/// caminho (sem diferença de caixa) em classes diferentes é `PathCollision`; na mesma classe,
-/// fica o primeiro e o outro vai para `skipped`. As entradas carregadas da ponta contam.
-fn dedupe(
-    mut candidates: Vec<Candidate>,
-    carried: &[&FileEntry],
-    skipped: &mut Vec<Skipped>,
-) -> Result<Vec<Candidate>, EngineError> {
-    candidates.sort_by(|a, b| a.path.cmp(&b.path));
-    let mut seen: HashMap<String, Class> = carried
-        .iter()
-        .map(|f| (f.path.to_lowercase(), f.class))
-        .collect();
+/// Ordena por `(classe, path em bytes)` e resolve as colisões por caixa, que o manifest não
+/// representa: dentro de uma classe fica o primeiro e o outro vai para `skipped`. Classes
+/// diferentes vivem em pastas diferentes e nunca colidem (P-23).
+fn dedupe(mut candidates: Vec<Candidate>, skipped: &mut Vec<Skipped>) -> Vec<Candidate> {
+    candidates.sort_by(|a, b| (a.class, &a.path).cmp(&(b.class, &b.path)));
+    let mut seen: HashSet<(Class, String)> = HashSet::new();
     let mut kept = Vec::with_capacity(candidates.len());
     for candidate in candidates {
-        match seen.get(&candidate.path.to_lowercase()) {
-            Some(class) if *class != candidate.class => return Err(EngineError::PathCollision),
-            Some(_) => skipped.push(Skipped {
+        if seen.insert((candidate.class, candidate.path.to_lowercase())) {
+            kept.push(candidate);
+        } else {
+            skipped.push(Skipped {
                 class: candidate.class,
                 path: candidate.path,
                 reason: "differs only by case from another file",
-            }),
-            None => {
-                seen.insert(candidate.path.to_lowercase(), candidate.class);
-                kept.push(candidate);
-            }
+            });
         }
     }
-    Ok(kept)
+    kept
 }
 
 /// A pasta de destino tem de não existir ou estar vazia. Devolve se ela já existia.
@@ -768,7 +755,11 @@ mod tests {
         assert_eq!(n, 1);
         let cfg = |m: &Manifest| m.files.iter().find(|f| f.class == Class::Config).cloned();
         assert_eq!(cfg(&m2), cfg(&m1));
-        assert_eq!(file_paths(&m2), ["config.toml", "nota.md"]);
+        assert_eq!(
+            file_paths(&m2),
+            ["nota.md", "config.toml"],
+            "vault antes de config"
+        );
     }
 
     #[tokio::test]
@@ -873,23 +864,107 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_same_path_in_two_classes_is_refused_before_anything_is_uploaded() {
+    async fn the_same_path_in_two_classes_is_backed_up_and_restored_to_each_class() {
         let rig = Rig::new();
         let vault = rig.dir("vault");
         let config = rig.dir("config");
+        let secret = rig.dir("secret");
         write(&vault, "config.toml", b"nota com nome de config");
+        write(&config, "config.toml", b"a = 1");
+        write(&secret, "config.toml", b"{}");
+        // caixa diferente entre classes também não colide: são pastas diferentes
+        write(&vault, "Slack.json", b"nota");
+        write(&secret, "slack.json", b"token");
+        let roots = Roots {
+            vault: Some(vault.clone()),
+            config: Some(config.clone()),
+            secret: Some(secret.clone()),
+        };
+        let eng = rig.engine("pc");
+        let (id, m, new_blobs, skipped) = created(eng.snapshot(&roots, 1).await.unwrap());
+        assert!(skipped.is_empty(), "{skipped:?}");
+        assert_eq!(new_blobs, 5);
+        let entries: Vec<(Class, &str)> =
+            m.files.iter().map(|f| (f.class, f.path.as_str())).collect();
+        assert_eq!(
+            entries,
+            [
+                (Class::Vault, "Slack.json"),
+                (Class::Vault, "config.toml"),
+                (Class::Config, "config.toml"),
+                (Class::Secret, "config.toml"),
+                (Class::Secret, "slack.json"),
+            ]
+        );
+
+        let target = rig.dir("restaurado");
+        let restored_roots = Roots {
+            vault: Some(target.join("vault")),
+            config: Some(target.join("config")),
+            secret: Some(target.join("secret")),
+        };
+        assert_eq!(
+            eng.restore(&id, &restored_roots).await.unwrap(),
+            Restored { files: 5 }
+        );
+        assert_eq!(tree(&target.join("vault")), tree(&vault));
+        assert_eq!(tree(&target.join("config")), tree(&config));
+        assert_eq!(tree(&target.join("secret")), tree(&secret));
+    }
+
+    /// Um segundo snapshot sem mudança não pode tratar o mesmo `path` de outra classe como
+    /// "já visto": a entrada carregada da ponta é por `(classe, path)`.
+    #[tokio::test]
+    async fn an_unchanged_two_class_vault_snapshots_as_unchanged() {
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        let config = rig.dir("config");
+        write(&vault, "config.toml", b"nota");
         write(&config, "config.toml", b"a = 1");
         let roots = Roots {
             vault: Some(vault),
             config: Some(config),
             secret: None,
         };
+        let eng = rig.engine("pc");
+        created(eng.snapshot(&roots, 1).await.unwrap());
+        assert!(matches!(
+            eng.snapshot(&roots, 2).await.unwrap(),
+            Snapshot::Unchanged { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn editing_one_class_keeps_the_same_path_of_the_other_class() {
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        let config = rig.dir("config");
+        write(&vault, "config.toml", b"nota");
+        write(&config, "config.toml", b"a = 1");
+        let roots = Roots {
+            vault: Some(vault.clone()),
+            config: Some(config.clone()),
+            secret: None,
+        };
+        let eng = rig.engine("pc");
+        created(eng.snapshot(&roots, 1).await.unwrap());
+        write(&config, "config.toml", b"a = 2");
+        let (id, m, new_blobs, _) = created(eng.snapshot(&roots, 2).await.unwrap());
+        assert_eq!(new_blobs, 1, "só o config mudou");
+
+        let target = rig.dir("restaurado");
+        let restored_roots = Roots {
+            vault: Some(target.join("vault")),
+            config: Some(target.join("config")),
+            secret: None,
+        };
+        eng.restore(&id, &restored_roots).await.unwrap();
+        assert_eq!(m.files.len(), 2);
+        assert_eq!(fs::read(target.join("vault/config.toml")).unwrap(), b"nota");
         assert_eq!(
-            rig.engine("pc").snapshot(&roots, 1).await,
-            Err(EngineError::PathCollision)
+            fs::read(target.join("config/config.toml")).unwrap(),
+            b"a = 2"
         );
-        assert_eq!(rig.count(ObjectKind::Blob).await, 0);
-        assert_eq!(rig.count(ObjectKind::Manifest).await, 0);
     }
 
     #[tokio::test]
@@ -1376,7 +1451,6 @@ mod tests {
                 tips: 2,
                 rejected: 0,
             },
-            EngineError::PathCollision,
             EngineError::Integrity,
             EngineError::MissingObject,
         ];

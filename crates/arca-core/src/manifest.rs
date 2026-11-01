@@ -71,7 +71,10 @@ impl<'de> Deserialize<'de> for Hash32 {
 }
 
 /// Classe de uma entrada (ADR 0010).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// A ordem de declaração (`Vault < Config < Secret`) é a ordem das entradas no manifest e,
+/// portanto, parte do formato.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Class {
     Vault,
@@ -213,10 +216,15 @@ impl Manifest {
         let mut folded = HashSet::with_capacity(self.files.len());
         for (i, file) in self.files.iter().enumerate() {
             validate_path(&file.path)?;
-            if i > 0 && self.files[i - 1].path >= file.path {
-                return Err(Error::InvalidManifest("files not in strict path order"));
+            if i > 0 {
+                let prev = &self.files[i - 1];
+                if (prev.class, &prev.path) >= (file.class, &file.path) {
+                    return Err(Error::InvalidManifest(
+                        "files not in strict (class, path) order",
+                    ));
+                }
             }
-            if !folded.insert(file.path.to_lowercase()) {
+            if !folded.insert((file.class, file.path.to_lowercase())) {
                 return Err(Error::InvalidManifest("paths differ only by case"));
             }
         }
@@ -799,11 +807,87 @@ mod tests {
         ));
     }
 
+    /// Entrada com classe explícita, para os testes de identidade `(classe, path)` (P-23).
+    fn classed(class: Class, path: &str) -> FileEntry {
+        FileEntry {
+            class,
+            ..entry(path)
+        }
+    }
+
+    fn with_files(files: Vec<FileEntry>) -> Manifest {
+        Manifest {
+            files,
+            ..manifest(1, &[])
+        }
+    }
+
     #[test]
-    fn same_path_in_different_classes_is_still_a_duplicate() {
-        let mut m = manifest(1, &["a.md", "a.md"]);
-        m.files[1].class = Class::Config;
-        assert!(m.validate().is_err());
+    fn same_path_in_different_classes_is_valid() {
+        // `config.toml` na raiz do Vault e o `config.toml` da classe `config` (P-23)
+        let m = with_files(vec![
+            classed(Class::Vault, "config.toml"),
+            classed(Class::Config, "config.toml"),
+            classed(Class::Secret, "config.toml"),
+        ]);
+        assert_eq!(m.validate(), Ok(()));
+        // e sobrevive a ida e volta em JSON
+        let back = Manifest::from_slice(&m.to_vec().unwrap()).unwrap();
+        assert_eq!(back, m);
+    }
+
+    #[test]
+    fn same_path_in_the_same_class_is_still_a_duplicate() {
+        for class in [Class::Vault, Class::Config, Class::Secret] {
+            let m = with_files(vec![classed(class, "a.md"), classed(class, "a.md")]);
+            assert!(
+                matches!(m.validate(), Err(Error::InvalidManifest(_))),
+                "{class:?}"
+            );
+        }
+    }
+
+    /// A ordem estrita é por `(classe, path)`: primeiro a classe (vault, config, secret),
+    /// depois o `path` em bytes.
+    #[test]
+    fn files_are_ordered_by_class_then_path() {
+        let ok = with_files(vec![
+            classed(Class::Vault, "z.md"),
+            classed(Class::Config, "a.toml"),
+            classed(Class::Secret, "a.json"),
+        ]);
+        assert_eq!(ok.validate(), Ok(()));
+        for files in [
+            // classe fora de ordem, mesmo com o `path` crescente
+            vec![classed(Class::Config, "a"), classed(Class::Vault, "b")],
+            vec![classed(Class::Secret, "a"), classed(Class::Config, "b")],
+            // mesma classe, `path` fora de ordem
+            vec![classed(Class::Config, "b"), classed(Class::Config, "a")],
+        ] {
+            assert!(
+                matches!(
+                    with_files(files.clone()).validate(),
+                    Err(Error::InvalidManifest(_))
+                ),
+                "{files:?}"
+            );
+        }
+    }
+
+    /// A colisão por caixa (macOS e Windows) só existe dentro de uma pasta de classe: classes
+    /// diferentes vivem em pastas diferentes.
+    #[test]
+    fn case_collisions_are_checked_within_a_class_only() {
+        let across = with_files(vec![
+            classed(Class::Vault, "A.md"),
+            classed(Class::Config, "a.md"),
+        ]);
+        assert_eq!(across.validate(), Ok(()));
+        let within = with_files(vec![
+            classed(Class::Config, "A.md"),
+            classed(Class::Config, "a.md"),
+        ]);
+        assert!(matches!(within.validate(), Err(Error::InvalidManifest(_))));
     }
 
     #[test]
@@ -974,6 +1058,8 @@ mod tests {
                     sha256: rng.hash(),
                 });
             }
+            m.files
+                .sort_by(|a, b| (a.class, &a.path).cmp(&(b.class, &b.path)));
             assert_eq!(m.validate(), Ok(()), "round {round}");
             let json = m.to_vec().unwrap();
             assert_eq!(
