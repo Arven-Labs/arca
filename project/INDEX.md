@@ -1,6 +1,6 @@
 # arca: Estado do Projeto
 
-> Última atualização: 2026-10-31 (Sessão 1: criação do repositório e decisões iniciais)
+> Última atualização: 2026-11-01 (Fase 0 fechada nos documentos; P-11 e P-14 corrigidos no Warden)
 
 ## Como usar este arquivo
 
