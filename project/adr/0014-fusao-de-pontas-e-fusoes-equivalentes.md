@@ -31,4 +31,9 @@ A Fase 2 junta pontas divergentes (spec §6 e §7, ADR 0005). Antes de gravar ma
 - O relógio do dispositivo decide quem fica no lugar e pode errar; por isso o perdedor é sempre guardado.
 - **Limite (P-26):** se o nome da cópia estourar o limite de componente (255 bytes), `merge_files` devolve `InvalidPath` e a fusão desse par falha em vez de perder o arquivo. Aparece só com nomes de arquivo perto de 220 bytes.
 - **Limite:** a data da cópia é a do perdedor, então duas cópias do mesmo arquivo e mesmo dispositivo no mesmo segundo ganham sufixo `-2`.
-- **Não validado:** o desempenho de `common_ancestor` em históricos grandes (é quadrático nos candidatos comuns; aceitável para dezenas de milhares de manifests, não medido); o comportamento com relógios muito errados; fusão de mais de duas pontas (PR 2 dobra em pares).
+- **Não validado:** o desempenho de `common_ancestor` em históricos grandes (é quadrático nos candidatos comuns; aceitável para dezenas de milhares de manifests, não medido); o comportamento com relógios muito errados; o custo de checar `has` em todo blob do resultado quando o backend for remoto (2b).
+
+## Atualização (PR 2, `Engine::merge`)
+- **Mais de duas pontas: um par por chamada** (decisão do dono, 2026-11-01). `merge` funde as duas primeiras pontas na ordem `(counter, hash)` e devolve `tips_after`; o chamador repete até chegar a 1. Todo manifest do grafo é real (sem nó virtual) e dois dispositivos escolhem o mesmo par, então as fusões equivalentes colapsam. Descartado: dobrar N pontas numa chamada (exige nó virtual e deixa ambíguo o "dispositivo" do acumulado num conflito).
+- **Manifest de fusão:** `base_version` = a maior ponta do par, `merged_from` = a outra, `counter` = máximo + 1, sempre gravado (é a aresta que junta o grafo).
+- **Recusas sem gravar:** manifest ilegível (`Diverged`), blob ausente (`MissingObject`, o manifest nunca cita o que não está no armazenamento) e nome de cópia longo demais (`ConflictCopyName`, P-26).
