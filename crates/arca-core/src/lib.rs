@@ -2,6 +2,7 @@
 //! criptografia no cliente. A lógica entra aos poucos, um PR por intenção (Fase 1).
 #![forbid(unsafe_code)]
 
+mod apply;
 pub mod backend;
 pub mod crypto;
 pub mod disk;

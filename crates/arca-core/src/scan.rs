@@ -2,6 +2,7 @@
 //! conteúdo. Nunca segue symlink. O que não pode entrar vai para `skipped`, com motivo fixo,
 //! em vez de derrubar o backup inteiro.
 
+use crate::apply::is_reserved_name;
 use crate::error::Error;
 use crate::manifest::{validate_path, Class};
 use std::fs;
@@ -74,7 +75,10 @@ pub fn scan_class(class: Class, root: &Path) -> io::Result<Scan> {
                 stack.push((entry.path(), rel));
             } else if kind.is_file() {
                 let len = entry.metadata()?.len();
-                if len > MAX_FILE_BYTES {
+                if is_reserved_name(name) {
+                    // sobra do `apply` ou do `write_atomic`: pode ter a versão antiga de um segredo
+                    skip(&mut scan, rel, "reserved name");
+                } else if len > MAX_FILE_BYTES {
                     skip(&mut scan, rel, "file too large");
                 } else {
                     match validate_path(&rel) {
@@ -116,6 +120,30 @@ mod tests {
         let p = root.join(rel);
         fs::create_dir_all(p.parent().unwrap()).unwrap();
         fs::write(p, data).unwrap();
+    }
+
+    /// Sobras do `apply` e do `write_atomic` nunca entram no snapshot: poderiam carregar a
+    /// versão antiga de um segredo para o manifest e para os outros dispositivos.
+    #[test]
+    fn leftover_temporaries_are_skipped_not_backed_up() {
+        let tmp = TempDir::new();
+        write(tmp.path(), "ok.md", b"1");
+        write(tmp.path(), ".arca-old-3", b"segredo antigo");
+        write(tmp.path(), "sub/.arca-new-1", b"2");
+        write(tmp.path(), ".tmp-0123456789abcdef", b"3");
+        // parecidos, mas não são nossos: entram normalmente
+        write(tmp.path(), ".arca-new-x", b"4");
+        write(tmp.path(), ".tmp-notes", b"5");
+        let scan = scan_class(Class::Vault, tmp.path()).unwrap();
+        assert_eq!(paths(&scan), [".arca-new-x", ".tmp-notes", "ok.md"]);
+        assert_eq!(
+            reasons(&scan),
+            [
+                (".arca-old-3", "reserved name"),
+                (".tmp-0123456789abcdef", "reserved name"),
+                ("sub/.arca-new-1", "reserved name"),
+            ]
+        );
     }
 
     fn paths(scan: &Scan) -> Vec<&str> {

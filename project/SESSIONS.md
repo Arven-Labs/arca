@@ -2,6 +2,18 @@
 
 Mais recente no topo.
 
+### 2026-11-01 — Sessão 35 (Fase 2a, PR 3: `Engine::apply` e auditoria)
+
+- **Pedido**: PR 3 da Fase 2a, aplicar um manifest numa pasta viva (operação destrutiva, AGENTS.md §4). Plano aprovado em plan mode.
+- **Decisão do dono**: edição local no caminho = recusar tudo (`LocalChanges`). Descartados: pular só esses arquivos, salvar a edição numa cópia.
+- **Testes primeiro** (revisados pelo dono): 16 falhavam no `todo!()`. Um teste meu corrigido na implementação (`applying_to_nothing_creates_everything`: eram 5 arquivos, não 6), mostrado ao dono.
+- **Feito**: `apply.rs` (novo: `plan`, `stage`, `commit`, `finish`, `undo_all`) e `Engine::apply`; `plain_blob` extraído de `restore_files`. Três testes acrescentados em `apply.rs` para a segunda conferência.
+- **Auditoria** (`security-auditor`, somente leitura): nenhum achado crítico (backend hostil não escreve fora da raiz). Importantes, conferidos no código e **corrigidos** neste PR: I-1 desfazer sobrescrevia (agora `hard_link`, `OriginalKept`), I-3/I-4 nomes de temporário entravam no snapshot ou colidiam (nomes reservados; `ReservedName`), I-5 symlink só era checado no `plan` (agora também `stage` e `commit`). **Não corrigido por decisão do dono**: I-2 recuperação após morte do processo (P-27, PR 3c). Sugestões S-1 a S-11 registradas no P-29. 7 testes novos para I-1, I-3, I-4 e I-5.
+- **Desvios de processo meus**: usei `cat >> ... <<EOF` no Bash para acrescentar testes a `apply.rs` (contra o `CLAUDE.md`; avisei na hora, o conteúdo está no diff); mexi num teste já revisado (contagem), mostrado ao dono.
+- **Verificado localmente**: `cargo test --workspace` (253 passam), `clippy --all-targets -D warnings`, `fmt --check`. CI do PR: ver o PR.
+- **Não verificado**: concorrência real, queda de energia, macOS/Windows, FAT/FUSE; os cenários I-1/I-2/I-5 do auditor foram provados por leitura e por teste sequencial, não sob corrida.
+- **Fica**: PR 3b (perdedores de `config`/`secret`, P-28), PR 3c (recuperação, P-27), PR 4 (último manifest aceito), PR 5 (replicação); 2b; P-09, P-22, P-25, P-26, P-29.
+
 ### 2026-11-01 — Sessão 34 (Fase 2a, PR 2: `Engine::merge`)
 
 - **Pedido**: PR 2 da Fase 2a, depois do #35 mesclado. Plano aprovado em plan mode.

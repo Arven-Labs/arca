@@ -2,6 +2,7 @@
 //! do zero** (`SPEC-TECNICA.md` §6, "Envio" e "Recebimento", sem a parte de rede). Sync entre
 //! dispositivos, junção de pontas e regra de conflito são da Fase 2.
 
+use crate::apply::{commit, finish, is_reserved_name, plan, stage, undo_all, Item, Kind, Undo};
 use crate::crypto::{open, seal, EpochKeys};
 use crate::disk::{create_private_dir, write_atomic};
 use crate::envelope::Header;
@@ -14,7 +15,7 @@ use crate::scan::{scan_class, Candidate, Skipped, MAX_FILE_BYTES};
 use crate::store::{verified_get, BlobStore, StoreError};
 use crate::FORMAT_VERSION;
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -70,6 +71,21 @@ pub enum EngineError {
     /// O nome da cópia `.conflito-*` não cabe num caminho válido (P-26): nada foi gravado.
     #[error("conflict copy name does not fit in a valid path")]
     ConflictCopyName,
+    /// Um arquivo que o `apply` mudaria já difere do estado de origem no disco (edição local
+    /// ainda sem snapshot), ou o caminho passa por um symlink: nada foi escrito nem apagado.
+    #[error("the folder has local changes in files the apply would touch; take a snapshot first")]
+    LocalChanges,
+    /// Uma entrada do manifest tem nome de temporário da arca (`.arca-new-*`, `.arca-old-*`,
+    /// `.tmp-*`): o `apply` recusa em vez de colidir com os próprios arquivos de trabalho.
+    #[error("a manifest entry uses a name reserved for temporary files")]
+    ReservedName,
+    /// O `apply` falhou e, ao desfazer, o original não pôde voltar (a pessoa recriou o arquivo
+    /// no meio-tempo, ou a pasta não deixa): ele **ficou ao lado** como `.arca-old-<n>`, e
+    /// nada foi sobrescrito.
+    #[error(
+        "the apply failed and a previous version could not be put back; it was kept beside it"
+    )]
+    OriginalKept,
     /// A restauração só escreve em pasta inexistente ou vazia.
     #[error("restore target is not empty")]
     TargetNotEmpty,
@@ -144,6 +160,16 @@ pub enum MergeOutcome {
         /// Pontas que existem depois desta fusão; repetir `merge` até chegar a 1.
         tips_after: usize,
     },
+}
+
+/// Resultado de `Engine::apply`: o que mudou na pasta viva, por entrada do manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Applied {
+    pub created: usize,
+    pub updated: usize,
+    pub removed: usize,
+    /// Já estava no estado de destino (igual nos dois manifests, ou já aplicado antes).
+    pub unchanged: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -436,6 +462,102 @@ impl<S: BlobStore> Engine<S> {
         })
     }
 
+    /// Leva a pasta viva do estado `from` (o manifest que ela reflete; `None` = nenhum) ao de
+    /// `to`: cria, atualiza e remove só o que difere, tudo ou nada. Recusa com `LocalChanges`
+    /// se um arquivo do diff já foi alterado no disco, sem escrever nada.
+    pub async fn apply(
+        &self,
+        from: Option<&ObjectId>,
+        to: &ObjectId,
+        roots: &Roots,
+    ) -> Result<Applied, EngineError> {
+        let from_manifest = match from {
+            Some(id) => Some(self.read_manifest(id).await?),
+            None => None,
+        };
+        let to_manifest = self.read_manifest(to).await?;
+        let enabled = roots.enabled();
+
+        // o diff por (classe, path), só das classes com pasta ligada
+        let index = |files: &'_ [FileEntry]| -> BTreeMap<(Class, String), FileEntry> {
+            files
+                .iter()
+                .map(|f| ((f.class, f.path.clone()), f.clone()))
+                .collect()
+        };
+        let from_ix = index(from_manifest.as_ref().map_or(&[], |m| &m.files));
+        let to_ix = index(&to_manifest.files);
+        let keys: BTreeSet<&(Class, String)> = from_ix.keys().chain(to_ix.keys()).collect();
+        let mut items = Vec::new();
+        let mut same = 0;
+        for key in keys {
+            let Some((_, root)) = enabled.iter().find(|(class, _)| *class == key.0) else {
+                continue;
+            };
+            // o nome de um temporário do próprio `apply` não pode ser destino nem origem
+            if is_reserved_name(key.1.rsplit('/').next().unwrap_or(&key.1)) {
+                return Err(EngineError::ReservedName);
+            }
+            let (f, t) = (from_ix.get(key), to_ix.get(key));
+            let kind = match (f, t) {
+                (Some(f), Some(t)) if f.sha256 == t.sha256 => {
+                    same += 1;
+                    continue;
+                }
+                (Some(_), Some(_)) => Kind::Update,
+                (None, Some(_)) => Kind::Create,
+                (Some(_), None) => Kind::Remove,
+                (None, None) => continue,
+            };
+            items.push(Item {
+                kind,
+                root: root.to_path_buf(),
+                dest: safe_join(root, &key.1)?,
+                from: f.cloned(),
+                to: t.cloned(),
+            });
+        }
+
+        // 1. conferir o disco sem escrever
+        let (planned, already) = run(move || plan(items)).await?;
+        let counts = |kind: Kind| planned.iter().filter(|p| p.kind == kind).count();
+        let applied = Applied {
+            created: counts(Kind::Create),
+            updated: counts(Kind::Update),
+            removed: counts(Kind::Remove),
+            unchanged: same + already,
+        };
+
+        // 2. buscar, verificar e gravar o conteúdo novo ao lado dos destinos
+        let mut log = Vec::new();
+        for p in planned.iter().filter(|p| p.kind != Kind::Remove) {
+            let Some(entry) = &p.to else { continue };
+            let plain = match self.plain_blob(entry).await {
+                Ok(plain) => plain,
+                Err(e) => return Err(rollback(log, e).await),
+            };
+            let one = p.clone();
+            let (back, result) = with_log(log, move |log| stage(log, &one, &plain)).await;
+            log = back;
+            if let Err(e) = result {
+                return Err(rollback(log, e).await);
+            }
+        }
+
+        // 3. trocar; qualquer falha devolve tudo como estava
+        let all = planned.clone();
+        let (log, result) = with_log(log, move |log| commit(log, &all)).await;
+        if let Err(e) = result {
+            return Err(rollback(log, e).await);
+        }
+        run(move || {
+            finish(&planned);
+            Ok(())
+        })
+        .await?;
+        Ok(applied)
+    }
+
     /// Restaura o manifest `id` nas pastas de `roots`, que têm de não existir ou estar vazias.
     pub async fn restore(&self, id: &ObjectId, roots: &Roots) -> Result<Restored, EngineError> {
         let manifest = self.read_manifest(id).await?;
@@ -466,6 +588,24 @@ impl<S: BlobStore> Engine<S> {
         result
     }
 
+    /// Busca o blob da entrada, decifra e confere `size` e `sha256` do texto claro.
+    async fn plain_blob(&self, entry: &FileEntry) -> Result<Zeroizing<Vec<u8>>, EngineError> {
+        let blob = ObjectId {
+            kind: ObjectKind::Blob,
+            hash: entry.blob.0,
+        };
+        let bytes = verified_get(&self.store, &blob)
+            .await?
+            .ok_or(EngineError::MissingObject)?;
+        let plain = open(&self.keys, ObjectKind::Blob, &bytes)?;
+        if plain.len() as u64 != entry.size
+            || Hash32(Sha256::digest(plain.as_slice()).into()) != entry.sha256
+        {
+            return Err(EngineError::Integrity);
+        }
+        Ok(plain)
+    }
+
     async fn restore_files(
         &self,
         manifest: &Manifest,
@@ -481,19 +621,7 @@ impl<S: BlobStore> Engine<S> {
             let Some((_, root)) = enabled.iter().find(|(class, _)| *class == entry.class) else {
                 continue;
             };
-            let blob = ObjectId {
-                kind: ObjectKind::Blob,
-                hash: entry.blob.0,
-            };
-            let bytes = verified_get(&self.store, &blob)
-                .await?
-                .ok_or(EngineError::MissingObject)?;
-            let plain = open(&self.keys, ObjectKind::Blob, &bytes)?;
-            if plain.len() as u64 != entry.size
-                || Hash32(Sha256::digest(plain.as_slice()).into()) != entry.sha256
-            {
-                return Err(EngineError::Integrity);
-            }
+            let plain = self.plain_blob(entry).await?;
             let dest = safe_join(root, &entry.path)?;
             run(move || {
                 if let Some(parent) = dest.parent() {
@@ -517,6 +645,33 @@ where
     tokio::task::spawn_blocking(f)
         .await
         .map_err(|_| EngineError::Io(io::ErrorKind::Other))?
+}
+
+/// Como `run`, mas passa o diário de desfazer para dentro e o devolve junto com o resultado.
+/// Se a tarefa morrer (pânico), o diário se perde: o erro é genérico.
+async fn with_log<T, F>(log: Vec<Undo>, f: F) -> (Vec<Undo>, Result<T, EngineError>)
+where
+    T: Send + 'static,
+    F: FnOnce(&mut Vec<Undo>) -> Result<T, EngineError> + Send + 'static,
+{
+    let task = tokio::task::spawn_blocking(move || {
+        let mut log = log;
+        let result = f(&mut log);
+        (log, result)
+    });
+    match task.await {
+        Ok(pair) => pair,
+        Err(_) => (Vec::new(), Err(EngineError::Io(io::ErrorKind::Other))),
+    }
+}
+
+/// Desfaz o diário e devolve o erro que causou a volta.
+/// Se algum original não pôde voltar (o destino foi recriado), o erro passa a ser `OriginalKept`.
+async fn rollback(log: Vec<Undo>, error: EngineError) -> EngineError {
+    match tokio::task::spawn_blocking(move || undo_all(log)).await {
+        Ok(kept) if !kept.is_empty() => EngineError::OriginalKept,
+        _ => error,
+    }
 }
 
 fn io_error(e: io::Error) -> EngineError {
@@ -1532,6 +1687,437 @@ mod tests {
         assert!(text.contains("merge"), "{text}");
     }
 
+    // ---------- aplicar numa pasta viva (Fase 2a, PR 3) ----------
+
+    /// Dois estados do mesmo Vault e uma pasta `target` que reflete o primeiro.
+    ///
+    /// v1: a.md, b.md, sub/c.md, sub/other.md, gone/z.md, keep.md
+    /// v2: a.md muda; b.md, sub/c.md e gone/z.md somem; new.md e deep/new/x.md aparecem;
+    ///     sub/other.md e keep.md ficam iguais.
+    struct Hist {
+        rig: Rig,
+        v1: ObjectId,
+        v2: ObjectId,
+        /// Pasta que reflete v1 (é onde o `apply` roda).
+        target: PathBuf,
+        /// Árvore esperada depois de aplicar v2.
+        v2_tree: BTreeMap<String, Vec<u8>>,
+    }
+
+    async fn hist() -> Hist {
+        let rig = Rig::new();
+        let work = rig.dir("work");
+        for (path, data) in [
+            ("a.md", b"1" as &[u8]),
+            ("b.md", b"1"),
+            ("sub/c.md", b"1"),
+            ("sub/other.md", b"1"),
+            ("gone/z.md", b"1"),
+            ("keep.md", b"1"),
+        ] {
+            write(&work, path, data);
+        }
+        let eng = rig.engine("pc");
+        let (v1, ..) = created(eng.snapshot(&vault_only(&work), 1).await.unwrap());
+        let target = rig.tmp.path().join("target");
+        copy_dir(&work, &target);
+
+        write(&work, "a.md", b"2");
+        fs::remove_file(work.join("b.md")).unwrap();
+        fs::remove_file(work.join("sub/c.md")).unwrap();
+        fs::remove_dir_all(work.join("gone")).unwrap();
+        write(&work, "new.md", b"N");
+        write(&work, "deep/new/x.md", b"X");
+        let (v2, ..) = created(eng.snapshot(&vault_only(&work), 2).await.unwrap());
+        let v2_tree = tree(&work);
+        Hist {
+            rig,
+            v1,
+            v2,
+            target,
+            v2_tree,
+        }
+    }
+
+    fn no_leftovers(tree: &BTreeMap<String, Vec<u8>>) {
+        assert!(
+            tree.keys().all(|k| !k.contains(".arca-")),
+            "sobras temporárias: {:?}",
+            tree.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_takes_the_folder_from_one_manifest_to_the_next() {
+        let h = hist().await;
+        let applied = h
+            .rig
+            .engine("pc")
+            .apply(Some(&h.v1), &h.v2, &vault_only(&h.target))
+            .await
+            .unwrap();
+        assert_eq!(
+            applied,
+            Applied {
+                created: 2,
+                updated: 1,
+                removed: 3,
+                unchanged: 2
+            }
+        );
+        let after = tree(&h.target);
+        no_leftovers(&after);
+        assert_eq!(after, h.v2_tree);
+        // pasta esvaziada pela remoção some; a que ainda tem arquivo e a raiz ficam
+        assert!(!h.target.join("gone").exists());
+        assert!(h.target.join("sub/other.md").exists());
+        assert!(h.target.is_dir());
+    }
+
+    #[tokio::test]
+    async fn applying_the_same_change_twice_changes_nothing_the_second_time() {
+        let h = hist().await;
+        let eng = h.rig.engine("pc");
+        let roots = vault_only(&h.target);
+        eng.apply(Some(&h.v1), &h.v2, &roots).await.unwrap();
+        let second = eng.apply(Some(&h.v1), &h.v2, &roots).await.unwrap();
+        assert_eq!(
+            second,
+            Applied {
+                created: 0,
+                updated: 0,
+                removed: 0,
+                unchanged: 8
+            }
+        );
+        assert_eq!(tree(&h.target), h.v2_tree);
+    }
+
+    #[tokio::test]
+    async fn applying_to_nothing_creates_everything() {
+        let h = hist().await;
+        let fresh = h.rig.tmp.path().join("novo");
+        let applied = h
+            .rig
+            .engine("pc")
+            .apply(None, &h.v2, &vault_only(&fresh))
+            .await
+            .unwrap();
+        assert_eq!(
+            applied,
+            Applied {
+                created: 5, // a.md, sub/other.md, keep.md, new.md, deep/new/x.md
+                updated: 0,
+                removed: 0,
+                unchanged: 0
+            }
+        );
+        assert_eq!(tree(&fresh), h.v2_tree);
+    }
+
+    #[tokio::test]
+    async fn applying_a_manifest_onto_itself_touches_nothing() {
+        let h = hist().await;
+        let before = tree(&h.target);
+        let applied = h
+            .rig
+            .engine("pc")
+            .apply(Some(&h.v1), &h.v1, &vault_only(&h.target))
+            .await
+            .unwrap();
+        assert_eq!(applied.created + applied.updated + applied.removed, 0);
+        assert_eq!(tree(&h.target), before);
+    }
+
+    // ---------- aplicar: edição local ----------
+
+    /// Recusa e a pasta fica exatamente como estava, sem nenhuma sobra temporária.
+    async fn assert_refused_and_untouched(h: &Hist) {
+        let before = tree(&h.target);
+        let result = h
+            .rig
+            .engine("pc")
+            .apply(Some(&h.v1), &h.v2, &vault_only(&h.target))
+            .await;
+        assert_eq!(result, Err(EngineError::LocalChanges));
+        let after = tree(&h.target);
+        no_leftovers(&after);
+        assert_eq!(after, before);
+    }
+
+    #[tokio::test]
+    async fn a_local_edit_in_a_file_the_apply_would_update_is_refused() {
+        let h = hist().await;
+        write(&h.target, "a.md", b"edicao local");
+        assert_refused_and_untouched(&h).await;
+    }
+
+    #[tokio::test]
+    async fn a_local_edit_in_a_file_the_apply_would_remove_is_refused() {
+        let h = hist().await;
+        write(&h.target, "b.md", b"edicao local");
+        assert_refused_and_untouched(&h).await;
+    }
+
+    #[tokio::test]
+    async fn a_file_deleted_locally_that_the_apply_would_update_is_refused() {
+        let h = hist().await;
+        fs::remove_file(h.target.join("a.md")).unwrap();
+        assert_refused_and_untouched(&h).await;
+    }
+
+    #[tokio::test]
+    async fn a_file_deleted_locally_that_the_apply_would_remove_is_fine() {
+        let h = hist().await;
+        fs::remove_file(h.target.join("b.md")).unwrap();
+        h.rig
+            .engine("pc")
+            .apply(Some(&h.v1), &h.v2, &vault_only(&h.target))
+            .await
+            .unwrap();
+        assert_eq!(tree(&h.target), h.v2_tree);
+    }
+
+    #[tokio::test]
+    async fn a_local_edit_outside_the_diff_is_kept() {
+        let h = hist().await;
+        write(&h.target, "keep.md", b"minha edicao");
+        write(&h.target, "extra.md", b"arquivo que ninguem sincronizou");
+        h.rig
+            .engine("pc")
+            .apply(Some(&h.v1), &h.v2, &vault_only(&h.target))
+            .await
+            .unwrap();
+        let after = tree(&h.target);
+        assert_eq!(after["keep.md"], b"minha edicao");
+        assert_eq!(after["extra.md"], b"arquivo que ninguem sincronizou");
+        assert_eq!(after["a.md"], b"2");
+    }
+
+    #[tokio::test]
+    async fn a_file_to_create_that_already_exists_is_fine_only_with_the_same_content() {
+        let h = hist().await;
+        write(&h.target, "new.md", b"N"); // mesmo conteúdo de v2
+        let applied = h
+            .rig
+            .engine("pc")
+            .apply(Some(&h.v1), &h.v2, &vault_only(&h.target))
+            .await
+            .unwrap();
+        assert_eq!((applied.created, applied.unchanged), (1, 3));
+
+        let h = hist().await;
+        write(&h.target, "new.md", b"outro conteudo");
+        assert_refused_and_untouched(&h).await;
+    }
+
+    #[tokio::test]
+    async fn a_disabled_class_is_not_touched() {
+        let h = hist().await;
+        let before = tree(&h.target);
+        let applied = h
+            .rig
+            .engine("pc")
+            .apply(Some(&h.v1), &h.v2, &Roots::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            applied,
+            Applied {
+                created: 0,
+                updated: 0,
+                removed: 0,
+                unchanged: 0
+            }
+        );
+        assert_eq!(tree(&h.target), before);
+    }
+
+    // ---------- aplicar: symlinks (nunca sair da pasta) ----------
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlink_in_place_of_a_file_to_update_is_refused() {
+        let h = hist().await;
+        let outside = h.rig.dir("fora");
+        write(&outside, "alvo.md", b"nao mexa");
+        fs::remove_file(h.target.join("a.md")).unwrap();
+        std::os::unix::fs::symlink(outside.join("alvo.md"), h.target.join("a.md")).unwrap();
+        let result = h
+            .rig
+            .engine("pc")
+            .apply(Some(&h.v1), &h.v2, &vault_only(&h.target))
+            .await;
+        assert_eq!(result, Err(EngineError::LocalChanges));
+        assert_eq!(fs::read(outside.join("alvo.md")).unwrap(), b"nao mexa");
+    }
+
+    /// `deep` aponta para fora: escrever `deep/new/x.md` iria parar fora do Vault.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlinked_folder_on_the_way_is_refused_and_nothing_leaks_outside() {
+        let h = hist().await;
+        let outside = h.rig.dir("fora");
+        std::os::unix::fs::symlink(&outside, h.target.join("deep")).unwrap();
+        let result = h
+            .rig
+            .engine("pc")
+            .apply(Some(&h.v1), &h.v2, &vault_only(&h.target))
+            .await;
+        assert_eq!(result, Err(EngineError::LocalChanges));
+        assert!(fs::read_dir(&outside).unwrap().next().is_none());
+        // e nada do resto foi aplicado
+        assert_eq!(fs::read(h.target.join("a.md")).unwrap(), b"1");
+    }
+
+    // ---------- aplicar: blob ruim e falha no commit ----------
+
+    /// Um manifest autenticado com uma entrada chamada `.arca-old-0` colidiria com os
+    /// temporários do próprio `apply`: recusa clara, antes de tocar no disco.
+    #[tokio::test]
+    async fn an_entry_named_like_an_arca_temporary_is_refused_before_touching_anything() {
+        let h = hist().await;
+        let forged = put_forged(&h.rig, |m| {
+            m.files.push(FileEntry {
+                path: ".arca-old-0".to_string(),
+                class: Class::Vault,
+                blob: Hash32([1; 32]),
+                size: 1,
+                sha256: Hash32([1; 32]),
+            });
+            m.files
+                .sort_by(|a, b| (a.class, &a.path).cmp(&(b.class, &b.path)));
+        })
+        .await;
+        let before = tree(&h.target);
+        let result = h
+            .rig
+            .engine("pc")
+            .apply(Some(&h.v1), &forged, &vault_only(&h.target))
+            .await;
+        assert_eq!(result, Err(EngineError::ReservedName));
+        assert_eq!(tree(&h.target), before);
+    }
+
+    /// Se o desfazer não pôde devolver o original porque a pessoa recriou o arquivo, o erro
+    /// diz isso (e o original continua ao lado), em vez do erro que provocou a volta.
+    #[tokio::test]
+    async fn a_rollback_that_had_to_keep_an_original_says_so() {
+        let rig = Rig::new();
+        let dir = rig.dir("pasta");
+        write(&dir, ".arca-old-0", b"original");
+        write(&dir, "a.md", b"da pessoa");
+        let log = vec![Undo::RenameBack {
+            aside: dir.join(".arca-old-0"),
+            orig: dir.join("a.md"),
+        }];
+        assert_eq!(
+            rollback(log, EngineError::LocalChanges).await,
+            EngineError::OriginalKept
+        );
+        assert_eq!(fs::read(dir.join("a.md")).unwrap(), b"da pessoa");
+        assert_eq!(fs::read(dir.join(".arca-old-0")).unwrap(), b"original");
+
+        // sem nada a manter, o erro original é preservado
+        assert_eq!(
+            rollback(Vec::new(), EngineError::LocalChanges).await,
+            EngineError::LocalChanges
+        );
+    }
+
+    #[tokio::test]
+    async fn a_corrupt_or_missing_blob_stops_the_apply_before_touching_anything() {
+        for corrupt in [true, false] {
+            let h = hist().await;
+            let eng = h.rig.engine("pc");
+            let heads = eng.heads().await.unwrap();
+            let tip = &heads.tips[0];
+            let blob = tip
+                .manifest
+                .files
+                .iter()
+                .find(|f| f.path == "new.md")
+                .unwrap()
+                .blob;
+            let blob_path = h.rig.store_dir().join(
+                ObjectId {
+                    kind: ObjectKind::Blob,
+                    hash: blob.0,
+                }
+                .to_string(),
+            );
+            if corrupt {
+                fs::write(&blob_path, b"adulterado").unwrap();
+            } else {
+                fs::remove_file(&blob_path).unwrap();
+            }
+            let before = tree(&h.target);
+            let result = eng.apply(Some(&h.v1), &h.v2, &vault_only(&h.target)).await;
+            let expected = if corrupt {
+                EngineError::Store(StoreError::Corrupt)
+            } else {
+                EngineError::MissingObject
+            };
+            assert_eq!(result, Err(expected));
+            let after = tree(&h.target);
+            no_leftovers(&after);
+            assert_eq!(after, before);
+        }
+    }
+
+    /// Uma pasta somente leitura faz o commit falhar no meio: tudo volta como estava.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failure_in_the_middle_of_the_commit_undoes_everything() {
+        use std::os::unix::fs::PermissionsExt;
+        let h = hist().await;
+        let sub = h.target.join("sub");
+        fs::set_permissions(&sub, fs::Permissions::from_mode(0o500)).unwrap();
+        // como root a permissão não vale: o teste não prova nada, então não roda
+        if fs::File::create(sub.join("sonda")).is_ok() {
+            fs::remove_file(sub.join("sonda")).unwrap();
+            fs::set_permissions(&sub, fs::Permissions::from_mode(0o700)).unwrap();
+            return;
+        }
+        let before = tree(&h.target);
+        let result = h
+            .rig
+            .engine("pc")
+            .apply(Some(&h.v1), &h.v2, &vault_only(&h.target))
+            .await;
+        fs::set_permissions(&sub, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(
+            result,
+            Err(EngineError::Io(io::ErrorKind::PermissionDenied))
+        );
+        let after = tree(&h.target);
+        no_leftovers(&after);
+        assert_eq!(after, before);
+        assert!(
+            !h.target.join("deep").exists(),
+            "pastas criadas são desfeitas"
+        );
+        assert!(h.target.join("gone/z.md").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn applied_files_are_0600_and_created_folders_0700() {
+        use std::os::unix::fs::PermissionsExt;
+        let h = hist().await;
+        h.rig
+            .engine("pc")
+            .apply(Some(&h.v1), &h.v2, &vault_only(&h.target))
+            .await
+            .unwrap();
+        let mode = |p: &str| fs::metadata(h.target.join(p)).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode("a.md"), 0o600);
+        assert_eq!(mode("new.md"), 0o600);
+        assert_eq!(mode("deep/new/x.md"), 0o600);
+        assert_eq!(mode("deep"), 0o700);
+        assert_eq!(mode("deep/new"), 0o700);
+    }
+
     fn ids_of(heads: &Heads) -> Vec<ObjectId> {
         heads.tips.iter().map(|h| h.id).collect()
     }
@@ -2127,6 +2713,9 @@ mod tests {
             EngineError::Integrity,
             EngineError::MissingObject,
             EngineError::ConflictCopyName,
+            EngineError::LocalChanges,
+            EngineError::ReservedName,
+            EngineError::OriginalKept,
             EngineError::NeedsNewKey { have: 1, found: 2 },
         ];
         for e in errors {
