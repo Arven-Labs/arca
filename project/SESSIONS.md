@@ -2,6 +2,15 @@
 
 Mais recente no topo.
 
+### 2026-10-31 — Sessão 11 (Fase 0, P-18: config e logins)
+
+- **Pedido**: decidir o escopo da v1 para `config.toml` e logins OAuth do MCP.
+- **Decisão do dono**: as duas recomendações: manifest com `class` por entrada (`vault`, `config`, `secret`), classes ligadas pelo Warden; conflito de `config` e `secret` com o perdedor guardado em `.arca/conflitos/`, fora da pasta viva (ADR 0010).
+- **Feito** (branch `docs/fase0-p18`): ADR 0010; `SPEC-TECNICA.md` (campo `class`, regra de conflito das classes não-`.md`, casos de teste); `PENDING.md` com P-18 resolvida; `OVERVIEW.md`. Leitura de `bundle.rs` do `warden-sync` em `origin/main`; nada executado.
+- **CI**: `guard` passou no PR #12 (visto com `gh pr checks`, 4s) antes deste ajuste do registro.
+- **Não verificado**: como o Warden reage a um login trocado com o servidor MCP conectado; se `config.toml` tem valores por máquina que não deveriam sincronizar; permissões no Windows; nada implementado nem testado.
+- **Fica**: P-05; P-06; P-10, P-11, P-14; P-13, P-15, P-16. A Fase 1 não depende de mais nenhuma decisão.
+
 ### 2026-10-31 — Sessão 10 (Fase 0, P-17: detalhes criptográficos)
 
 - **Pedido**: revisar o P-17 (cripto proposta na `SPEC-TECNICA.md`).
