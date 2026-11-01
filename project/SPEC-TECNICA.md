@@ -1,10 +1,10 @@
 # arca: Spec técnica da v1 (`BlobStore` e formato do manifest)
 
-Fecha o item "spec técnica de interface e formato do manifest" da Fase 0 (`SPEC.md` §16). Amarra os ADRs 0003 a 0008 num só documento que a Fase 1 implementa. Escrito em 2026-10-31, **sem código**: os trechos em Rust são esboços de assinatura, não implementação.
+Fecha o item "spec técnica de interface e formato do manifest" da Fase 0 (`SPEC.md` §16). Amarra os ADRs 0003 a 0008 num só documento que a Fase 1 implementa. Escrito em 2026-10-31 (cripto confirmada no mesmo dia, ADR 0009), **sem código**: os trechos em Rust são esboços de assinatura, não implementação.
 
 ## Como ler as marcações
 - **Decidido (ADR N)**: veio de um ADR já aceito pelo dono.
-- **Proposta, a confirmar (P-17)**: detalhe que os ADRs não fecharam. Em área de criptografia, só vale depois da confirmação explícita do dono (AGENTS.md §4) e da revisão da Fase 4.
+- **Decidido (ADR 0009)**: detalhe de criptografia que os ADRs 0003 a 0008 não fecharam, confirmado pelo dono em 2026-10-31 (P-17). Continua sujeito à revisão de segurança da Fase 4.
 
 ## 1. Escopo da v1
 - Consumidor único: o Warden (ADR 0003). Unidade de sincronização: o **arquivo inteiro**. Sem chunking e sem deduplicação.
@@ -30,10 +30,10 @@ Tudo que vai para um backend é um **objeto imutável**, com id derivado do cont
 
 | Tipo | O que é | Id |
 |---|---|---|
-| `blob` | Um arquivo do Vault, cifrado por inteiro | **Proposta (P-17):** SHA-256 dos **bytes cifrados** |
-| `manifest` | Estado do Vault num instante (árvore de arquivos), cifrado | **Proposta (P-17):** SHA-256 dos **bytes cifrados** |
+| `blob` | Um arquivo do Vault, cifrado por inteiro | SHA-256 dos **bytes cifrados** (ADR 0009) |
+| `manifest` | Estado do Vault num instante (árvore de arquivos), cifrado | SHA-256 dos **bytes cifrados** (ADR 0009) |
 
-**Por que o hash é do texto cifrado (proposta):** o backend, e a própria arca ao baixar, conseguem verificar integridade sem ter a chave. Hash do texto claro como id deixaria o provedor confirmar "esse arquivo conhecido está no seu Vault" (ataque de confirmação). O hash do texto claro fica **dentro** do manifest cifrado, para a detecção de mudança local.
+**Por que o hash é do texto cifrado:** o backend, e a própria arca ao baixar, conseguem verificar integridade sem ter a chave. Hash do texto claro como id deixaria o provedor confirmar "esse arquivo conhecido está no seu Vault" (ataque de confirmação). O hash do texto claro fica **dentro** do manifest cifrado, para a detecção de mudança local.
 
 Objetos nunca são alterados: mudar um arquivo cria um blob novo. Não há "ponteiro mutável" na v1 (ver §6).
 
@@ -76,17 +76,17 @@ Cabeçalho **em claro** + corpo cifrado, em binário (sem base64, ADR 0008):
 | `format_version` | sim | Versão do formato da arca (inteiro). Decidido (ADR 0003, 0008) |
 | `alg` | sim | Algoritmo do corpo. v1: `xchacha20poly1305`; reservado `aes-256-gcm-warden-v1` para ler bundles do `warden-sync` (P-16). Decidido (ADR 0008) |
 | `key_epoch` | sim | Época da chave (ADR 0006). Decidido |
-| `kind` | sim | `blob` ou `manifest`. Proposta (P-17) |
+| `kind` | sim | `blob` ou `manifest`. Decidido (ADR 0009) |
 | `nonce` | sim | 24 bytes aleatórios do `OsRng`, um por objeto. Decidido (XChaCha20, ADR 0008) |
 | corpo | não | Texto claro cifrado + tag Poly1305 |
 
 Por que o cabeçalho é em claro: o leitor precisa de `key_epoch` e `alg` para escolher a chave e o algoritmo **antes** de decifrar. Ele vaza apenas versão, época e tipo, nada do Vault.
 
-**Proposta (P-17):** o cabeçalho inteiro entra como **dados associados (AAD)** da cifra autenticada. Assim alterar `key_epoch`, `alg` ou `kind` num objeto faz a decifragem falhar, em vez de aceitar um cabeçalho adulterado.
+**Decidido (ADR 0009):** o cabeçalho inteiro (incluindo o `nonce`) entra como **dados associados (AAD)** da cifra autenticada, com layout binário fixo, de modo que a serialização seja única. Assim alterar `key_epoch`, `alg` ou `kind` num objeto faz a decifragem falhar, em vez de aceitar um cabeçalho adulterado.
 
 ### 5.2 Chaves
 - Chave-raiz: a `vault_key` de 32 bytes (a mesma que a frase BIP-39 codifica, ADR 0004).
-- **HKDF-SHA256** com contexto próprio da arca, separado do `warden-sync` e do TruthID (ADR 0008). **Proposta (P-17):** duas subchaves por época, uma para `blob` e outra para `manifest`, com `info` contendo um rótulo fixo da arca, o tipo e o `key_epoch` (por exemplo, `arca/v1/blob/<epoch>`). Os rótulos exatos são decididos na Fase 1 e testados contra colisão com os do `warden-sync`.
+- **HKDF-SHA256** com contexto próprio da arca, separado do `warden-sync` e do TruthID (ADR 0008). **Decidido (ADR 0009):** duas subchaves por época, uma para `blob` e outra para `manifest`, com `info` contendo um rótulo fixo da arca, o tipo e o `key_epoch` (por exemplo, `arca/v1/blob/<epoch>`). Os rótulos exatos são decididos na Fase 1 e testados contra colisão com os do `warden-sync`.
 - Chaves em memória com `zeroize` (ADR 0008). Nunca em log.
 
 ### 5.3 Corpo do manifest (depois de decifrado)
@@ -112,7 +112,7 @@ JSON versionado (ADR 0008). Nomes de arquivo ficam **só aqui**, dentro do cifra
 - `path`: relativo à raiz do Vault, separador `/`, sem `..`, sem caminho absoluto, normalizado em Unicode (NFC). O núcleo **rejeita** o manifest inteiro se algum caminho escapar da raiz (fronteira de confiança: o manifest vem de fora).
 - Entradas que não são arquivo de Vault (`config.toml`, logins OAuth) não estão definidas aqui: P-18.
 
-### 5.4 Autenticidade sem assinatura (proposta, P-17)
+### 5.4 Autenticidade sem assinatura (decidido, ADR 0009)
 A spec (§8) fala em manifest "assinado". Na v1 todos os dispositivos compartilham a mesma chave (ADR 0006), então uma assinatura simétrica não distinguiria dispositivos; a **tag AEAD** já prova que o manifest foi feito por quem tem a chave. A v1 **não** assina separadamente. Assinatura por dispositivo só faz sentido com chave por dispositivo, o que o ADR 0006 deixou para depois (o `key_epoch` mantém a porta aberta).
 
 ## 6. Cabeça do Vault e detecção de divergência
@@ -149,7 +149,7 @@ Entradas: base comum **B** (o ancestral mais recente das pontas), ponta **L** (l
 | Mudou nos dois lados, conteúdos diferentes | **Conflito:** o conteúdo da ponta com o `created_at` mais recente fica no caminho original; o outro é preservado em `<nome>.conflito-<dispositivo>-<data>.md` e o conflito é registrado e mostrado ao usuário |
 | Removido de um lado e editado do outro | Mantém a versão editada e registra o conflito (nunca perde edição) |
 
-- Depois de resolver, o dispositivo grava um **manifest de fusão** cujo `base_version` é uma das pontas, com as duas pontas registradas no corpo (campo `merged_from`, **proposta**, P-17). Assim o grafo volta a ter uma ponta.
+- Depois de resolver, o dispositivo grava um **manifest de fusão** cujo `base_version` é uma das pontas, com as duas pontas registradas no corpo (campo `merged_from`, ADR 0009). Assim o grafo volta a ter uma ponta.
 - As cópias `.conflito-*` entram no Vault e sincronizam como arquivo comum (ADR 0005). Se a busca semântica do Warden as indexa é decisão do Warden.
 - Nada é mesclado dentro de um arquivo na v1.
 - O desempate pelo `created_at` usa o relógio do dispositivo e pode errar; por isso o perdedor é sempre preservado, e a escolha do "vencedor" nunca apaga dado.
@@ -181,5 +181,5 @@ Tudo que vem de um backend ou do disco é entrada não confiável. Testes obriga
 ## 11. O que esta spec não resolve
 - Retenção e coleta de lixo (P-05) e limite de tamanho por objeto.
 - Contrato HTTP do hub e fluxo de pareamento (Fase 2); cliente S3 (P-15).
-- Confirmação dos detalhes criptográficos propostos (P-17) e escopo de `config.toml` e logins (P-18).
+- Escopo de `config.toml` e logins (P-18) e os rótulos exatos do HKDF (Fase 1, ADR 0009).
 - Revisão de segurança independente (Fase 4). Nada aqui foi implementado nem testado; é desenho.
