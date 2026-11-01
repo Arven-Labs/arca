@@ -2,6 +2,15 @@
 
 Mais recente no topo.
 
+### 2026-11-01 — Sessão 18 (P-16: migração do warden-sync; Fase 0 encerrada)
+
+- **Pedido**: fechar a P-16 e encerrar a Fase 0 (plano aprovado em plan mode).
+- **Decisão do dono** (área de chaves, confirmada): corte único sem importar histórico; reaproveitar a `vault_key`.
+- **Feito** (branch `docs/fase0-p16`): ADR 0012 (novo); `SPEC-TECNICA.md` §9 e campo `alg` (valor reservado removido); ADR 0008 (consequência superada, marcada); `PENDING.md` com P-16 resolvida e a lista de abertas vazia; `OVERVIEW.md`. Só docs; nada executado.
+- **CI**: `guard` passou no PR #20 (visto com `gh pr checks`, 3s) antes deste ajuste do registro.
+- **Não verificado**: rótulos HKDF da arca contra o `warden-sync` (Fase 1); como o Warden trata o interruptor com um Send do Arweave pendente; se alguma instalação antiga teve a `vault_key` legível (P-11).
+- **Fica**: nada da Fase 0. Fase 1 (núcleo local) é a próxima, sem decisão bloqueante.
+
 ### 2026-11-01 — Sessão 17 (P-15: cliente S3)
 
 - **Pedido**: fazer o spike do cliente S3 agora, em vez de na Fase 3 (plano aprovado em plan mode; só Garage local e código descartável, por decisão do dono).
