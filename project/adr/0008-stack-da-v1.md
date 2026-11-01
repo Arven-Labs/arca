@@ -11,6 +11,7 @@ O P-08 pedia a stack da arca: linguagem, biblioteca de criptografia, chunking e 
 - **Derivação de chaves: HKDF-SHA256**, como hoje, com contexto próprio da arca (separado do contexto do `warden-sync` e do TruthID).
 - **Manifest e envelope: JSON versionado** com `format_version`, `key_epoch` (ADR 0006), `base_version` (ADR 0005) e `alg`; o conteúdo dos arquivos vai como **blobs binários cifrados**, sem base64. Chunking e deduplicação ficam fora da v1 (ADR 0003).
 - **Recuperação: crate `bip39` 3.0.0** como candidato (ADR 0004), **sujeito a ler o código e os advisories do repositório antes da Fase 1**. Fecha o P-13 com essa ressalva.
+  - **Atualização (2026-11-01, P-13):** leitura feita e candidato confirmado, fixado em `=3.0.0` com `default-features = false` e as features `std` e `zeroize`. A arca exige 24 palavras (a lib aceita 12 a 24) e envolve a chave em `Zeroizing`. Limites e detalhes no `PENDING.md`.
 - **Cliente S3: adiado para a Fase 3**, com um teste curto (spike) entre `object_store`, `opendal`, `rust-s3` e `aws-sdk-s3`, atrás de um feature flag do backend S3 (ADR 0007).
 - Higiene de chaves: `zeroize` para chaves em memória.
 
