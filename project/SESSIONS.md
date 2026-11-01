@@ -7,7 +7,7 @@ Mais recente no topo.
 - **Pedido**: decidir a retenção de versões (plano aprovado em plan mode).
 - **Decisão do dono**: guardar tudo, sem GC na v1 (recomendação); GC na Fase 3 com o tamanho medido.
 - **Feito** (branch `docs/fase0-p05`): ADR 0011 (novo); `SPEC-TECNICA.md` (fora da v1, comentário do `delete`, §11); `SPEC.md` (§9 e §15); `PENDING.md` com P-05 resolvida; `OVERVIEW.md`. Só docs; nada executado.
-- **CI**: ainda não conferido neste registro (ver o PR).
+- **CI**: `guard` passou no PR #17 (visto com `gh pr checks`, 5s) antes deste ajuste do registro.
 - **Não verificado**: o tamanho real de um Vault; o custo de `list(Manifest)` em S3 com muito histórico; o limiar de 5 GB ou US$ 1/mês é valor de partida meu, o dono ainda pode ajustar.
 - **Fica**: P-06; P-15; P-16. Nenhuma bloqueia a Fase 1.
 
