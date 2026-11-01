@@ -2,6 +2,16 @@
 
 Mais recente no topo.
 
+### 2026-11-01 — Sessão 19 (Fase 1, PR 1: esqueleto e CI de Rust)
+
+- **Pedido**: começar a Fase 1 (plano aprovado em plan mode; roteiro de 7 PRs, este é o primeiro).
+- **Decisões do dono**: `BlobStore` com `async fn` nativo + tokio e backends por `enum`; PR 1 só com esqueleto e CI, antes de qualquer lógica.
+- **Feito** (branch `feat/fase1-esqueleto`): workspace (`Cargo.toml`, `crates/arca-core` com `FORMAT_VERSION` e um teste de fumaça), `Cargo.lock`, `target/` no `.gitignore`, workflow `.github/workflows/rust.yml` (job `rust`: fmt, clippy `-D warnings`, test, `--locked`, permissões `contents: read`, sem ação de terceiros), README com os comandos. O teste de fumaça falhou antes do workspace (sem `Cargo.toml`) e passou depois.
+- **Verificado localmente**: `cargo fmt --check`, `cargo clippy -D warnings` e `cargo test` com rustc 1.98.1.
+- **CI**: ainda não conferido neste registro (ver o PR).
+- **Não verificado**: a versão do Rust do runner `ubuntu-24.04`; o job `rust` ainda não é check obrigatório no ruleset `protect-main` (decisão do dono).
+- **Fica**: PRs 2 a 7 da Fase 1; decidir se `rust` vira check obrigatório; `dependabot.yml` para cargo e actions (PR à parte).
+
 ### 2026-11-01 — Sessão 18 (P-16: migração do warden-sync; Fase 0 encerrada)
 
 - **Pedido**: fechar a P-16 e encerrar a Fase 0 (plano aprovado em plan mode).

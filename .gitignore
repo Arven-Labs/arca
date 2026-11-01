@@ -3,6 +3,9 @@
 .env.*
 !.env.example
 
+# Build do Rust
+target/
+
 # Chaves e material criptográfico (nunca versionar)
 *.key
 *.pem
