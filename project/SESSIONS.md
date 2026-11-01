@@ -2,6 +2,15 @@
 
 Mais recente no topo.
 
+### 2026-11-01 — Sessão 36 (Fase 2a, PR 3b: `save_conflict_losers` e auditoria)
+
+- **Pedido**: PR 3b da Fase 2a, gravar os perdedores de conflito das classes `config` e `secret` fora das pastas das classes (ADR 0010). Plano aprovado em plan mode. Toca segredos (AGENTS.md §4).
+- **Testes primeiro** (revisados pelo dono): 11 falhavam no `todo!()`. `erro` renomeado para `UnsafeConflictsDir` (cobre `..` e link, não só "dentro da raiz"). O auxiliar `diverge` passou a delegar a `diverge_in(classe)`; a pasta base do teste mudou de `vault` para `pasta-da-classe`.
+- **Auditoria** (`security-auditor`, com PoCs numa cópia do repo): achados conferidos e **corrigidos**: 1 (raiz viva dentro de `dir/config|secret` recebia o segredo), 2 (rechecar `dir` antes das escritas), 3 (cópia editada travava o lote; decisão do dono: conta como `already`, nunca tocada), 5 (pasta alterável por grupo ou outros). 4 deixou de existir. 6 e 7 registrados em P-30. Testes novos: 9 (6 falhavam antes, 3 travam o que já funcionava). **Um teste já revisado foi mudado com o OK do dono** (`a_file_with_the_same_name_and_other_content...` virou `a_copy_the_person_edited...`).
+- **Verificado localmente**: `cargo test --workspace` (273 passam), `clippy --all-targets -D warnings`, `fmt --check`. CI do PR: ver o PR.
+- **Não verificado**: a rechecagem de `dir` antes das escritas (achado 2) não tem teste direto, porque a janela fica dentro de uma chamada e exigiria um gancho; concorrência real; macOS e Windows. O auditor disse ter visto 270 testes no repo original, eu conto 264 antes dos testes novos; não expliquei a diferença.
+- **Fica**: PR 4 (último manifest aceito), PR 5 (replicação), PR 3c (recuperação do `apply`, P-27); comando de limpeza dos perdedores (P-28); 2b; P-09, P-22, P-25, P-26, P-29, P-30.
+
 ### 2026-11-01 — Sessão 35 (Fase 2a, PR 3: `Engine::apply` e auditoria)
 
 - **Pedido**: PR 3 da Fase 2a, aplicar um manifest numa pasta viva (operação destrutiva, AGENTS.md §4). Plano aprovado em plan mode.
