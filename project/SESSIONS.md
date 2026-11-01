@@ -2,6 +2,17 @@
 
 Mais recente no topo.
 
+### 2026-11-01 — Sessão 33 (Fase 2a, PR 1: fusão pura; ADR 0014)
+
+- **Pedido**: começar a Fase 2. Plano aprovado em plan mode: fatiar em 2a (núcleo offline em `arca-core`, 5 PRs) e 2b (hub, pareamento, Warden). Este é o PR 1 da 2a.
+- **Decisões do dono**: fatia 2a; colapsar fusões equivalentes em uma ponta. Descartadas: começar pelo hub, só a regra de conflito; eleger quem funde, aceitar o ping-pong.
+- **Testes primeiro** (revisados pelo dono): 32 falhavam (corpo `todo!()`/colapso ausente); 3 já passavam e travam o que não colapsa.
+- **Feito**: `merge.rs` novo (`common_ancestor`, `merge_files`, data UTC sem dependência nova); `heads::tips` colapsa fusões equivalentes. ADR 0014, spec §7, `PENDING.md` (P-26), `OVERVIEW.md`.
+- **Dois testes meus ajustados na implementação** (não eram bug do código): a propriedade "nenhum conteúdo some" exigia também que o outro lado tivesse removido, o que é falso quando ele mudou o arquivo; o oráculo ingênuo de `tips_do_not_depend_on_input_order` passou a conhecer o colapso.
+- **Verificado localmente**: `cargo test --workspace` (217 passam), `clippy --all-targets -D warnings`, `fmt --check`. CI do PR: ver o PR.
+- **Não verificado**: desempenho de `common_ancestor` em históricos grandes; relógios muito errados; fusão de mais de duas pontas (PR 2).
+- **Fica**: PRs 2 a 5 da 2a (`Engine::merge`, aplicar numa pasta viva, último manifest aceito, replicação); 2b; P-09, P-22, P-25, P-26.
+
 ### 2026-11-01 — Sessão 32 (P-24: só a maior época conta; ADR 0013)
 
 - **Pedido**: segundo PR do plano (P-23 e P-24), depois do #33 mesclado. Plano aprovado em plan mode.

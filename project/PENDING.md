@@ -9,6 +9,7 @@ Decisões em aberto, vindas do `SPEC.md` §15 (nome e licença já decididos: AD
 | P-09 | Identidade da marca e domínio | O nome arca tem homônimos conhecidos, ver ADR 0001 |
 | P-22 | Causa do incidente do PR 2 (Sessão 20): edições em arquivos rastreados voltaram ao `HEAD` sem `reset` nem `checkout` no reflog | Não reproduzido. Se voltar a acontecer, investigar o ambiente (hook, editor, sincronização) antes de continuar |
 | P-25 | Limpeza de `.tmp-*` órfãos no `DiskStore` e no destino de restauração | Não existe na v1; um `put` interrompido deixa no máximo um temporário. Baixa prioridade |
+| P-26 | Nome da cópia `.conflito-*` estoura o limite de componente (255 bytes): `merge_files` devolve `InvalidPath` e a fusão desse par falha | ADR 0014. Só com nomes de arquivo perto de 220 bytes. Decidir (truncar com hash, ou conflito sem cópia no vault) se aparecer na prática; o PR 2 (`Engine::merge`) precisa mostrar o erro ao usuário |
 
 Nenhuma bloqueia o início da Fase 2.
 

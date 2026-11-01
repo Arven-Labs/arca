@@ -181,6 +181,8 @@ Por que assim e não um arquivo `HEAD` com compare-and-swap: S3-compatíveis e o
 Um backend malicioso poderia servir só manifests velhos. O dispositivo guarda localmente o **último manifest que aceitou** e recusa, com aviso, uma cabeça da qual ele não descende. Não protege o primeiro acesso de um dispositivo novo; limite aceito na v1 e item de revisão da Fase 4.
 
 ## 7. Regra de conflito (ADR 0005)
+**Implementado (Fase 2a, PR 1, ADR 0014) em `arca-core::merge` e `heads::tips`:** `common_ancestor` (maximal, sem ancestral = base vazia), `merge_files` (esta tabela, simétrica, por `(classe, path)`; cópia `<path>.conflito-<dispositivo>-<AAAAMMDDTHHMMSSZ>.md` com o blob do perdedor; desempate de `created_at` pelo id maior) e o colapso de fusões equivalentes em uma ponta. Ainda não gravam manifest nem tocam o disco: isso é o `Engine::merge` e a aplicação (PRs 2 e 3).
+
 Entradas: base comum **B** (o ancestral mais recente das pontas), ponta **L** (local) e ponta **R** (remota). Decisão **por arquivo**, comparando o `sha256` do texto claro:
 
 | Situação do arquivo | Resultado |
