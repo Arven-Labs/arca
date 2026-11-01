@@ -2,6 +2,17 @@
 
 Mais recente no topo.
 
+### 2026-11-01 — Sessão 28 (P-21: MSRV medido e job `msrv`)
+
+- **Pedido**: tratar as pendências P-19 a P-21 (plano aprovado em plan mode; CI e infraestrutura são área do AGENTS.md §4). Este é o PR A (P-21); o PR B (P-19, fechamento da P-20) vem depois deste.
+- **Decisões do dono**: P-21 com `rust-version` medido **e** job `msrv`; P-19 com `guard`, `rust` e `audit` obrigatórios (próximo PR); P-20 **fechada por decisão** (ADR 0006). Ele achou que warden e anchor já tinham `dependabot.yml`; conferi (pasta local, histórico do git e `contents/.github/dependabot.yml` no GitHub, 404 nos dois) e eles só têm alertas e CI de teste. Com isso ele manteve o ADR 0006.
+- **Medido** (etapa 0, `rustup toolchain install --profile minimal` em `~/.rustup`): `cargo +1.88.0 check --workspace --locked` passa; com 1.85.0 o cargo recusa (`sha2` 0.11.1 exige 1.88, `ctutils` 0.4.7 exige 1.87). 1.86 e 1.87 não foram compiladas localmente.
+- **Feito** (branch `ci/msrv`, PR #30): `rust-version = "1.88"` no workspace e no `arca-core`; job `msrv` em `rust.yml`; README (versão mínima e status da Fase 1, que ainda dizia "começando"); `OVERVIEW.md`; P-21 movida para Resolvidas no `PENDING.md`; texto do "Nenhuma bloqueia…" corrigido.
+- **Prova de que o job barra**: um commit temporário com 1.87.0 deixou o `msrv` **vermelho** (12s): `rustc 1.87.0 is not supported … arca-core@0.0.0 requires rustc 1.88; sha2@0.11.1 requires rustc 1.88`. Revertido com `git revert`; o commit final voltou a verde.
+- **CI**: no PR #30, `guard` (5s), `rust` (38s), `audit` (3m5s) e `msrv` (22s) passaram no commit de código (o da reversão do TEMP, visto com `gh pr checks`); o commit deste registro roda de novo.
+- **Não verificado**: 1.86 e 1.87 compiladas de verdade (excluídas pela exigência declarada do `sha2`); tempo do `msrv` em runner frio; macOS e Windows. O MSRV vale para a biblioteca: os testes usam `is_multiple_of` (mais novo) e rodam só na toolchain estável.
+- **Fica**: PR B (ruleset com `rust` e `audit`, P-19, e registro da P-20); P-09 e P-22 a P-25.
+
 ### 2026-11-01 — Sessão 27 (Fase 1 marcada como feita)
 
 - **Pedido**: PR só de docs para marcar a Fase 1 como feita (o PR 7, #28, já mesclado). Tarefa mecânica, sem plan mode.
