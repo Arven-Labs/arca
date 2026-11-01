@@ -2,6 +2,19 @@
 
 Mais recente no topo.
 
+### 2026-11-01 — Sessão 25 (Fase 1, PR 6: núcleo local)
+
+- **Pedido**: PR 6 da Fase 1 (plano aprovado em plan mode; áreas de segredos e E/S confirmadas pelo dono). PR 5 (#26) já mesclado antes.
+- **Decisões do dono**: `Engine` completo (varre pastas, snapshot, pontas e restauração); mesmo `path` em classes diferentes mantém `PathCollision` e vira a pendência P-23; `Diverged` com mais de uma ponta; aprovou os testes e as divergências 1 a 5 abaixo antes da implementação.
+- **Feito** (branch `feat/fase1-engine`, PR #27): `heads.rs`, `scan.rs`, `engine.rs`; visibilidade `pub(crate)` em `write_atomic`, `create_private_dir` e `validate_device`; `SPEC-TECNICA.md` §4.1, `OVERVIEW.md`, `PENDING.md` (P-23 a P-25). Sem dependência nova (44 crates).
+- **Decisão minha, aprovada junto com o plano**: `snapshot` também recusa quando há manifest ilegível, não só com duas pontas (ignorá-lo criaria a divergência silenciosa do P-14). Custo registrado na P-24.
+- **Divergências do plano, aprovadas**: (1) `EngineError::Object(Error)` no lugar de `Crypto(Error)`; (2) nomes que diferem só por caixa: fica o primeiro e o outro vai para `skipped` (antes o snapshot inteiro falharia); (3) o primeiro snapshot de um Vault vazio grava um manifest com zero arquivos; (4) tirei um teste de caminho longo na varredura que não rodava de verdade (o sistema recusa criar o caminho); (5) o manifest forjado com `../` já é recusado em `Manifest::open`, então `safe_join` é função pura testada direto.
+- **Testes** (escritos antes, 50 falhando contra `todo!()`, 155 passando no total): pontas (incluindo propriedade com 200 grafos embaralhados), varredura (symlink, nomes inválidos, arquivo esparso acima do teto), snapshot (mudança de 1 em 5, classe desligada, manifest por último com backend que falha, `Diverged`, `PathCollision`), restauração (byte a byte, destino ocupado, blob adulterado, `size` e `sha256` mentindo, época e chave erradas, manifest forjado) e a restauração do zero numa "máquina B" só com a cópia do armazenamento e a chave.
+- **Verificado localmente**: `fmt`, `clippy --workspace --all-targets --locked -D warnings`, `test --workspace --locked` (155), `cargo audit --deny warnings` (44 crates, sem achados).
+- **CI**: no PR #27, `guard` (4s), `rust` (25s) e `audit` (2m29s) passaram no commit do código (vistos com `gh pr checks`); o commit deste registro roda de novo.
+- **Não verificado**: Windows e macOS (o CI só roda Ubuntu); disco desmontado cuja pasta existe vazia (só a pasta ausente é detectada); arquivo alterado durante a leitura; desempenho com histórico grande (`heads` abre todos os manifests); execução como root; revisão independente (Fase 4).
+- **Fica**: PR 7 da Fase 1 (frase BIP-39); P-19 a P-25.
+
 ### 2026-11-01 — Sessão 24 (Fase 1, PR 5: BlobStore e disco)
 
 - **Pedido**: PR 5 da Fase 1 (plano aprovado em plan mode). PR 4 (#25) já mesclado antes.

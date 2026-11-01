@@ -71,6 +71,24 @@ Esboços por backend:
 - **Hub** (`warden-server`): réplica, não autoridade (ADR 0007). Contrato HTTP fica para a Fase 2.
 - **S3-compatível**: chave do objeto = `<tipo>/<hex>`. Cliente: `object_store` (ADR 0008, P-15).
 
+### 4.1 Núcleo local (`arca-core::engine`, Fase 1, PR 6)
+`Engine<S: BlobStore>` guarda o Vault e o restaura do zero, sem rede e sem sync entre dispositivos (Fase 2). API:
+
+```rust
+Engine::new(store, keys: EpochKeys, device) -> Result<Engine<S>, EngineError>
+engine.heads()                        -> Heads { tips, rejected }          // abre todos os manifests
+engine.snapshot(&Roots, now: u64)     -> Snapshot::{Created{id, manifest, new_blobs, skipped}, Unchanged{head, skipped}}
+engine.restore(&ObjectId, &Roots)     -> Restored { files }
+Roots { vault, config, secret: Option<PathBuf> }   // classe sem pasta = desligada
+```
+
+- **Pontas** (`heads::tips`): manifests que nenhum outro cita em `base_version` nem em `merged_from`, ordenados por `(counter, hash)`. `base_version` guarda o **hash do id do manifest** anterior. Um manifest ilegível (hash, tag, época, JSON) vai para `rejected` e nunca vira ponta; backend fora do ar aborta.
+- **Snapshot** recusa (`Diverged`) se houver mais de uma ponta **ou qualquer manifest ilegível** (construir sobre um ancestral criaria a divergência silenciosa do P-14). Depois de uma rotação de época, os manifests da época antiga contam como ilegíveis e bloqueiam o snapshot até a Fase 2 definir a política. Varre as pastas das classes ligadas (sem seguir symlink), reaproveita o blob quando `path`, `size` e `sha256` coincidem com a ponta, cifra e envia só o resto, e grava o manifest **por último**. Classe desligada mantém as entradas da ponta como estão; arquivo que sumiu da pasta sai do manifest. Sem mudança: `Unchanged`, nada gravado. Primeiro snapshot de um Vault vazio grava um manifest com zero arquivos. `created_at` vem do chamador (segundos Unix).
+- **`skipped`**: symlink, arquivo que não é regular, nome que não é UTF-8 ou que o manifest recusa, arquivo acima de 256 MiB (palpite), arquivo que sumiu ou cresceu durante a leitura, e nomes que diferem só por caixa (fica o primeiro em ordem de bytes). Um arquivo estranho não bloqueia o backup.
+- **Erros que param o snapshot**: pasta de classe ligada ausente (`Io(NotFound)`: nunca vale como "vazia", para um disco desmontado não apagar a classe no próximo manifest), o mesmo `path` em classes diferentes (`PathCollision`, P-23) e `Diverged`.
+- **Restauração**: cada pasta de destino de classe ligada tem de não existir ou estar vazia (`TargetNotEmpty`, conferido para todas antes de escrever). Para cada entrada: `verified_get` do blob, `open`, confere `size` e `sha256` do texto claro (`Integrity`), `safe_join` (revalida o `path`) e grava com a mesma gravação atômica do disco (`0o600`, pastas `0o700`). Falha em qualquer ponto apaga o que a restauração criou. Classe sem destino é ignorada.
+- **Limites**: sem instantâneo atômico do Vault (um arquivo alterado durante a leitura entra com o conteúdo lido, consistente com o próprio `sha256`); uma pasta de classe que existe mas está vazia por um disco desmontado ainda leva ao manifest sem aquela classe; reaproveitar um blob não confere se ele ainda está no armazenamento (a restauração acusa `MissingObject`); a proteção contra rollback (§6, "último manifest aceito") e a junção de pontas ficam para a Fase 2.
+
 ## 5. Envelope e manifest
 
 ### 5.1 Envelope (igual para blob e manifest)

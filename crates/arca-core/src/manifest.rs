@@ -167,7 +167,7 @@ fn validate_component(component: &str) -> Result<(), Error> {
 
 /// Nome de dispositivo: vai parar em nome de arquivo (`.conflito-<dispositivo>-…`), então só
 /// ASCII `[A-Za-z0-9._-]`, sem começar por ponto.
-fn validate_device(device: &str) -> Result<(), Error> {
+pub(crate) fn validate_device(device: &str) -> Result<(), Error> {
     let ok = !device.is_empty()
         && device.len() <= MAX_DEVICE_BYTES
         && !device.starts_with('.')

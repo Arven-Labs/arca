@@ -132,7 +132,7 @@ where
 }
 
 /// Cria a pasta (e as que faltarem) com `0o700` em unix. Pasta que já existe fica como está.
-fn create_private_dir(path: &Path) -> io::Result<()> {
+pub(crate) fn create_private_dir(path: &Path) -> io::Result<()> {
     let mut builder = DirBuilder::new();
     builder.recursive(true);
     #[cfg(unix)]
@@ -146,7 +146,7 @@ fn create_private_dir(path: &Path) -> io::Result<()> {
 /// Grava `bytes` em `path` sem nunca deixar um arquivo pela metade: temporário no mesmo
 /// diretório (`create_new`, `0o600`), `fsync`, `rename` atômico e `fsync` do diretório.
 /// Se algo falhar antes do `rename`, o temporário é apagado.
-fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let dir = path
         .parent()
         .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;

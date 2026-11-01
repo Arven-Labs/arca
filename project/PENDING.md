@@ -11,8 +11,11 @@ Decisões em aberto, vindas do `SPEC.md` §15 (nome e licença já decididos: AD
 | P-20 | `.github/dependabot.yml` para `cargo` e `github-actions` | PR à parte; o repo já tem alertas do Dependabot ligados (0 abertos em 2026-11-01), faltam as atualizações automáticas |
 | P-21 | Declarar o `rust-version` (MSRV) do `arca-core` | Ninguém mediu. O código usa `as_chunks` (estável em versões recentes) e async fn em trait na Fase 1; medir antes de declarar |
 | P-22 | Causa do incidente do PR 2 (Sessão 20): edições em arquivos rastreados voltaram ao `HEAD` sem `reset` nem `checkout` no reflog | Não reproduzido. Se voltar a acontecer, investigar o ambiente (hook, editor, sincronização) antes de continuar |
+| P-23 | Identidade de uma entrada do manifest: hoje é só o `path`, então o mesmo `path` em classes diferentes (por exemplo `config.toml` na raiz do Vault e o da classe `config`) é duplicata e o snapshot recusa com `PathCollision` | Decisão do dono no PR 6: manter e registrar. Mudar para `(classe, path)` altera `Manifest::validate` (ordem e unicidade) e o formato; decidir com o contrato do Warden na Fase 2, antes de haver dado real |
+| P-24 | Política para manifests de épocas antigas depois de uma rotação: hoje contam como ilegíveis (`rejected`) e bloqueiam o `snapshot` | Só aparece quando a rotação (ADR 0006) for implementada; definir na Fase 2 junto com o "último manifest aceito" |
+| P-25 | Limpeza de `.tmp-*` órfãos no `DiskStore` e no destino de restauração | Não existe na v1; um `put` interrompido deixa no máximo um temporário. Baixa prioridade |
 
-Nenhuma bloqueia o PR 4 da Fase 1.
+Nenhuma bloqueia o PR 7 da Fase 1.
 
 ## Resolvidas
 
