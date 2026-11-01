@@ -11,6 +11,7 @@ pub mod error;
 pub mod heads;
 pub mod manifest;
 pub mod object;
+pub mod recovery;
 pub mod scan;
 pub mod store;
 

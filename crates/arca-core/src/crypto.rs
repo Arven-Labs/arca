@@ -34,6 +34,19 @@ impl VaultKey {
     pub fn from_bytes(bytes: [u8; 32]) -> Self {
         VaultKey(Zeroizing::new(bytes))
     }
+
+    /// Chave nova: 32 bytes aleatórios do sistema operacional (o mesmo gerador dos nonces).
+    /// Se o SO não fornecer, `Error::Random`: nunca uma chave fraca.
+    pub fn generate() -> Result<VaultKey, Error> {
+        let mut bytes = Zeroizing::new([0u8; 32]);
+        getrandom::fill(&mut bytes[..]).map_err(|_| Error::Random)?;
+        Ok(VaultKey::from_bytes(*bytes))
+    }
+
+    /// Os bytes da chave, para a codificação da frase de recuperação.
+    pub(crate) fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
 }
 
 impl fmt::Debug for VaultKey {
