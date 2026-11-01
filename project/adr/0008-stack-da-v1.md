@@ -48,5 +48,6 @@ Os advisories encontrados eram antigos ou de severidade baixa/média; não confi
 ## Consequências
 - Uma dependência criptográfica nova no Warden (`chacha20poly1305`) e, enquanto o `warden-sync` existir, dois estilos de cifra convivendo.
 - ~~Ler os bundles AES-GCM antigos exige manter o suporte a esse `alg` e cuidado com o contexto HKDF.~~ **Superado pelo ADR 0012 (2026-11-01):** a migração é corte único sem importar histórico; a arca não lê o formato antigo, e o `alg` reservado para isso saiu da spec.
+- **Nota (Fase 1, PR 4, 2026-11-01):** o corpo do manifest entrou com `serde` 1.0.229, `serde_json` 1.0.154 e `unicode-normalization` 0.1.26 (a última só para exigir `path` em NFC). Versões com mais de 2 semanas no crates.io, aprovadas pelo dono; `created_at` ficou em segundos Unix (u64) em vez de texto RFC 3339, para não depender de crate de datas.
 - O formato é legível e exportável em formato aberto (spec §12), ao custo de tamanho maior que um formato binário.
 - **Não validado:** a auditoria formal do `bip39` e do `chacha20poly1305`; se as versões `aes-gcm` 0.10 em uso no Warden já estão acima das correções dos advisories antigos; o suporte a Android `armv7` de cada crate no `warden-mobile-bridge`; o custo de tempo de XChaCha20 sem aceleração de hardware nos celulares alvo. A segurança do conjunto passa pela revisão da Fase 4.

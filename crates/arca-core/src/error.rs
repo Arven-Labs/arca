@@ -37,4 +37,11 @@ pub enum Error {
     /// Nome de objeto fora do formato `<kind>/<64 hex minúsculos>`.
     #[error("invalid object id")]
     InvalidObjectId,
+    /// Corpo de manifest malformado ou fora das regras. O motivo é fixo e nunca repete
+    /// trecho da entrada (que pode ter nomes de arquivo).
+    #[error("invalid manifest: {0}")]
+    InvalidManifest(&'static str),
+    /// Caminho de arquivo recusado. O motivo é fixo e nunca repete o caminho.
+    #[error("invalid path: {0}")]
+    InvalidPath(&'static str),
 }

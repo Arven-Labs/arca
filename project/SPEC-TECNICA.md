@@ -113,17 +113,21 @@ JSON versionado (ADR 0008). Nomes de arquivo ficam **só aqui**, dentro do cifra
   "base_version": "<hash do manifest anterior, ou null>",
   "counter": 17,
   "device": "<id do dispositivo, ex.: portatil-fabio>",
-  "created_at": "2026-10-31T14:02:11Z",
+  "created_at": 1793455331,
   "files": [
     { "path": "memoria/projeto-x.md", "class": "vault", "blob": "<hash do blob>", "size": 2048, "sha256": "<hash do texto claro>" }
   ]
 }
 ```
 
+- **Implementado em `arca-core::manifest` (Fase 1, PR 4).** JSON compacto, campos na ordem acima; `merged_from` (lista de hashes, ADR 0009) fica depois de `base_version` e só aparece quando não está vazio. Hashes são 64 hex minúsculos. `created_at` é segundos Unix (UTC), não texto. Todos os campos são obrigatórios (inclusive `base_version: null`); campo desconhecido, `class` desconhecida, tipo errado, JSON com lixo no fim ou acima de 64 MiB são recusados com erro de motivo fixo (nunca repete a entrada). `format_version` do corpo e `key_epoch` do corpo têm de coincidir com o cabeçalho/chaves.
+- `device`: ASCII `[A-Za-z0-9._-]`, 1 a 64 bytes, sem começar por ponto (entra em nome de arquivo de conflito, §7).
+- `files`: no máximo 100 000 entradas, em **ordem estrita crescente de `path` em bytes**; duplicata (inclusive só por diferença de caixa, ou na mesma `path` com classes diferentes) é recusada. Limites e teto são palpites a revisar na Fase 3/4.
+- `path`, regras completas: não vazio, até 4096 bytes (255 por componente), componentes separados por `/` e nenhum vazio, `.` ou `..`; sem controles, `\` nem `: < > " | ? *`; em NFC (quem produz o manifest normaliza, o parse **recusa** em vez de converter); componente sem ponto ou espaço no fim e fora dos nomes reservados do Windows (`CON`, `PRN`, `AUX`, `NUL`, `COM1` a `COM9`, `LPT1` a `LPT9`, com ou sem extensão).
 - `base_version` (ADR 0005): hash do manifest que este dispositivo tinha como cabeça **quando criou** este. É o que permite detectar divergência. `null` no primeiro manifest do Vault e no primeiro de uma nova época (§8).
 - `counter`: contagem de conveniência para exibir e ordenar; **não** decide conflito. A causalidade vem de `base_version`.
 - `files` lista o **estado completo** do Vault (snapshot), não um delta. Isso difere do `warden-sync`, que envia delta; o ganho é que qualquer manifest sozinho reconstrói o Vault, e o custo é um manifest maior (aceitável: só caminhos e hashes, os blobs não se repetem porque o id é o hash).
-- `path`: relativo à raiz do Vault, separador `/`, sem `..`, sem caminho absoluto, normalizado em Unicode (NFC). O núcleo **rejeita** o manifest inteiro se algum caminho escapar da raiz (fronteira de confiança: o manifest vem de fora).
+- `path`: relativo à raiz do Vault, separador `/`, sem `..`, sem caminho absoluto, em Unicode NFC. O núcleo **rejeita** o manifest inteiro se algum caminho escapar da raiz (fronteira de confiança: o manifest vem de fora). Regras completas no item "`path`, regras completas" acima.
 - `class` (ADR 0010): `vault` (arquivos do Vault), `config` (`config.toml`) ou `secret` (logins OAuth do MCP). Fica dentro do manifest cifrado. A arca sincroniza as classes que o consumidor entregar; quais ficam ligadas é configuração do Warden (padrão: as três, como hoje). Para `config` e `secret`, `path` é relativo à pasta de origem da classe, com as mesmas regras de validação acima.
 
 ### 5.4 Autenticidade sem assinatura (decidido, ADR 0009)

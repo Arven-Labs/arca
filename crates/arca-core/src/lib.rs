@@ -5,6 +5,7 @@
 pub mod crypto;
 pub mod envelope;
 pub mod error;
+pub mod manifest;
 pub mod object;
 
 pub use crypto::{open, seal, EpochKeys, Sealed, VaultKey};
