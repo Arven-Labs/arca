@@ -12,6 +12,6 @@ mod tests {
     /// Teste de fumaça: prova que o CI compila e roda testes. Não testa comportamento.
     #[test]
     fn format_version_starts_at_one() {
-        assert_eq!(FORMAT_VERSION, 1);
+        assert_eq!(FORMAT_VERSION, 2);
     }
 }
