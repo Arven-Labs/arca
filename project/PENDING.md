@@ -7,7 +7,12 @@ Decisões em aberto, vindas do `SPEC.md` §15 (nome e licença já decididos: AD
 | ID | Pendência | Observação |
 |---|---|---|
 | P-09 | Identidade da marca e domínio | O nome arca tem homônimos conhecidos, ver ADR 0001 |
-| (nenhuma) | Fase 0 sem pendências. Novas pendências da Fase 1 em diante entram aqui | |
+| P-19 | Tornar os jobs `rust` e `audit` checks obrigatórios no ruleset `protect-main` (hoje só o `guard` é) | Muda o `ruleset-protect-main.json` e o `padrao/` do workspace; decisão do dono. O `audit` ainda não foi visto falhando diante de um advisory, só o caso verde |
+| P-20 | `.github/dependabot.yml` para `cargo` e `github-actions` | PR à parte; o repo já tem alertas do Dependabot ligados (0 abertos em 2026-11-01), faltam as atualizações automáticas |
+| P-21 | Declarar o `rust-version` (MSRV) do `arca-core` | Ninguém mediu. O código usa `as_chunks` (estável em versões recentes) e async fn em trait na Fase 1; medir antes de declarar |
+| P-22 | Causa do incidente do PR 2 (Sessão 20): edições em arquivos rastreados voltaram ao `HEAD` sem `reset` nem `checkout` no reflog | Não reproduzido. Se voltar a acontecer, investigar o ambiente (hook, editor, sincronização) antes de continuar |
+
+Nenhuma bloqueia o PR 4 da Fase 1.
 
 ## Resolvidas
 
