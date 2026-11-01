@@ -12,6 +12,7 @@ A spec (§7 e §14) lista backends possíveis e deixa em aberto se o backup exte
 - **git e Arweave ficam no `warden-sync`**, fora da arca na v1; o Warden segue usando-os como hoje. O Arweave exige aprovação no celular e não cabe num sync automático.
 - **P2P (Iroh) fica para depois**, começando pelo hub. Iroh é o candidato quando o `iroh-blobs` sair do 0.x.
 - **Orçamento (P-06) segue em aberto** até medir o tamanho real de um Vault.
+  - **Atualização (2026-11-01, P-06):** teto de **US$ 1/mês** para o backup externo, decisão do dono. Cabe o B2; o Storj fica fora enquanto tiver piso de US$ 5. O Vault medido tinha 575 bytes (não representativo); a Fase 3 deve medir um Vault real e o custo de `list` e de egress.
 
 ## Dados lidos em 2026-10-31 (páginas oficiais, sem data de vigência; reconferir antes de contratar)
 | Backend | Preço / estado |
