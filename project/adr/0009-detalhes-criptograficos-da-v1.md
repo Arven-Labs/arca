@@ -12,6 +12,8 @@ O ADR 0008 fixou a cifra (XChaCha20-Poly1305), o HKDF-SHA256 e o formato version
 - **Sem assinatura separada na v1.** A tag AEAD autentica que o objeto veio de quem tem a chave.
 - O manifest de fusão registra as duas pontas num campo `merged_from` (registro, sem efeito criptográfico).
 
+**Atualização (2026-11-01, Fase 1, PR 3):** rótulos fechados em `salt = "arca"` e `info = "arca/v1/<tipo>/<época>"`; implementado e testado contra HKDF independente, contra o vetor A.3.1 do `draft-irtf-cfrg-xchacha` e contra os pares `(salt, info)` do `warden-sync`, do `warden-core` e do TruthID (pendência do ADR 0012 fechada). Detalhes na `SPEC-TECNICA.md` §5.2.
+
 ## Alternativas descartadas
 - **Id pelo hash do texto claro**: dá deduplicação, mas deixa o provedor confirmar se um arquivo conhecido está no Vault.
 - **Id por HMAC do texto claro**: dedup sem esse vazamento, mas o provedor não verifica integridade sem a chave e a rotação muda todos os ids.

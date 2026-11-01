@@ -99,7 +99,8 @@ O corpo (texto cifrado + tag) começa no byte 36. O magic faz um arquivo que nã
 
 ### 5.2 Chaves
 - Chave-raiz: a `vault_key` de 32 bytes (a mesma que a frase BIP-39 codifica, ADR 0004).
-- **HKDF-SHA256** com contexto próprio da arca, separado do `warden-sync` e do TruthID (ADR 0008). **Decidido (ADR 0009):** duas subchaves por época, uma para `blob` e outra para `manifest`, com `info` contendo um rótulo fixo da arca, o tipo e o `key_epoch` (por exemplo, `arca/v1/blob/<epoch>`). Os rótulos exatos são decididos na Fase 1 e testados contra colisão com os do `warden-sync`.
+- **HKDF-SHA256** com contexto próprio da arca, separado do `warden-sync` e do TruthID (ADR 0008). **Decidido (ADR 0009):** duas subchaves por época, uma para `blob` e outra para `manifest`, com `info` contendo um rótulo fixo da arca, o tipo e o `key_epoch` (por exemplo, `arca/v1/blob/<epoch>`). **Rótulos fechados na Fase 1 (implementados em `arca-core::crypto`):** `salt = "arca"` e `info = "arca/v1/blob/<epoch>"` ou `"arca/v1/manifest/<epoch>"`, com a época em decimal e texto. Um teste compara as chaves com uma implementação independente de HKDF (Python) e outro garante que elas diferem das derivadas, a partir da mesma chave, pelos pares `(salt, info)` do `warden-sync` (`"Warden Sync Bundle"`), do pareamento, do `warden-core` (`"warden member vault"`) e do TruthID.
+- **Cifra:** `seal` usa nonce aleatório de 24 bytes do sistema operacional e o cabeçalho de 36 bytes como AAD; `open` recebe o `kind` esperado (vem do `ObjectId`) e recusa antes de decifrar um objeto de outro tipo ou de outra época. Falha de tag vira um único erro sem detalhe (`Decrypt`).
 - Chaves em memória com `zeroize` (ADR 0008). Nunca em log.
 
 ### 5.3 Corpo do manifest (depois de decifrado)
