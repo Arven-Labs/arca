@@ -7,7 +7,7 @@ Mais recente no topo.
 - **Pedido**: fechar a Fase 0 com a spec técnica de interface e formato (spec §16).
 - **Decisão do dono**: seguir com a spec; os detalhes de criptografia que os ADRs não fecharam entram como **proposta**, a confirmar no PR (P-17).
 - **Feito** (branch `docs/fase0-spec-tecnica`): `project/SPEC-TECNICA.md` (objetos imutáveis, interface `BlobStore`, envelope, manifest em snapshot, cabeça como grafo de manifests sem ponteiro mutável, regra de conflito, rotação, casos de teste); `PENDING.md` com P-17 e P-18 novas; `OVERVIEW.md` e `INDEX.md` atualizados. Só leitura dos ADRs e da spec; nada executado.
-- **CI**: a preencher depois de abrir o PR.
+- **CI**: `guard` passou no PR #10 (visto com `gh pr checks`, 4s) antes deste ajuste do registro.
 - **Não verificado**: nada foi implementado nem testado; a regra de conflito não foi simulada; a escolha de "grafo de manifests" em vez de `HEAD` com escrita condicional não foi medida contra o S3 nem o hub; desempate por `created_at` depende do relógio dos dispositivos.
 - **Fica**: P-17 (confirmar a cripto proposta); P-18; P-05; P-06; P-10, P-11, P-14; P-13, P-15, P-16.
 
