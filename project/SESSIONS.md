@@ -2,6 +2,15 @@
 
 Mais recente no topo.
 
+### 2026-11-01 — Sessão 27 (Fase 1 marcada como feita)
+
+- **Pedido**: PR só de docs para marcar a Fase 1 como feita (o PR 7, #28, já mesclado). Tarefa mecânica, sem plan mode.
+- **Feito** (branch `docs/fase1-feita`, PR #29): linha da Fase 1 no `OVERVIEW.md` com os 7 PRs (#21 a #28), o critério testado e os limites herdados.
+- **Conferido**: o `.gitignore` do workspace já ignora `arca/` e `polis/` (regra `/*`, `git check-ignore`); a pendência herdada da primeira sessão deixa de existir.
+- **CI**: no PR #29, `guard` (4s), `rust` (32s) e `audit` (2m57s) passaram no commit do `OVERVIEW.md` (vistos com `gh pr checks`); o commit deste registro roda de novo.
+- **Não verificado**: nada de código mudou.
+- **Fica**: Fase 2 (sync entre dispositivos), sem plano; P-09 e P-19 a P-25.
+
 ### 2026-11-01 — Sessão 26 (Fase 1, PR 7: frase de recuperação BIP-39)
 
 - **Pedido**: PR 7 da Fase 1, o último (plano aprovado em plan mode; áreas de chaves e recuperação confirmadas pelo dono). PR 6 (#27) já mesclado antes.
