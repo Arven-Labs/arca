@@ -101,7 +101,7 @@ JSON versionado (ADR 0008). Nomes de arquivo ficam **só aqui**, dentro do cifra
   "device": "<id do dispositivo, ex.: portatil-fabio>",
   "created_at": "2026-10-31T14:02:11Z",
   "files": [
-    { "path": "memoria/projeto-x.md", "blob": "<hash do blob>", "size": 2048, "sha256": "<hash do texto claro>" }
+    { "path": "memoria/projeto-x.md", "class": "vault", "blob": "<hash do blob>", "size": 2048, "sha256": "<hash do texto claro>" }
   ]
 }
 ```
@@ -110,7 +110,7 @@ JSON versionado (ADR 0008). Nomes de arquivo ficam **só aqui**, dentro do cifra
 - `counter`: contagem de conveniência para exibir e ordenar; **não** decide conflito. A causalidade vem de `base_version`.
 - `files` lista o **estado completo** do Vault (snapshot), não um delta. Isso difere do `warden-sync`, que envia delta; o ganho é que qualquer manifest sozinho reconstrói o Vault, e o custo é um manifest maior (aceitável: só caminhos e hashes, os blobs não se repetem porque o id é o hash).
 - `path`: relativo à raiz do Vault, separador `/`, sem `..`, sem caminho absoluto, normalizado em Unicode (NFC). O núcleo **rejeita** o manifest inteiro se algum caminho escapar da raiz (fronteira de confiança: o manifest vem de fora).
-- Entradas que não são arquivo de Vault (`config.toml`, logins OAuth) não estão definidas aqui: P-18.
+- `class` (ADR 0010): `vault` (arquivos do Vault), `config` (`config.toml`) ou `secret` (logins OAuth do MCP). Fica dentro do manifest cifrado. A arca sincroniza as classes que o consumidor entregar; quais ficam ligadas é configuração do Warden (padrão: as três, como hoje). Para `config` e `secret`, `path` é relativo à pasta de origem da classe, com as mesmas regras de validação acima.
 
 ### 5.4 Autenticidade sem assinatura (decidido, ADR 0009)
 A spec (§8) fala em manifest "assinado". Na v1 todos os dispositivos compartilham a mesma chave (ADR 0006), então uma assinatura simétrica não distinguiria dispositivos; a **tag AEAD** já prova que o manifest foi feito por quem tem a chave. A v1 **não** assina separadamente. Assinatura por dispositivo só faz sentido com chave por dispositivo, o que o ADR 0006 deixou para depois (o `key_epoch` mantém a porta aberta).
@@ -152,6 +152,7 @@ Entradas: base comum **B** (o ancestral mais recente das pontas), ponta **L** (l
 - Depois de resolver, o dispositivo grava um **manifest de fusão** cujo `base_version` é uma das pontas, com as duas pontas registradas no corpo (campo `merged_from`, ADR 0009). Assim o grafo volta a ter uma ponta.
 - As cópias `.conflito-*` entram no Vault e sincronizam como arquivo comum (ADR 0005). Se a busca semântica do Warden as indexa é decisão do Warden.
 - Nada é mesclado dentro de um arquivo na v1.
+- **Classes `config` e `secret` (ADR 0010):** a regra de decisão é a mesma, mas no conflito a entrada de `created_at` mais recente fica no lugar e a perdedora vai para `.arca/conflitos/`, **fora** do `~/.warden`, da pasta de logins e do Vault (nunca uma cópia `.conflito-*` ao lado: um token duplicado na pasta de logins poderia ser lido como outro login). Arquivos e pasta com permissão `0o600` e `0o700`; o conflito é registrado e mostrado; um comando de limpeza apaga as cópias.
 - O desempate pelo `created_at` usa o relógio do dispositivo e pode errar; por isso o perdedor é sempre preservado, e a escolha do "vencedor" nunca apaga dado.
 
 ## 8. Rotação por época (ADR 0006)
@@ -177,9 +178,12 @@ Tudo que vem de um backend ou do disco é entrada não confiável. Testes obriga
 - Falha no meio do envio (blobs gravados, manifest não): estado remoto continua válido.
 - Backend que mente (devolve outro objeto para um id): `Corrupt`.
 - Vault vazio, arquivo vazio, arquivo grande (limite de tamanho por objeto a definir).
+- Entrada `secret` ou `config` em conflito: o perdedor nunca cai na pasta de logins nem no Vault; arquivo e pasta de conflitos saem com `0o600` e `0o700`.
+- Classe desconhecida no manifest: recusa explícita, como `format_version` desconhecido.
+- Classe desligada no consumidor: entradas dessa classe não são aplicadas em disco.
 
 ## 11. O que esta spec não resolve
 - Retenção e coleta de lixo (P-05) e limite de tamanho por objeto.
 - Contrato HTTP do hub e fluxo de pareamento (Fase 2); cliente S3 (P-15).
-- Escopo de `config.toml` e logins (P-18) e os rótulos exatos do HKDF (Fase 1, ADR 0009).
+- Os rótulos exatos do HKDF (Fase 1, ADR 0009) e a configuração por classe no Warden (Fase 2, ADR 0010).
 - Revisão de segurança independente (Fase 4). Nada aqui foi implementado nem testado; é desenho.
