@@ -1,0 +1,11 @@
+[package]
+name = "arca-core"
+version = "0.0.0"
+description = "Núcleo da arca: armazenamento e sincronização local-first com criptografia no cliente"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true

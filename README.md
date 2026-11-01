@@ -2,7 +2,15 @@
 
 Camada local-first de armazenamento e sincronização, com criptografia no cliente. O primeiro consumidor é o [Warden](https://github.com/Arven-Labs/warden): manter o Vault (memória em `.md`, skills, configurações) idêntico entre os computadores do usuário e recuperável após perda de uma máquina.
 
-**Status:** pré-código. A Fase 0 (descoberta) está feita nos documentos: a [spec do MVP](project/SPEC.md), a [spec técnica](project/SPEC-TECNICA.md) (`BlobStore` e formato do manifest) e dez [decisões](project/adr/) (nome, licença, escopo, recuperação de chave, conflito, rotação, backends, stack e criptografia). Rust, XChaCha20-Poly1305 e manifest JSON versionado estão decididos; nenhuma linha de código foi escrita. A próxima etapa é a Fase 1, o núcleo local.
+**Status:** Fase 1 (núcleo local) começando. A Fase 0 (descoberta) está feita nos documentos: a [spec do MVP](project/SPEC.md), a [spec técnica](project/SPEC-TECNICA.md) (`BlobStore` e formato do manifest) e doze [decisões](project/adr/) (nome, licença, escopo, recuperação de chave, conflito, rotação, backends, stack, criptografia, classes de entrada, histórico e migração). Por ora o código é só o esqueleto do workspace (`crates/arca-core`); a lógica entra nos PRs seguintes.
+
+## Desenvolvimento
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+```
 
 ## Princípios
 
