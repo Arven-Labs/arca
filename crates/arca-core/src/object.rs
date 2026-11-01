@@ -29,7 +29,7 @@ impl TryFrom<u8> for ObjectKind {
 
 impl ObjectKind {
     /// Nome usado como prefixo da chave do objeto (`blob/…`, `manifest/…`).
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             ObjectKind::Blob => "blob",
             ObjectKind::Manifest => "manifest",
