@@ -1,6 +1,14 @@
 //! Núcleo da arca: camada local-first de armazenamento e sincronização com
-//! criptografia no cliente. Esqueleto da Fase 1; a lógica entra nos PRs seguintes.
+//! criptografia no cliente. A lógica entra aos poucos, um PR por intenção (Fase 1).
 #![forbid(unsafe_code)]
+
+pub mod envelope;
+pub mod error;
+pub mod object;
+
+pub use envelope::{Alg, Header, HEADER_LEN, MAGIC, NONCE_LEN};
+pub use error::Error;
+pub use object::{ObjectId, ObjectKind};
 
 /// Versão do formato da arca gravada nos objetos (ver `project/SPEC-TECNICA.md` §5.1).
 pub const FORMAT_VERSION: u32 = 1;

@@ -2,6 +2,17 @@
 
 Mais recente no topo.
 
+### 2026-11-01 — Sessão 20 (Fase 1, PR 2: tipos base e envelope)
+
+- **Pedido**: PR 2 da Fase 1 (plano aprovado em plan mode). A resposta "sim" à minha pergunta "PR 2 ou ruleset e Dependabot?" foi lida como seguir com o PR 2; ruleset e Dependabot continuam pendentes.
+- **Decisão do dono**: cabeçalho de 36 bytes com magic `ARCA`.
+- **Feito** (branch `feat/fase1-envelope`): `error.rs`, `object.rs` (`ObjectKind`, `ObjectId` = SHA-256 dos bytes cifrados, `Display`/`FromStr` estrito), `envelope.rs` (`Alg`, `Header`, `encode`/`decode`); `SPEC-TECNICA.md` §5.1 com o layout; `OVERVIEW.md`. Dependências novas: `sha2` 0.11.1 e `thiserror` 2.0.21 (família `digest` 0.11, a mesma que `hkdf` 0.13 e `chacha20poly1305` 0.11 usarão no PR 3). 15 testes novos escritos antes e vistos falhar contra `todo!()`; passam depois (16 no total, com o de fumaça).
+- **Verificado localmente**: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test` (16 passam), `cargo audit` (17 crates no `Cargo.lock`, sem achados; base de advisories de 2026-11-01).
+- **Incidente**: no meio do trabalho, as edições em `lib.rs` e `Cargo.toml` voltaram ao estado do `HEAD` sem eu ter rodado nada que explique (reflog sem `reset` nem `checkout`). Reaplicadas e commitadas logo em seguida; a causa não foi identificada.
+- **CI**: `guard` (3s) e `rust` (10s) passaram no PR #22 (vistos com `gh pr checks`) antes deste ajuste do registro.
+- **Não verificado**: causa do incidente acima; o código usa `as_chunks` (estável em versões recentes do Rust, não medi o mínimo; sem MSRV declarado); a decodificação não valida o tamanho do corpo nem a tag (PR 3).
+- **Fica**: PRs 3 a 7 da Fase 1; ruleset `protect-main` com o job `rust`; `dependabot.yml`.
+
 ### 2026-11-01 — Sessão 19 (Fase 1, PR 1: esqueleto e CI de Rust)
 
 - **Pedido**: começar a Fase 1 (plano aprovado em plan mode; roteiro de 7 PRs, este é o primeiro).

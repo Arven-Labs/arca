@@ -82,6 +82,19 @@ Cabeçalho **em claro** + corpo cifrado, em binário (sem base64, ADR 0008):
 
 Por que o cabeçalho é em claro: o leitor precisa de `key_epoch` e `alg` para escolher a chave e o algoritmo **antes** de decifrar. Ele vaza apenas versão, época e tipo, nada do Vault.
 
+**Layout binário (decidido pelo dono em 2026-11-01, Fase 1; implementado em `arca-core::envelope`):** 36 bytes, inteiros big-endian, nesta ordem:
+
+| Bytes | Campo | Valores da v1 |
+|---|---|---|
+| 0 a 3 | magic | `"ARCA"` (`41 52 43 41`) |
+| 4 a 5 | `format_version` (u16) | `1` |
+| 6 | `alg` (u8) | `1` = `xchacha20poly1305` |
+| 7 | `kind` (u8) | `1` = blob, `2` = manifest |
+| 8 a 11 | `key_epoch` (u32) | época da chave |
+| 12 a 35 | `nonce` | 24 bytes |
+
+O corpo (texto cifrado + tag) começa no byte 36. O magic faz um arquivo que não é da arca (por exemplo, um bundle do `warden-sync`) ser recusado com erro claro, em vez de falhar na decifragem. Um teste com vetor fixo protege o layout: ele é contrato de formato.
+
 **Decidido (ADR 0009):** o cabeçalho inteiro (incluindo o `nonce`) entra como **dados associados (AAD)** da cifra autenticada, com layout binário fixo, de modo que a serialização seja única. Assim alterar `key_epoch`, `alg` ou `kind` num objeto faz a decifragem falhar, em vez de aceitar um cabeçalho adulterado.
 
 ### 5.2 Chaves
