@@ -2,6 +2,15 @@
 
 Mais recente no topo.
 
+### 2026-11-01 — Sessão 22 (fechamento da sessão do dia)
+
+- **Pedido**: o dono quis encerrar e deixar tudo pronto.
+- **Estado ao fechar**: `main` em `5fd6cb2` (PR 3 mesclado), igual ao `origin/main`; nenhum PR aberto; só a branch `main`; 0 alertas do Dependabot; no merge do PR 3 os workflows `CI Private Files` e `Rust` (inclui `audit`) passaram em `5fd6cb2`.
+- **Feito nesta sessão do dia** (PRs #15 a #23, todos de docs exceto #21 a #23): P-13, P-10, P-05, P-06, P-15 e P-16 resolvidas (ADRs 0011 e 0012, notas nos 0007, 0008 e 0009); Fase 0 encerrada; Fase 1 com os PRs 1 a 3 mesclados (esqueleto + CI de Rust, tipos e envelope, cripto).
+- **Correção**: eu disse que a lista de pendências estava vazia depois da P-16, mas a **P-09** (marca e domínio) nunca foi tratada e segue aberta. `PENDING.md` e `OVERVIEW.md` ajustados.
+- **Pendências novas** (`PENDING.md`): P-19 (ruleset com `rust` e `audit`), P-20 (`dependabot.yml`), P-21 (MSRV), P-22 (incidente do PR 2).
+- **Fica**: PR 4 da Fase 1 (manifest), depois 5 a 7; resíduo do spike do Garage em `.../scratchpad/garage/data` (dono root, sem segredo, exige `sudo` para apagar).
+
 ### 2026-11-01 — Sessão 21 (Fase 1, PR 3: cripto)
 
 - **Pedido**: PR 3 da Fase 1 (plano aprovado em plan mode; área de criptografia confirmada pelo dono no plano).
