@@ -7,7 +7,7 @@ Mais recente no topo.
 - **Pedido**: fixar o orçamento do backup externo (plano aprovado em plan mode).
 - **Decisão do dono**: teto de **US$ 1/mês** (recomendação), sem Storj.
 - **Feito** (branch `docs/fase0-p06`): `PENDING.md` com P-06 resolvida e a medição; nota no ADR 0007; ADR 0011 com o gatilho de reavaliação ligado ao teto (antes: "5 GB ou US$ 1/mês", valor meu); `OVERVIEW.md`. Medição: só tamanhos e contagem de arquivos em `~/Warden/vault`, sem ler conteúdo.
-- **CI**: ainda não conferido neste registro (ver o PR).
+- **CI**: `guard` passou no PR #18 (visto com `gh pr checks`, 4s) antes deste ajuste do registro.
 - **Não verificado**: Vault real (o medido tem 575 bytes); as projeções de crescimento são minhas; preços do B2 e do Storj são de 2026-10-31; custo de `list` e de egress em S3.
 - **Fica**: P-15; P-16. Nenhuma bloqueia a Fase 1.
 
