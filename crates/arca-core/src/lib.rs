@@ -5,10 +5,13 @@
 pub mod backend;
 pub mod crypto;
 pub mod disk;
+pub mod engine;
 pub mod envelope;
 pub mod error;
+pub mod heads;
 pub mod manifest;
 pub mod object;
+pub mod scan;
 pub mod store;
 
 #[cfg(test)]
