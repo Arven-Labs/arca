@@ -74,7 +74,7 @@ Cabeçalho **em claro** + corpo cifrado, em binário (sem base64, ADR 0008):
 | Campo | Em claro | Conteúdo |
 |---|---|---|
 | `format_version` | sim | Versão do formato da arca (inteiro). Decidido (ADR 0003, 0008) |
-| `alg` | sim | Algoritmo do corpo. v1: `xchacha20poly1305`; reservado `aes-256-gcm-warden-v1` para ler bundles do `warden-sync` (P-16). Decidido (ADR 0008) |
+| `alg` | sim | Algoritmo do corpo. v1: `xchacha20poly1305`; valores novos entram por `format_version`. A arca não lê bundles do `warden-sync` (ADR 0012). Decidido (ADR 0008) |
 | `key_epoch` | sim | Época da chave (ADR 0006). Decidido |
 | `kind` | sim | `blob` ou `manifest`. Decidido (ADR 0009) |
 | `nonce` | sim | 24 bytes aleatórios do `OsRng`, um por objeto. Decidido (XChaCha20, ADR 0008) |
@@ -163,8 +163,7 @@ Entradas: base comum **B** (o ancestral mais recente das pontas), ponta **L** (l
 5. Um manifest com `key_epoch` menor que o aceito pelo dispositivo, publicado depois da rotação, é ignorado e sinalizado. **Não validado:** como impedir que o dispositivo perdido continue publicando com a chave antiga (a Fase 4 precisa desenhar isso).
 
 ## 9. Compatibilidade e migração (P-16)
-- `alg = aes-256-gcm-warden-v1` reservado: ler um bundle do `warden-sync` exige o contexto HKDF do `warden-sync`, que **não** é reaproveitado para nada novo.
-- O plano de convivência entre o `warden-sync` e a arca (quando o Warden troca de caminho) continua sendo o P-16.
+- **Decidido (ADR 0012):** a migração do `warden-sync` é um corte único por Vault, sem importar histórico. A arca não lê bundles antigos nem usa o contexto HKDF do `warden-sync`; reaproveita a `vault_key` e deriva subchaves próprias (`arca/v1/...`).
 - `format_version` desconhecido (maior que o suportado): o núcleo **recusa** e pede atualização; nunca interpreta parcialmente.
 
 ## 10. Entradas externas e casos de borda para testar (Fase 1)

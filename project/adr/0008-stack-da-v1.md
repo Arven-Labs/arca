@@ -7,7 +7,7 @@ O P-08 pedia a stack da arca: linguagem, biblioteca de criptografia, chunking e 
 
 ## Decisão
 - **Linguagem: Rust**, como o Warden e o `warden-sync` de onde a arca é extraída.
-- **Cifra do conteúdo: XChaCha20-Poly1305** (crate `chacha20poly1305`, RustCrypto), nonce aleatório de 192 bits. O envelope leva um campo **`alg`**, de modo que bundles AES-256-GCM do `warden-sync` possam ser lidos e novos algoritmos adicionados sem quebrar o formato.
+- **Cifra do conteúdo: XChaCha20-Poly1305** (crate `chacha20poly1305`, RustCrypto), nonce aleatório de 192 bits. O envelope leva um campo **`alg`**, de modo que novos algoritmos possam ser adicionados sem quebrar o formato. (Originalmente também para ler bundles AES-256-GCM do `warden-sync`; superado pelo ADR 0012.)
 - **Derivação de chaves: HKDF-SHA256**, como hoje, com contexto próprio da arca (separado do contexto do `warden-sync` e do TruthID).
 - **Manifest e envelope: JSON versionado** com `format_version`, `key_epoch` (ADR 0006), `base_version` (ADR 0005) e `alg`; o conteúdo dos arquivos vai como **blobs binários cifrados**, sem base64. Chunking e deduplicação ficam fora da v1 (ADR 0003).
 - **Recuperação: crate `bip39` 3.0.0** como candidato (ADR 0004), **sujeito a ler o código e os advisories do repositório antes da Fase 1**. Fecha o P-13 com essa ressalva.
@@ -47,6 +47,6 @@ Os advisories encontrados eram antigos ou de severidade baixa/média; não confi
 
 ## Consequências
 - Uma dependência criptográfica nova no Warden (`chacha20poly1305`) e, enquanto o `warden-sync` existir, dois estilos de cifra convivendo.
-- Ler os bundles AES-GCM antigos exige manter o suporte a esse `alg` e cuidado com o contexto HKDF (não reutilizar o do `warden-sync`).
+- ~~Ler os bundles AES-GCM antigos exige manter o suporte a esse `alg` e cuidado com o contexto HKDF.~~ **Superado pelo ADR 0012 (2026-11-01):** a migração é corte único sem importar histórico; a arca não lê o formato antigo, e o `alg` reservado para isso saiu da spec.
 - O formato é legível e exportável em formato aberto (spec §12), ao custo de tamanho maior que um formato binário.
 - **Não validado:** a auditoria formal do `bip39` e do `chacha20poly1305`; se as versões `aes-gcm` 0.10 em uso no Warden já estão acima das correções dos advisories antigos; o suporte a Android `armv7` de cada crate no `warden-mobile-bridge`; o custo de tempo de XChaCha20 sem aceleração de hardware nos celulares alvo. A segurança do conjunto passa pela revisão da Fase 4.
