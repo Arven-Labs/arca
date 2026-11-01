@@ -79,6 +79,7 @@ Engine::new(store, keys: EpochKeys, device) -> Result<Engine<S>, EngineError>
 engine.heads()                        -> Heads { tips, rejected }          // abre todos os manifests
 engine.snapshot(&Roots, now: u64)     -> Snapshot::{Created{id, manifest, new_blobs, skipped}, Unchanged{head, skipped}}
 engine.restore(&ObjectId, &Roots)     -> Restored { files }
+engine.merge(now: u64)                -> MergeOutcome::{Nothing{head}, Merged{id, manifest, conflicts, tips_after}}   // §7
 Roots { vault, config, secret: Option<PathBuf> }   // classe sem pasta = desligada
 ```
 
@@ -181,7 +182,7 @@ Por que assim e não um arquivo `HEAD` com compare-and-swap: S3-compatíveis e o
 Um backend malicioso poderia servir só manifests velhos. O dispositivo guarda localmente o **último manifest que aceitou** e recusa, com aviso, uma cabeça da qual ele não descende. Não protege o primeiro acesso de um dispositivo novo; limite aceito na v1 e item de revisão da Fase 4.
 
 ## 7. Regra de conflito (ADR 0005)
-**Implementado (Fase 2a, PR 1, ADR 0014) em `arca-core::merge` e `heads::tips`:** `common_ancestor` (maximal, sem ancestral = base vazia), `merge_files` (esta tabela, simétrica, por `(classe, path)`; cópia `<path>.conflito-<dispositivo>-<AAAAMMDDTHHMMSSZ>.md` com o blob do perdedor; desempate de `created_at` pelo id maior) e o colapso de fusões equivalentes em uma ponta. Ainda não gravam manifest nem tocam o disco: isso é o `Engine::merge` e a aplicação (PRs 2 e 3).
+**Implementado (Fase 2a, PR 1, ADR 0014) em `arca-core::merge` e `heads::tips`:** `common_ancestor` (maximal, sem ancestral = base vazia), `merge_files` (esta tabela, simétrica, por `(classe, path)`; cópia `<path>.conflito-<dispositivo>-<AAAAMMDDTHHMMSSZ>.md` com o blob do perdedor; desempate de `created_at` pelo id maior) e o colapso de fusões equivalentes em uma ponta. **PR 2: `Engine::merge(now)`** funde as duas primeiras pontas (ordem `(counter, hash)`) e grava um manifest de fusão (`base_version` = a maior ponta do par, `merged_from` = a outra, `counter` = máximo + 1); devolve `Merged { id, manifest, conflicts, tips_after }` ou `Nothing { head }` com 0 ou 1 ponta. Com 3 ou mais pontas, repetir até `tips_after` = 1. Recusa sem gravar: manifest ilegível (`Diverged`), blob ausente (`MissingObject`), nome de cópia longo demais (`ConflictCopyName`, P-26). Ainda não toca o disco do usuário: aplicar o resultado numa pasta viva é o PR 3.
 
 Entradas: base comum **B** (o ancestral mais recente das pontas), ponta **L** (local) e ponta **R** (remota). Decisão **por arquivo**, comparando o `sha256` do texto claro:
 

@@ -8,6 +8,7 @@ use crate::envelope::Header;
 use crate::error::Error;
 use crate::heads::{tips, Head};
 use crate::manifest::{validate_device, validate_path, Class, FileEntry, Hash32, Manifest};
+use crate::merge::{common_ancestor, merge_files, Conflict, Side};
 use crate::object::{ObjectId, ObjectKind};
 use crate::scan::{scan_class, Candidate, Skipped, MAX_FILE_BYTES};
 use crate::store::{verified_get, BlobStore, StoreError};
@@ -55,15 +56,20 @@ pub enum EngineError {
     #[error("invalid object: {0}")]
     Object(#[from] Error),
     /// Mais de uma ponta, ou algum manifest ilegível: construir em cima seria criar uma
-    /// divergência silenciosa. Resolver é da Fase 2.
+    /// divergência silenciosa. Várias pontas se juntam com `Engine::merge`; ilegíveis
+    /// continuam bloqueando (P-14).
     #[error(
-        "storage has {tips} tips and {rejected} unreadable manifests; refusing to build on it"
+        "storage has {tips} tips and {rejected} unreadable manifests; refusing to build on it \
+         (join tips with merge)"
     )]
     Diverged { tips: usize, rejected: usize },
     /// Existe manifest de uma época mais nova que a das chaves deste dispositivo: ele precisa
     /// da chave nova (re-parear, ADR 0006) e não deve construir sobre uma época velha.
     #[error("storage has a newer key epoch ({found}) than this device's keys ({have})")]
     NeedsNewKey { have: u32, found: u32 },
+    /// O nome da cópia `.conflito-*` não cabe num caminho válido (P-26): nada foi gravado.
+    #[error("conflict copy name does not fit in a valid path")]
+    ConflictCopyName,
     /// A restauração só escreve em pasta inexistente ou vazia.
     #[error("restore target is not empty")]
     TargetNotEmpty,
@@ -84,6 +90,13 @@ enum Read {
     Unreadable(EngineError),
     /// Cabeçalho de outra época: não é aberto aqui.
     OtherEpoch(u32),
+}
+
+/// Resultado de `Engine::load`: o grafo legível e o que ficou de fora.
+struct Loaded {
+    readable: Vec<(ObjectId, Manifest)>,
+    rejected: Vec<Rejected>,
+    superseded: Vec<ObjectId>,
 }
 
 /// Um manifest que não pôde ser lido e por quê.
@@ -120,6 +133,20 @@ pub enum Snapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MergeOutcome {
+    /// Zero ou uma ponta: nada a fundir, nada gravado.
+    Nothing { head: Option<ObjectId> },
+    /// Gravou um manifest de fusão para as duas primeiras pontas (ordem `(counter, hash)`).
+    Merged {
+        id: ObjectId,
+        manifest: Manifest,
+        conflicts: Vec<Conflict>,
+        /// Pontas que existem depois desta fusão; repetir `merge` até chegar a 1.
+        tips_after: usize,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Restored {
     pub files: usize,
 }
@@ -152,6 +179,21 @@ impl<S: BlobStore> Engine<S> {
     /// ilegível da época que conta vai para `rejected` e nunca vira ponta; backend fora do ar
     /// aborta (não é "ilegível").
     pub async fn heads(&self) -> Result<Heads, EngineError> {
+        let Loaded {
+            readable,
+            rejected,
+            superseded,
+        } = self.load().await?;
+        Ok(Heads {
+            tips: tips(readable),
+            rejected,
+            superseded,
+        })
+    }
+
+    /// Lê todos os manifests e os classifica (ver `heads`). `readable` é o grafo inteiro da
+    /// época que conta, não só as pontas.
+    async fn load(&self) -> Result<Loaded, EngineError> {
         let mine = self.keys.epoch();
         let mut readable = Vec::new();
         let mut rejected = Vec::new();
@@ -196,8 +238,8 @@ impl<S: BlobStore> Engine<S> {
         }
         rejected.sort_by_key(|r| r.id.hash);
         superseded.sort_by_key(|id| id.hash);
-        Ok(Heads {
-            tips: tips(readable),
+        Ok(Loaded {
+            readable,
             rejected,
             superseded,
         })
@@ -224,6 +266,77 @@ impl<S: BlobStore> Engine<S> {
         Ok(match Manifest::open(&self.keys, &bytes) {
             Ok(manifest) => Read::Opened(manifest),
             Err(e) => Read::Unreadable(e.into()),
+        })
+    }
+
+    /// Funde as duas primeiras pontas (ordem `(counter, hash)`) num manifest de fusão
+    /// (`SPEC-TECNICA.md` §7, ADR 0014). Uma chamada resolve um par; repetir até `tips_after`
+    /// chegar a 1.
+    pub async fn merge(&self, now: u64) -> Result<MergeOutcome, EngineError> {
+        let Loaded {
+            readable, rejected, ..
+        } = self.load().await?;
+        let heads = tips(readable.clone());
+        // sem o grafo completo a base pode estar errada: mesma recusa do `snapshot`
+        if !rejected.is_empty() {
+            return Err(EngineError::Diverged {
+                tips: heads.len(),
+                rejected: rejected.len(),
+            });
+        }
+        let [first, second, ..] = heads.as_slice() else {
+            return Ok(MergeOutcome::Nothing {
+                head: heads.first().map(|h| h.id),
+            });
+        };
+
+        // `first` vem antes de `second` em (counter, hash): `second` é a maior ponta
+        let base_files: &[FileEntry] = common_ancestor(&readable, &first.id, &second.id)
+            .and_then(|id| readable.iter().find(|(other, _)| *other == id))
+            .map_or(&[], |(_, manifest)| &manifest.files);
+        fn side(head: &Head) -> Side<'_> {
+            Side {
+                id: head.id,
+                manifest: &head.manifest,
+            }
+        }
+        let merged = merge_files(base_files, side(first), side(second)).map_err(|e| match e {
+            Error::InvalidPath(_) => EngineError::ConflictCopyName,
+            other => EngineError::Object(other),
+        })?;
+
+        // o manifest vai por último, e nunca cita um blob que não está aqui
+        for file in &merged.files {
+            let blob = ObjectId {
+                kind: ObjectKind::Blob,
+                hash: file.blob.0,
+            };
+            if !self.store.has(&blob).await? {
+                return Err(EngineError::MissingObject);
+            }
+        }
+        let manifest = Manifest {
+            format_version: FORMAT_VERSION as u16,
+            key_epoch: self.keys.epoch(),
+            base_version: Some(Hash32(second.id.hash)),
+            merged_from: vec![Hash32(first.id.hash)],
+            counter: first
+                .manifest
+                .counter
+                .max(second.manifest.counter)
+                .saturating_add(1),
+            device: self.device.clone(),
+            created_at: now,
+            files: merged.files,
+        };
+        let sealed = manifest.seal(&self.keys)?;
+        self.store.put(&sealed.id, &sealed.bytes).await?;
+        Ok(MergeOutcome::Merged {
+            id: sealed.id,
+            manifest,
+            conflicts: merged.conflicts,
+            // duas pontas viram uma
+            tips_after: heads.len() - 1,
         })
     }
 
@@ -1076,6 +1189,349 @@ mod tests {
         );
     }
 
+    // ---------- fusão (Fase 2a, PR 2) ----------
+
+    /// Cópia do armazenamento de `rig` num `Rig` novo: outro dispositivo, outro disco.
+    fn forked(rig: &Rig) -> Rig {
+        let other = Rig::new();
+        copy_dir(&rig.store_dir(), &other.store_dir());
+        other
+    }
+
+    /// Junta os objetos de `from` no armazenamento de `into`, como uma replicação.
+    fn absorb(into: &Rig, from: &Rig) {
+        copy_dir(&from.store_dir(), &into.store_dir());
+    }
+
+    struct Diverged {
+        rig: Rig,
+        _others: Vec<Rig>,
+        tips: Vec<ObjectId>,
+    }
+
+    type Branch<'a> = (&'a str, u64, Vec<(&'a str, &'a [u8])>);
+
+    /// Um Vault base e vários dispositivos que partem dele sem se ver: cada ramo é
+    /// `(dispositivo, created_at, edições)`. No fim, `rig` tem o base e todas as pontas.
+    async fn diverge(base: &[(&str, &[u8])], branches: Vec<Branch<'_>>) -> Diverged {
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        for (path, data) in base {
+            write(&vault, path, data);
+        }
+        let (base_id, ..) = created(
+            rig.engine("base")
+                .snapshot(&vault_only(&vault), 1)
+                .await
+                .unwrap(),
+        );
+        let (mut others, mut tips) = (Vec::new(), Vec::new());
+        for (device, at, edits) in branches {
+            let other = forked(&rig);
+            let dir = other.tmp.path().join("vault-ramo");
+            let eng = other.engine(device);
+            eng.restore(&base_id, &vault_only(&dir)).await.unwrap();
+            for (path, data) in edits {
+                write(&dir, path, data);
+            }
+            let (id, ..) = created(eng.snapshot(&vault_only(&dir), at).await.unwrap());
+            tips.push(id);
+            others.push(other);
+        }
+        for other in &others {
+            absorb(&rig, other);
+        }
+        Diverged {
+            rig,
+            _others: others,
+            tips,
+        }
+    }
+
+    fn contents(pairs: &[(&str, &[u8])]) -> BTreeMap<String, Vec<u8>> {
+        pairs
+            .iter()
+            .map(|(path, data)| (path.to_string(), data.to_vec()))
+            .collect()
+    }
+
+    async fn restored_tree(rig: &Rig, id: &ObjectId, name: &str) -> BTreeMap<String, Vec<u8>> {
+        let target = rig.tmp.path().join(name);
+        rig.engine("pc")
+            .restore(id, &vault_only(&target))
+            .await
+            .unwrap();
+        tree(&target)
+    }
+
+    #[tokio::test]
+    async fn merge_without_divergence_does_nothing() {
+        let rig = Rig::new();
+        let eng = rig.engine("pc");
+        assert_eq!(
+            eng.merge(5).await.unwrap(),
+            MergeOutcome::Nothing { head: None }
+        );
+        let vault = rig.dir("vault");
+        write(&vault, "a.md", b"1");
+        let (id, ..) = created(eng.snapshot(&vault_only(&vault), 1).await.unwrap());
+        assert_eq!(
+            eng.merge(5).await.unwrap(),
+            MergeOutcome::Nothing { head: Some(id) }
+        );
+        assert_eq!(rig.count(ObjectKind::Manifest).await, 1);
+    }
+
+    #[tokio::test]
+    async fn merging_two_tips_with_disjoint_edits_joins_the_graph() {
+        let d = diverge(
+            &[("a.md", b"1"), ("b.md", b"1")],
+            vec![
+                ("pa", 10, vec![("a.md", b"A")]),
+                ("pb", 20, vec![("b.md", b"B")]),
+            ],
+        )
+        .await;
+        let eng = d.rig.engine("pc");
+        let MergeOutcome::Merged {
+            id,
+            manifest,
+            conflicts,
+            tips_after,
+        } = eng.merge(30).await.unwrap()
+        else {
+            panic!("esperava Merged");
+        };
+        assert!(conflicts.is_empty());
+        assert_eq!(tips_after, 1);
+
+        // a maior ponta por (counter, hash) é a base; a outra vem em `merged_from`
+        let mut parents = d.tips.clone(); // os dois têm counter 2: decide o hash
+        parents.sort_by_key(|i| i.hash);
+        assert_eq!(manifest.base_version, Some(Hash32(parents[1].hash)));
+        assert_eq!(manifest.merged_from, vec![Hash32(parents[0].hash)]);
+        assert_eq!(
+            (
+                manifest.counter,
+                manifest.created_at,
+                manifest.device.as_str(),
+                manifest.key_epoch
+            ),
+            (3, 30, "pc", 1)
+        );
+
+        let heads = eng.heads().await.unwrap();
+        assert_eq!(ids_of(&heads), [id]);
+        assert!(heads.rejected.is_empty());
+        assert_eq!(
+            restored_tree(&d.rig, &id, "restaurado").await,
+            contents(&[("a.md", b"A"), ("b.md", b"B")])
+        );
+    }
+
+    #[tokio::test]
+    async fn merging_a_conflict_keeps_the_newer_and_a_dated_copy_of_the_other() {
+        use crate::merge::ConflictKind;
+        let d = diverge(
+            &[("a.md", b"1")],
+            vec![
+                ("pa", 10, vec![("a.md", b"from-a")]),
+                ("pb", 20, vec![("a.md", b"from-b")]),
+            ],
+        )
+        .await;
+        let MergeOutcome::Merged { id, conflicts, .. } =
+            d.rig.engine("pc").merge(30).await.unwrap()
+        else {
+            panic!("esperava Merged");
+        };
+        let copy = "a.md.conflito-pa-19700101T000010Z.md";
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].kind, ConflictKind::BothEdited);
+        assert_eq!(conflicts[0].loser_device, "pa");
+        assert_eq!(conflicts[0].copy_path.as_deref(), Some(copy));
+        // o mais novo (pb, 20) fica no lugar; nada se perde
+        assert_eq!(
+            restored_tree(&d.rig, &id, "restaurado").await,
+            contents(&[("a.md", b"from-b"), (copy, b"from-a")])
+        );
+    }
+
+    /// Três dispositivos publicaram sem se ver: cada chamada resolve um par.
+    #[tokio::test]
+    async fn three_tips_take_two_merge_calls() {
+        let d = diverge(
+            &[("a.md", b"1")],
+            vec![
+                ("pa", 10, vec![("x.md", b"X")]),
+                ("pb", 20, vec![("y.md", b"Y")]),
+                ("pc", 30, vec![("z.md", b"Z")]),
+            ],
+        )
+        .await;
+        let eng = d.rig.engine("pd");
+        let heads = eng.heads().await.unwrap();
+        assert_eq!(heads.tips.len(), 3);
+
+        // o par é o das duas primeiras pontas na ordem (counter, hash)
+        let lowest = (heads.tips[0].id, heads.tips[1].id);
+        let MergeOutcome::Merged {
+            manifest,
+            tips_after,
+            ..
+        } = eng.merge(40).await.unwrap()
+        else {
+            panic!("esperava Merged");
+        };
+        assert_eq!(tips_after, 2);
+        assert_eq!(manifest.base_version, Some(Hash32(lowest.1.hash)));
+        assert_eq!(manifest.merged_from, vec![Hash32(lowest.0.hash)]);
+        assert_eq!(eng.heads().await.unwrap().tips.len(), 2);
+
+        let MergeOutcome::Merged { id, tips_after, .. } = eng.merge(41).await.unwrap() else {
+            panic!("esperava Merged");
+        };
+        assert_eq!(tips_after, 1);
+        assert_eq!(
+            eng.merge(42).await.unwrap(),
+            MergeOutcome::Nothing { head: Some(id) }
+        );
+        assert_eq!(
+            restored_tree(&d.rig, &id, "restaurado").await,
+            contents(&[
+                ("a.md", b"1"),
+                ("x.md", b"X"),
+                ("y.md", b"Y"),
+                ("z.md", b"Z")
+            ])
+        );
+    }
+
+    /// Dois dispositivos fundem o mesmo par ao mesmo tempo, em armazenamentos separados; ao
+    /// juntar os objetos, o grafo tem uma ponta só (ADR 0014) e o snapshot seguinte funciona.
+    #[tokio::test]
+    async fn two_devices_merging_the_same_pair_converge_to_one_tip() {
+        let d = diverge(
+            &[("a.md", b"1"), ("b.md", b"1")],
+            vec![
+                ("pa", 10, vec![("a.md", b"A")]),
+                ("pb", 20, vec![("b.md", b"B")]),
+            ],
+        )
+        .await;
+        let other = forked(&d.rig);
+        let merged = |out: MergeOutcome| match out {
+            MergeOutcome::Merged { id, .. } => id,
+            other => panic!("esperava Merged, veio {other:?}"),
+        };
+        let first = merged(d.rig.engine("pa").merge(30).await.unwrap());
+        let second = merged(other.engine("pb").merge(31).await.unwrap());
+        assert_ne!(first, second, "nonce aleatório: ids diferentes");
+        absorb(&d.rig, &other);
+
+        let eng = d.rig.engine("pc");
+        let heads = eng.heads().await.unwrap();
+        let expected = if first.hash < second.hash {
+            first
+        } else {
+            second
+        };
+        assert_eq!(ids_of(&heads), [expected]);
+
+        // quem continua a partir daí enxerga o estado fundido e constrói em cima dele
+        let work = d.rig.dir("trabalho");
+        eng.restore(&expected, &vault_only(&work)).await.unwrap();
+        assert!(matches!(
+            eng.snapshot(&vault_only(&work), 40).await.unwrap(),
+            Snapshot::Unchanged { head, .. } if head == expected
+        ));
+        write(&work, "c.md", b"C");
+        let (_, next, ..) = created(eng.snapshot(&vault_only(&work), 41).await.unwrap());
+        assert_eq!(next.base_version, Some(Hash32(expected.hash)));
+        assert_eq!(eng.heads().await.unwrap().tips.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_manifest_blocks_the_merge() {
+        let d = diverge(
+            &[("a.md", b"1")],
+            vec![
+                ("pa", 10, vec![("a.md", b"A")]),
+                ("pb", 20, vec![("a.md", b"B")]),
+            ],
+        )
+        .await;
+        fs::write(d.rig.store_dir().join(d.tips[0].to_string()), b"adulterado").unwrap();
+        assert_eq!(
+            d.rig.engine("pc").merge(30).await,
+            Err(EngineError::Diverged {
+                tips: 1,
+                rejected: 1
+            })
+        );
+        assert_eq!(d.rig.count(ObjectKind::Manifest).await, 3);
+    }
+
+    /// Um manifest que cita um blob que não está aqui nunca é publicado.
+    #[tokio::test]
+    async fn a_missing_blob_stops_the_merge_before_writing() {
+        let d = diverge(
+            &[("a.md", b"1")],
+            vec![
+                ("pa", 10, vec![("a.md", b"A")]),
+                ("pb", 20, vec![("b.md", b"B")]),
+            ],
+        )
+        .await;
+        let eng = d.rig.engine("pc");
+        let heads = eng.heads().await.unwrap();
+        let tip = heads.tips.iter().find(|h| h.id == d.tips[1]).unwrap();
+        let blob = tip
+            .manifest
+            .files
+            .iter()
+            .find(|f| f.path == "b.md")
+            .unwrap()
+            .blob;
+        let blob_id = ObjectId {
+            kind: ObjectKind::Blob,
+            hash: blob.0,
+        };
+        fs::remove_file(d.rig.store_dir().join(blob_id.to_string())).unwrap();
+
+        assert_eq!(eng.merge(30).await, Err(EngineError::MissingObject));
+        assert_eq!(d.rig.count(ObjectKind::Manifest).await, 3);
+    }
+
+    /// P-26: o nome da cópia não cabe num componente de caminho. Erro claro, nada gravado.
+    #[tokio::test]
+    async fn a_conflict_copy_name_that_does_not_fit_is_an_error_and_writes_nothing() {
+        let name = format!("{}.md", "n".repeat(250));
+        let d = diverge(
+            &[(name.as_str(), b"1")],
+            vec![
+                ("pa", 10, vec![(name.as_str(), b"A")]),
+                ("pb", 20, vec![(name.as_str(), b"B")]),
+            ],
+        )
+        .await;
+        assert_eq!(
+            d.rig.engine("pc").merge(30).await,
+            Err(EngineError::ConflictCopyName)
+        );
+        assert_eq!(d.rig.count(ObjectKind::Manifest).await, 3);
+    }
+
+    #[test]
+    fn the_diverged_error_points_to_merge() {
+        let text = EngineError::Diverged {
+            tips: 2,
+            rejected: 0,
+        }
+        .to_string();
+        assert!(text.contains("merge"), "{text}");
+    }
+
     fn ids_of(heads: &Heads) -> Vec<ObjectId> {
         heads.tips.iter().map(|h| h.id).collect()
     }
@@ -1670,6 +2126,8 @@ mod tests {
             },
             EngineError::Integrity,
             EngineError::MissingObject,
+            EngineError::ConflictCopyName,
+            EngineError::NeedsNewKey { have: 1, found: 2 },
         ];
         for e in errors {
             let text = format!("{e} {e:?}");

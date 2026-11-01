@@ -2,6 +2,16 @@
 
 Mais recente no topo.
 
+### 2026-11-01 — Sessão 34 (Fase 2a, PR 2: `Engine::merge`)
+
+- **Pedido**: PR 2 da Fase 2a, depois do #35 mesclado. Plano aprovado em plan mode.
+- **Decisão do dono**: um par por chamada para 3 ou mais pontas. Descartado: dobrar N pontas numa chamada (nó virtual).
+- **Testes primeiro** (revisados pelo dono): 9 falhavam (`todo!()` e a mensagem do `Diverged`). Desvio de nome aprovado: o campo é `tips_after` (pontas depois da fusão), não `remaining_tips`.
+- **Feito**: `Engine::merge`, `MergeOutcome`, `EngineError::ConflictCopyName`; `heads()` passou a usar `load()` privado que também devolve o grafo. O `Diverged` agora diz "join tips with merge". Spec §4.1 e §7, ADR 0014 (atualização do PR 2), P-26 e `OVERVIEW.md`.
+- **Verificado localmente**: `cargo test --workspace` (226 passam), `clippy --all-targets -D warnings`, `fmt --check`. CI do PR: ver o PR.
+- **Não verificado**: custo do `has` por blob com backend remoto (2b); relógios muito errados; só Linux. Os testes de convergência simulam dois dispositivos copiando a pasta do armazenamento, não replicação real (PR 5).
+- **Fica**: PRs 3 a 5 da 2a (aplicar numa pasta viva, último manifest aceito, replicação); 2b; P-09, P-22, P-25, P-26.
+
 ### 2026-11-01 — Sessão 33 (Fase 2a, PR 1: fusão pura; ADR 0014)
 
 - **Pedido**: começar a Fase 2. Plano aprovado em plan mode: fatiar em 2a (núcleo offline em `arca-core`, 5 PRs) e 2b (hub, pareamento, Warden). Este é o PR 1 da 2a.
