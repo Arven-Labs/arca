@@ -13,6 +13,17 @@ O P-08 pedia a stack da arca: linguagem, biblioteca de criptografia, chunking e 
 - **Recuperação: crate `bip39` 3.0.0** como candidato (ADR 0004), **sujeito a ler o código e os advisories do repositório antes da Fase 1**. Fecha o P-13 com essa ressalva.
   - **Atualização (2026-11-01, P-13):** leitura feita e candidato confirmado, fixado em `=3.0.0` com `default-features = false` e as features `std` e `zeroize`. A arca exige 24 palavras (a lib aceita 12 a 24) e envolve a chave em `Zeroizing`. Limites e detalhes no `PENDING.md`.
 - **Cliente S3: adiado para a Fase 3**, com um teste curto (spike) entre `object_store`, `opendal`, `rust-s3` e `aws-sdk-s3`, atrás de um feature flag do backend S3 (ADR 0007).
+  - **Atualização (2026-11-01, P-15): escolhido `object_store`** (0.14.x, versão fixada). Spike descartável contra um Garage 2.5.0 local (só HTTP em loopback, bucket e chave descartáveis), com os mesmos casos nos quatro clientes: put idempotente, get, has, objeto vazio e de 5 MB, `list` com 1500 objetos, 404 como `None`, credencial errada e servidor fora do ar sem vazar a chave. Todos passaram.
+
+    | | object_store 0.14.2 | opendal 0.59.5 | rust-s3 0.38.0 | aws-sdk-s3 1.157.0 |
+    |---|---|---|---|---|
+    | Erros | tipados | tipados | por status HTTP | tipados |
+    | Escrita condicional na API | sim | sim | não | sim |
+    | Binário x86_64 / aarch64 / armv7 (MB) | 4,5 / 4,1 / 2,9 | 5,3 / 4,7 / 3,4 | 2,8 / 2,5 / 1,7 | 5,5 / 4,7 / 3,4 |
+    | Crates; build limpo | 171; 45 s | 188; 45 s | 177; 45 s | 204; 88 s |
+    | Raízes de certificado | `rustls-platform-verifier` | `rustls-platform-verifier` | `webpki-roots` embutido | `rustls-native-certs` |
+
+    Os quatro compilam e linkam para `aarch64` e `armv7` Android com o NDK 28 e rustls (sem OpenSSL). O `aws-sdk-s3` só ficou sem advisories com `default-features = false` e `default-https-client`; com os padrões trouxe `rustls` 0.21, `rustls-webpki` 0.101 e `h2` 0.3 (7 advisories do RustSec, base de 2026-10-30). Motivos da escolha: erros tipados com `AlreadyExists`, verificador de plataforma no Android e `LocalFileSystem`/`InMemory` no mesmo trait (backend de disco e testes). Custos: API 0.x que quebra entre versões (na 0.14 `put`/`get`/`head` passaram para `ObjectStoreExt`) e retry padrão longo (~3 s para falhar offline), a configurar. O `rust-s3` foi descartado apesar de menor: sem escrita condicional, erros por status e raízes embutidas. O Garage 2.5.0 **ignora `If-None-Match`** (confirmado com `curl`: o segundo PUT sobrescreve), o que reforça que a v1 não depende de escrita condicional (`SPEC-TECNICA.md` §6). **Não validado:** HTTPS real, B2 real, execução em aparelho Android (só compilado), inicialização JNI do verificador de plataforma, multipart.
 - Higiene de chaves: `zeroize` para chaves em memória.
 
 ## Dados lidos em 2026-10-31 (crates.io e API de advisories do GitHub)
