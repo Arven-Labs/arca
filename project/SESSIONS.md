@@ -2,6 +2,16 @@
 
 Mais recente no topo.
 
+### 2026-11-01 — Sessão 31 (P-23: identidade `(classe, path)`)
+
+- **Pedido**: fechar P-23 e P-24 antes da Fase 2 (plano aprovado em plan mode, dois PRs). Este é o PR do P-23.
+- **Decisão do dono**: a identidade de uma entrada é `(classe, path)`. Descartadas: rebaixar a colisão para `skipped` e prefixar a classe no `path`.
+- **Testes primeiro** (revisados pelo dono): 4 novos em `manifest.rs` e 3 em `engine.rs`; o teste que esperava `PathCollision` foi substituído. Falharam antes (6 de 7) e passam depois.
+- **Feito**: `Class` com `Ord`/`Hash`; `Manifest::validate` por `(classe, path)`; `dedupe` e a ordenação do `snapshot` idem; `EngineError::PathCollision` removido. Dois testes antigos ajustados à nova ordem (`a_disabled_class_keeps_the_entries_of_the_previous_tip`, `random_manifests_round_trip_through_json_and_seal`). Spec §4.1 e §5.3, `PENDING.md`.
+- **Verificado**: `cargo test --workspace` (176 passam), `cargo clippy --all-targets -D warnings` e `cargo fmt --check` limpos, localmente. CI do PR: ver o PR.
+- **Não verificado**: contrato do Warden para o modo "arca" (Fase 2); `format_version` segue 1 sem migração.
+- **Fica**: P-24 (PR seguinte, com o ADR 0013); P-09, P-22, P-25; Fase 2.
+
 ### 2026-11-01 — Sessão 30 (P-19: ruleset aplicado no GitHub)
 
 - **Pedido**: aplicar o ruleset versionado no #31. Ação fora do git, pedida e autorizada pelo dono na hora ("sim, aplica o PUT").
