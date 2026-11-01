@@ -2,6 +2,19 @@
 
 Mais recente no topo.
 
+### 2026-11-01 — Sessão 23 (Fase 1, PR 4: manifest)
+
+- **Pedido**: PR 4 da Fase 1 (plano aprovado em plan mode; área de parsing de entrada externa).
+- **Decisões do dono**: `path` em NFC com a crate `unicode-normalization` (o parse recusa não-NFC); `created_at` em segundos Unix (u64), spec §5.3 atualizada; versões `serde` 1.0.229, `serde_json` 1.0.154 e `unicode-normalization` 0.1.26; aprovou os testes e as decisões 1 a 5 abaixo antes da implementação.
+- **Feito** (branch `feat/fase1-manifest`, PR #25): `manifest.rs` (`Manifest`, `FileEntry`, `Class`, `Hash32`, `validate_path`, `from_slice`/`validate`/`to_vec`/`seal`/`open`), erros `InvalidManifest` e `InvalidPath`, `SPEC-TECNICA.md` §5.3, `OVERVIEW.md`, nota no ADR 0008. `Cargo.lock` com 41 crates (eram 32).
+- **Decisões minhas, aprovadas na revisão dos testes**: `device` só `[A-Za-z0-9._-]`; colisão só por caixa é recusada; `: < > " | ? *` proibidos no `path`; erros do serde viram motivo fixo (a mensagem deles ecoa a entrada); `merged_from` some do JSON quando vazio.
+- **Testes** (escritos antes, 43 falhando contra `todo!()`, 77 passando no total): caminhos válidos e inválidos, vetor JSON fixo, entrada hostil, truncamento em todos os comprimentos, `seal`/`open` com época do corpo diferente da do cabeçalho, 200 manifests aleatórios e 2.000 entradas aleatórias ou mutadas sem pânico.
+- **Erro meu corrigido antes de implementar**: dois testes de limite de caminho estavam errados (componentes de 2000 bytes passam do limite de 255, e a soma não dava 4097). Trocados por um ajudante que monta caminhos de tamanho exato.
+- **Verificado localmente**: `fmt`, `clippy -D warnings`, `test --locked` (77), `cargo audit --deny warnings` (41 crates, sem achados).
+- **CI**: no PR #25, `guard` (5s), `rust` (18s) e `audit` (2m32s) passaram no commit do código (vistos com `gh pr checks`); o commit deste registro roda de novo.
+- **Não verificado**: o que `serde_json` e `unicode-normalization` fazem por dentro (só pelos testes); os tetos (100 000 arquivos, 64 MiB, 4096 bytes), que são palpites; se o Warden consegue produzir caminhos em NFC; revisão independente (Fase 4).
+- **Fica**: PRs 5 a 7 da Fase 1 (`BlobStore` + disco, núcleo local, frase BIP-39); P-19 a P-22.
+
 ### 2026-11-01 — Sessão 22 (fechamento da sessão do dia)
 
 - **Pedido**: o dono quis encerrar e deixar tudo pronto.

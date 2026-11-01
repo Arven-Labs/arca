@@ -92,7 +92,7 @@ impl FromStr for ObjectId {
 }
 
 /// Um dígito hexadecimal **minúsculo**.
-fn hex_digit(c: u8) -> Result<u8, Error> {
+pub(crate) fn hex_digit(c: u8) -> Result<u8, Error> {
     match c {
         b'0'..=b'9' => Ok(c - b'0'),
         b'a'..=b'f' => Ok(c - b'a' + 10),
