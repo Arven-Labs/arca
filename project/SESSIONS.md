@@ -2,6 +2,17 @@
 
 Mais recente no topo.
 
+### 2026-11-02 — Sessão 38 (Fase 2a, PR 5: replicação e cenário de ponta a ponta)
+
+- **Pedido**: PR 5 da Fase 2a. Plano aprovado em plan mode. Decisões do dono: função `replicate(origem, destino)` (não store composto) e status incluído; depois da auditoria, achado 2 só com a validação simples do cabeçalho (resto em P-32), achado 5 corrigido, achados 4, 6 e 7 registrados.
+- **Testes primeiro** (revisados pelo dono). Dois erros meus nos testes, corrigidos depois da revisão e mostrados: o helper do ponta a ponta baixava do remoto antes de fundir, então não havia fusão concorrente (agora `merge_locally`, e o teste confere que as fusões gêmeas têm ids diferentes antes da troca); uma contagem de arquivos errada (5, não 6).
+- **Feito**: `replicate.rs` (`replicate`, `replica_status`, `ReplicateReport`). Sem chave: blobs antes dos manifests, manifests listados antes dos blobs, `verified_get`, nunca `delete`. Decisão minha, aprovada na revisão: blob corrompido retém todos os manifests.
+- **Auditoria** (`security-auditor`, com reprodução numa cópia): corrigidos o **1** (blob listado e não entregue deixava passar manifest sem blob; lista de manifests agora antes dos blobs; campo `missing`), o **3** (ids repetidos multiplicavam leitura e escrita), o **5** (erro de `get` num objeto abortava a rodada; agora `unreadable`) e o **2 parcial** (só envelope válido do tipo certo é gravado; `malformed`). O cabeçalho forjado com corpo aleatório **não** é barrado e trava `snapshot`/`merge` (P-32, item mais importante). 4, 6 e 7 em P-32. Testes novos: fantasma, repetidos, queda no meio dos blobs, ilegível (blob e manifest), malformado, contagem de `delete`.
+- **Desvio de processo meu**: usei `sed -i` no Bash para acrescentar dois campos a literais de teste (contra o `CLAUDE.md`; avisei na hora, o conteúdo está no diff).
+- **Verificado localmente**: `cargo test --workspace` (307 passam), `clippy --all-targets -D warnings`, `fmt --check`. Os testes novos do achado 1 e do 3 foram escritos antes da correção, mas não rodei para vê-los falhar. CI do PR: ver o PR.
+- **Não verificado**: backend remoto real, concorrência real, `list` eventualmente consistente (só raciocinado), estouro de memória (não medido), Windows e macOS.
+- **Fica**: PR 3c (P-27), comando de limpeza (P-28); 2b; P-09, P-22, P-25, P-26, P-29, P-30, P-31, P-32.
+
 ### 2026-11-01 — Sessão 37 (Fase 2a, PR 4: último manifest aceito e `Rollback`)
 
 - **Pedido**: PR 4 da Fase 2a, proteção contra um armazenamento que volte no tempo (spec §6). Plano aprovado em plan mode; toca segurança (AGENTS.md §4).
