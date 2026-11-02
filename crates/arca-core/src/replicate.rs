@@ -1,8 +1,8 @@
 //! Replicação entre armazenamentos (`SPEC-TECNICA.md` §4 e §6, Fase 2a, PR 5).
 //!
-//! `replicate(origem, destino)` copia bytes opacos: não tem chave e não abre manifest. Serve
-//! para **empurrar** (push) e para origens confiáveis. **Origem não confiável (remoto, hub) entra
-//! por `Engine::pull`**, que recusa o manifest forjado; `replicate(remoto, local)` reabre o
+//! `replicate(origem, destino)` copia bytes opacos: não tem chave e não abre manifest. Não é
+//! público (P-32.b): o consumidor usa `Engine::push` (local para o remoto) e `Engine::pull`
+//! (remoto para o local, que recusa o manifest forjado). `replicate(remoto, local)` reabriria o
 //! P-32. Quem agenda (segundo plano, retry) é o consumidor; o núcleo não cria tarefas.
 
 use crate::backend::Backend;
@@ -55,7 +55,7 @@ impl ReplicaStatus {
 
 /// Copia para `to` os blobs e depois os manifests que `from` tem e `to` não tem.
 /// Idempotente e retomável.
-pub async fn replicate<A: BlobStore, B: BlobStore>(
+pub(crate) async fn replicate<A: BlobStore, B: BlobStore>(
     from: &A,
     to: &B,
 ) -> Result<ReplicateReport, StoreError> {
@@ -1176,6 +1176,59 @@ mod tests {
         assert_eq!(report.copied, 1);
         assert_eq!(count(&b.local, ObjectKind::Manifest).await, 1);
         assert_eq!(b.local.has(&real.id).await, Ok(true));
+    }
+
+    // ---------- Engine::push (P-32.b) ----------
+
+    #[tokio::test]
+    async fn push_copies_what_the_remote_lacks_and_a_second_push_copies_nothing() {
+        let tmp = TempDir::new();
+        let remote = disk(&tmp, "remoto");
+        let a = Device::new(&tmp, "a", false);
+        write(&a.vault, "x.md", b"1");
+        write(&a.vault, "y.md", b"2");
+        let base = a.snapshot(1).await;
+
+        let first = a.engine.push(&remote).await.unwrap();
+        assert_eq!(first.copied, 3); // 2 blobs e 1 manifest
+        assert!(!first.manifests_withheld && first.forged.is_empty());
+        assert_eq!(remote.has(&base).await, Ok(true));
+
+        let second = a.engine.push(&remote).await.unwrap();
+        assert_eq!((second.copied, second.already), (0, 3));
+    }
+
+    #[tokio::test]
+    async fn push_never_deletes_what_only_the_remote_has() {
+        let tmp = TempDir::new();
+        let remote = Probe::new(disk(&tmp, "remoto"));
+        let a = Device::new(&tmp, "a", false);
+        let only_there = object(ObjectKind::Blob, b"so-no-remoto");
+        remote.put(&only_there.0, &only_there.1).await.unwrap();
+        write(&a.vault, "x.md", b"1");
+        a.snapshot(1).await;
+
+        a.engine.push(&remote).await.unwrap();
+        assert_eq!(remote.has(&only_there.0).await, Ok(true));
+        assert_eq!(*remote.deletes.lock().unwrap(), 0);
+    }
+
+    /// Mesma semântica do `replicate`: blob local corrompido retém os manifests, e `Ok` com
+    /// `manifests_withheld` não é sucesso.
+    #[tokio::test]
+    async fn push_withholds_the_manifests_when_a_local_blob_is_corrupt() {
+        let tmp = TempDir::new();
+        let remote = disk(&tmp, "remoto");
+        let a = Device::new(&tmp, "a", false);
+        write(&a.vault, "x.md", b"1");
+        let base = a.snapshot(1).await;
+        let blob = a.local.list(ObjectKind::Blob).await.unwrap()[0];
+        corrupt_on_disk(&tmp, "a-store", &blob);
+
+        let report = a.engine.push(&remote).await.unwrap();
+        assert_eq!(report.corrupt, vec![blob]);
+        assert!(report.manifests_withheld);
+        assert_eq!(remote.has(&base).await, Ok(false));
     }
 
     /// Auditoria do P-32: um manifest cifrado com a chave certa (tag válida) mas cujo conteúdo o
