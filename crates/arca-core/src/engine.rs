@@ -2,12 +2,15 @@
 //! do zero** (`SPEC-TECNICA.md` §6, "Envio" e "Recebimento", sem a parte de rede). Sync entre
 //! dispositivos, junção de pontas e regra de conflito são da Fase 2.
 
-use crate::apply::{commit, finish, is_reserved_name, plan, stage, undo_all, Item, Kind, Undo};
+use crate::apply::{
+    commit, finish, is_reserved_name, plan, stage, undo_all, Item, Kind, Planned, Undo,
+};
 use crate::crypto::{open, seal, EpochKeys};
 use crate::disk::{create_private_dir, write_atomic};
 use crate::envelope::Header;
 use crate::error::Error;
 use crate::heads::{tips, Head};
+use crate::journal::{recover_root, Journal, Phase};
 use crate::manifest::{validate_device, validate_path, Class, FileEntry, Hash32, Manifest};
 use crate::merge::{common_ancestor, merge_files, Conflict, Side};
 use crate::object::{ObjectId, ObjectKind};
@@ -100,6 +103,14 @@ pub enum EngineError {
         "the apply failed and a previous version could not be put back; it was kept beside it"
     )]
     OriginalKept,
+    /// Há um diário de `apply` numa pasta de classe: um `apply` anterior foi interrompido no
+    /// meio da troca de arquivos. Nada foi lido nem escrito; chame `Engine::recover` antes.
+    #[error("an interrupted apply left a journal; run recover first")]
+    Interrupted,
+    /// O diário de `apply` existe mas não é válido (ilegível, grande demais, versão desconhecida,
+    /// caminho que sai da raiz, link no lugar). A recuperação não tocou em nada.
+    #[error("the apply journal is corrupt")]
+    CorruptJournal,
     /// A restauração só escreve em pasta inexistente ou vazia.
     #[error("restore target is not empty")]
     TargetNotEmpty,
@@ -193,6 +204,18 @@ pub struct Applied {
     pub removed: usize,
     /// Já estava no estado de destino (igual nos dois manifests, ou já aplicado antes).
     pub unchanged: usize,
+}
+
+/// Resultado de `Engine::recover`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Recovered {
+    /// Entradas devolvidas ao estado de antes do `apply` interrompido.
+    pub rolled_back: usize,
+    /// Entradas de um `apply` que já tinha trocado todos os arquivos, apenas terminadas.
+    pub completed: usize,
+    /// Arquivos que a recuperação **não tocou** porque o disco não bate com o diário (a pessoa
+    /// mexeu depois da queda): ficam onde estão, para ela decidir.
+    pub kept: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -438,6 +461,7 @@ impl<S: BlobStore> Engine<S> {
     /// Fotografa as pastas de `roots` e grava o estado como um manifest novo (blobs primeiro,
     /// manifest por último). `now` são segundos Unix (UTC), injetados para testes determinísticos.
     pub async fn snapshot(&self, roots: &Roots, now: u64) -> Result<Snapshot, EngineError> {
+        ensure_not_interrupted(roots)?;
         let state = self.load_state().await?;
         let Loaded {
             readable, rejected, ..
@@ -555,6 +579,7 @@ impl<S: BlobStore> Engine<S> {
         to: &ObjectId,
         roots: &Roots,
     ) -> Result<Applied, EngineError> {
+        ensure_not_interrupted(roots)?;
         let state = self.load_state().await?;
         let from_manifest = match from {
             Some(id) => Some(self.read_manifest(id).await?),
@@ -621,35 +646,75 @@ impl<S: BlobStore> Engine<S> {
             unchanged: same + already,
         };
 
-        // 2. buscar, verificar e gravar o conteúdo novo ao lado dos destinos
+        // 2. diário em disco (P-27): se o processo morrer daqui em diante, `recover` sabe voltar
+        let journal_roots = distinct_roots(&planned);
+        let (p, r) = (planned.clone(), journal_roots.clone());
+        // raiz que ainda não existe é criada aqui (o diário mora nela) e sai de novo se falhar
+        let created = run(move || open_journals(&r, &p)).await?;
+        let journals = Journals {
+            roots: journal_roots,
+            created,
+        };
+
+        // 3. buscar, verificar e gravar o conteúdo novo ao lado dos destinos
         let mut log = Vec::new();
         for p in planned.iter().filter(|p| p.kind != Kind::Remove) {
             let Some(entry) = &p.to else { continue };
             let plain = match self.plain_blob(entry).await {
                 Ok(plain) => plain,
-                Err(e) => return Err(rollback(log, e).await),
+                Err(e) => return Err(abandon(log, e, journals).await),
             };
             let one = p.clone();
             let (back, result) = with_log(log, move |log| stage(log, &one, &plain)).await;
             log = back;
             if let Err(e) = result {
-                return Err(rollback(log, e).await);
+                return Err(abandon(log, e, journals).await);
             }
         }
 
-        // 3. trocar; qualquer falha devolve tudo como estava
-        let all = planned.clone();
-        let (log, result) = with_log(log, move |log| commit(log, &all)).await;
+        // 4. trocar e marcar o diário como `committed`; qualquer falha devolve tudo como estava
+        let (all, marked) = (planned.clone(), journals.roots.clone());
+        let (log, result) = with_log(log, move |log| {
+            commit(log, &all)?;
+            mark_committed(&marked, &all)
+        })
+        .await;
         if let Err(e) = result {
-            return Err(rollback(log, e).await);
+            return Err(abandon(log, e, journals).await);
         }
         run(move || {
             finish(&planned);
+            for root in &journals.roots {
+                Journal::remove(root);
+            }
             Ok(())
         })
         .await?;
         self.remember(to).await?;
         Ok(applied)
+    }
+
+    /// Recupera um `apply` interrompido nas pastas ligadas de `roots` (P-27): desfaz a troca
+    /// pela metade, ou termina a que já valeu. Nunca sobrescreve nem apaga o que não bate com
+    /// o diário. Sem diário, não faz nada. Idempotente.
+    pub async fn recover(&self, roots: &Roots) -> Result<Recovered, EngineError> {
+        let dirs: Vec<PathBuf> = roots
+            .enabled()
+            .iter()
+            .map(|(_, root)| root.to_path_buf())
+            .collect();
+        run(move || {
+            let mut total = Recovered::default();
+            for dir in dirs {
+                if let Some(done) = recover_root(&dir)? {
+                    total.rolled_back += done.rolled_back;
+                    total.completed += done.completed;
+                    total.kept.extend(done.kept);
+                }
+            }
+            Ok(total)
+        })
+        .await
     }
 
     /// Grava, em `dir/<classe>/<path>.conflito-<dispositivo>-<16 hex do sha256>`, o texto claro
@@ -968,6 +1033,98 @@ where
         Ok(pair) => pair,
         Err(_) => (Vec::new(), Err(EngineError::Io(io::ErrorKind::Other))),
     }
+}
+
+/// Alguma pasta ligada tem um diário de `apply` interrompido (P-27)?
+fn ensure_not_interrupted(roots: &Roots) -> Result<(), EngineError> {
+    if roots
+        .enabled()
+        .iter()
+        .any(|(_, root)| Journal::exists(root))
+    {
+        return Err(EngineError::Interrupted);
+    }
+    Ok(())
+}
+
+/// As raízes com alguma operação planejada, sem repetir, na ordem em que aparecem.
+fn distinct_roots(planned: &[Planned]) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for p in planned {
+        if !roots.contains(&p.root) {
+            roots.push(p.root.clone());
+        }
+    }
+    roots
+}
+
+/// As raízes que têm diário num `apply` e as que o `apply` precisou criar para isso.
+struct Journals {
+    roots: Vec<PathBuf>,
+    created: Vec<PathBuf>,
+}
+
+/// Grava o diário `open` de cada raiz (criando a raiz, privada, se ela ainda não existe) e
+/// devolve as raízes criadas. Se algum falhar, nenhum diário fica e as raízes criadas saem.
+fn open_journals(roots: &[PathBuf], planned: &[Planned]) -> Result<Vec<PathBuf>, EngineError> {
+    let mut created = Vec::new();
+    let mut made: Vec<&PathBuf> = Vec::new();
+    for root in roots {
+        let result = (|| {
+            if fs::symlink_metadata(root).is_err() {
+                // cada pasta que vai faltar, da folha para cima: a falha as tira nessa ordem
+                let mut dir = Some(root.as_path());
+                while let Some(d) = dir.filter(|d| fs::symlink_metadata(d).is_err()) {
+                    created.push(d.to_path_buf());
+                    dir = d.parent();
+                }
+                create_private_dir(root).map_err(io_error)?;
+            }
+            // sem sobrescrever: um diário que já existe é de outro `apply` ou de uma queda
+            Journal::open(root, planned).create(root)?;
+            made.push(root);
+            Ok(())
+        })();
+        if let Err(e) = result {
+            // só os diários que este `apply` criou; o de outro dono não é tocado
+            made.iter().for_each(|r| Journal::remove(r));
+            created.iter().for_each(|r| {
+                let _ = fs::remove_dir(r);
+            });
+            return Err(e);
+        }
+    }
+    Ok(created)
+}
+
+/// Depois do `commit`: todos os arquivos já foram trocados, então a recuperação passa a
+/// terminar em vez de desfazer.
+fn mark_committed(roots: &[PathBuf], planned: &[Planned]) -> Result<(), EngineError> {
+    for root in roots {
+        let mut journal = Journal::open(root, planned);
+        journal.phase = Phase::Committed;
+        journal.save(root)?;
+    }
+    Ok(())
+}
+
+/// Desfaz o diário em memória e, se o disco ficou limpo, apaga o diário em disco. Se a tarefa
+/// de troca morreu (pânico: `Io(Other)`), o disco pode estar pela metade e o diário **fica**
+/// para o `recover`.
+async fn abandon(log: Vec<Undo>, error: EngineError, journals: Journals) -> EngineError {
+    let died = error == EngineError::Io(io::ErrorKind::Other);
+    let error = rollback(log, error).await;
+    if !died {
+        let _ = tokio::task::spawn_blocking(move || {
+            journals.roots.iter().for_each(|r| Journal::remove(r));
+            // raiz que o `apply` criou: sai de novo se ficou vazia (`remove_dir` não apaga o resto)
+            journals.created.iter().for_each(|r| {
+                let _ = fs::remove_dir(r);
+            });
+        })
+        .await;
+    }
+    error
 }
 
 /// Desfaz o diário e devolve o erro que causou a volta.
@@ -3422,6 +3579,228 @@ mod tests {
             no_leftovers(&after);
             assert_eq!(after, before);
         }
+    }
+
+    // ---------- recuperação de um `apply` interrompido (PR 3c, P-27) ----------
+
+    /// Backend que registra, a cada leitura de blob, se o diário já existia na raiz.
+    #[derive(Clone)]
+    struct JournalSpy {
+        inner: Backend,
+        root: PathBuf,
+        seen: std::sync::Arc<std::sync::Mutex<Vec<bool>>>,
+    }
+
+    impl BlobStore for JournalSpy {
+        async fn put(&self, id: &ObjectId, bytes: &[u8]) -> Result<(), StoreError> {
+            self.inner.put(id, bytes).await
+        }
+        async fn get(&self, id: &ObjectId) -> Result<Option<Vec<u8>>, StoreError> {
+            if id.kind == ObjectKind::Blob {
+                let exists = crate::journal::Journal::exists(&self.root);
+                self.seen.lock().unwrap().push(exists);
+            }
+            self.inner.get(id).await
+        }
+        async fn has(&self, id: &ObjectId) -> Result<bool, StoreError> {
+            self.inner.has(id).await
+        }
+        async fn list(&self, kind: ObjectKind) -> Result<Vec<ObjectId>, StoreError> {
+            self.inner.list(kind).await
+        }
+        async fn delete(&self, id: &ObjectId) -> Result<(), StoreError> {
+            self.inner.delete(id).await
+        }
+        fn capabilities(&self) -> Capabilities {
+            self.inner.capabilities()
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_writes_the_journal_before_it_stages_and_removes_it_at_the_end() {
+        let h = hist().await;
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let spy = JournalSpy {
+            inner: h.rig.store.clone(),
+            root: h.target.clone(),
+            seen: seen.clone(),
+        };
+        let eng = Engine::new(spy, keys(1), "pc").unwrap();
+        eng.apply(Some(&h.v1), &h.v2, &vault_only(&h.target))
+            .await
+            .unwrap();
+        let seen = seen.lock().unwrap().clone();
+        assert!(
+            !seen.is_empty() && seen.iter().all(|exists| *exists),
+            "{seen:?}"
+        );
+        assert!(!crate::journal::Journal::exists(&h.target));
+        no_leftovers(&tree(&h.target));
+    }
+
+    /// Achado 9: raiz aninhada que o próprio `apply` criou (`p1/p2/raiz`) sai inteira se falhar.
+    #[tokio::test]
+    async fn a_failed_apply_removes_every_folder_it_created_for_a_nested_root() {
+        let h = hist().await;
+        let eng = h.rig.engine("pc");
+        let heads = eng.heads().await.unwrap();
+        let blob = heads.tips[0]
+            .manifest
+            .files
+            .iter()
+            .find(|f| f.path == "new.md")
+            .unwrap()
+            .blob;
+        let id = ObjectId {
+            kind: ObjectKind::Blob,
+            hash: blob.0,
+        };
+        fs::remove_file(h.rig.store_dir().join(id.to_string())).unwrap();
+        let top = h.rig.tmp.path().join("p1");
+        let root = top.join("p2").join("raiz");
+        assert!(eng.apply(None, &h.v2, &vault_only(&root)).await.is_err());
+        assert!(!top.exists(), "sobrou {:?}", tree_dirs(h.rig.tmp.path()));
+    }
+
+    fn tree_dirs(root: &Path) -> Vec<String> {
+        fs::read_dir(root)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_failed_apply_removes_its_journal() {
+        let h = hist().await;
+        let eng = h.rig.engine("pc");
+        let heads = eng.heads().await.unwrap();
+        let blob = heads.tips[0]
+            .manifest
+            .files
+            .iter()
+            .find(|f| f.path == "new.md")
+            .unwrap()
+            .blob;
+        let id = ObjectId {
+            kind: ObjectKind::Blob,
+            hash: blob.0,
+        };
+        fs::remove_file(h.rig.store_dir().join(id.to_string())).unwrap();
+        assert!(eng
+            .apply(Some(&h.v1), &h.v2, &vault_only(&h.target))
+            .await
+            .is_err());
+        assert!(!crate::journal::Journal::exists(&h.target));
+    }
+
+    /// Deixa `target` como uma queda deixaria no meio da troca de `a.md` (atualizado) e `b.md`
+    /// (removido): diário `open`, `.arca-new-*`, `a.md` já trocado, `b.md` de lado.
+    fn interrupt_apply(target: &Path) {
+        let item = |kind, rel: &str, from: &[u8], to: Option<&[u8]>| {
+            let entry = |data: &[u8]| FileEntry {
+                path: rel.to_string(),
+                class: Class::Vault,
+                blob: Hash32([0u8; 32]),
+                size: data.len() as u64,
+                sha256: sha(data),
+            };
+            Item {
+                kind,
+                root: target.to_path_buf(),
+                dest: target.join(rel),
+                from: Some(entry(from)),
+                to: to.map(entry),
+            }
+        };
+        let (planned, _) = plan(vec![
+            item(Kind::Update, "a.md", b"1", Some(b"2")),
+            item(Kind::Remove, "b.md", b"1", None),
+        ])
+        .unwrap();
+        crate::journal::Journal::open(target, &planned)
+            .save(target)
+            .unwrap();
+        let mut log = Vec::new();
+        stage(&mut log, &planned[0], b"2").unwrap();
+        commit(&mut log, &planned).unwrap();
+        // o processo morreu aqui: nada de `finish`, nada de desfazer
+    }
+
+    #[tokio::test]
+    async fn apply_and_snapshot_refuse_while_a_journal_is_there_and_write_nothing() {
+        let h = hist().await;
+        interrupt_apply(&h.target);
+        let eng = h.rig.engine("pc");
+        let roots = vault_only(&h.target);
+        let before = tree(&h.target);
+        assert_eq!(
+            eng.apply(Some(&h.v1), &h.v2, &roots).await,
+            Err(EngineError::Interrupted)
+        );
+        assert_eq!(
+            eng.snapshot(&roots, 9).await.map(|_| ()),
+            Err(EngineError::Interrupted)
+        );
+        assert_eq!(tree(&h.target), before);
+    }
+
+    #[tokio::test]
+    async fn recover_puts_the_folder_back_and_the_next_apply_works() {
+        let h = hist().await;
+        let origin = tree(&h.target);
+        interrupt_apply(&h.target);
+        assert_ne!(tree(&h.target), origin);
+        let eng = h.rig.engine("pc");
+        let roots = vault_only(&h.target);
+
+        let recovered = eng.recover(&roots).await.unwrap();
+        assert_eq!(recovered.kept, Vec::<PathBuf>::new());
+        assert_eq!(recovered.completed, 0);
+        assert_eq!(recovered.rolled_back, 2);
+        assert_eq!(tree(&h.target), origin);
+
+        // idempotente
+        assert_eq!(eng.recover(&roots).await, Ok(Recovered::default()));
+        assert_eq!(tree(&h.target), origin);
+        // e a pasta voltou a ser aplicável
+        eng.apply(Some(&h.v1), &h.v2, &roots).await.unwrap();
+        assert_eq!(tree(&h.target), h.v2_tree);
+    }
+
+    #[tokio::test]
+    async fn recover_without_a_journal_does_nothing_and_ignores_disabled_classes() {
+        let h = hist().await;
+        let before = tree(&h.target);
+        let eng = h.rig.engine("pc");
+        assert_eq!(
+            eng.recover(&vault_only(&h.target)).await,
+            Ok(Recovered::default())
+        );
+        assert_eq!(
+            eng.recover(&Roots::default()).await,
+            Ok(Recovered::default())
+        );
+        assert_eq!(tree(&h.target), before);
+    }
+
+    #[tokio::test]
+    async fn recover_reports_what_it_would_not_touch() {
+        let h = hist().await;
+        interrupt_apply(&h.target);
+        fs::write(h.target.join("a.md"), b"da pessoa").unwrap();
+        let recovered = h
+            .rig
+            .engine("pc")
+            .recover(&vault_only(&h.target))
+            .await
+            .unwrap();
+        assert_eq!(
+            recovered.kept,
+            vec![h
+                .target
+                .join(format!(".arca-kept-{}", &sha(b"1").to_string()[..16]))]
+        );
+        assert_eq!(fs::read(h.target.join("a.md")).unwrap(), b"da pessoa");
     }
 
     /// Uma pasta somente leitura faz o commit falhar no meio: tudo volta como estava.

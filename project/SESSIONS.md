@@ -2,6 +2,17 @@
 
 Mais recente no topo.
 
+### 2026-11-02 — Sessão 39 (Fase 2a, PR 3c: recuperar um `apply` interrompido, P-27)
+
+- **Pedido**: PR 3c da Fase 2a. Plano aprovado em plan mode. Decisões do dono: diário em disco (descartado o nome que carrega o original) e gatilho explícito `Engine::recover` (descartada a recuperação automática no `apply`). Toca dados do usuário e segredos (AGENTS.md §4).
+- **Testes primeiro** (revisados pelo dono): 19 falhavam no `todo!()`. O ponto 1 que ficou em aberto na revisão (`rolled_back` conta todas as entradas do diário `open`) seguiu como estava. Depois da auditoria **mudei três testes já revisados** (o nome do que fica em `kept` passou de `.arca-old-<n>` para `.arca-kept-<16 hex>`) e acrescentei outros; mostrado ao dono.
+- **Feito**: `journal.rs` (diário, `recover_root`, `remove_if_ours`, `keep`), `Engine::recover`, `Recovered`, erros `Interrupted` e `CorruptJournal`, `apply` grava o diário antes do `stage`, marca `committed` depois do `commit` e o apaga; `apply` e `snapshot` recusam com diário. Um teste antigo (`applying_to_nothing_creates_everything`) pegou uma regressão minha: a raiz inexistente não comportava o diário; agora o `apply` a cria e a desfaz se falhar.
+- **Auditoria** (`security-auditor`, com PoCs numa cópia; conferi os achados antes de agir): corrigidos o **1** (alta: fase `committed` apagava o original sem conferir o disco; reproduzido), o **2** (teto de 1 MiB só na leitura; agora 16 MiB nos dois lados), o **3** (conferir e depois remover/renomear; agora mover e conferir), o **5** (diário criado sem sobrescrever, só se apaga o próprio), o **6** (caminho repetido no diário), o **7** (`kept` renomeado para um nome reservado único), o **9** (regressão: pastas aninhadas criadas pelo `apply`). Os outros (4, 8, 10, 11, 13, 14) em P-33. Os testes dos achados 1, 2, 6 e 9 foram vistos falhando antes da correção; os dos 3, 5 e 7 foram escritos antes, mas só compilaram junto com a correção, então não vi essas falhas.
+- **Desvio de processo meu**: nenhum comando de edição por script nesta sessão além de um `cat >> <<EOF` vazio no ADR 0014 (sem efeito, na sessão anterior).
+- **Verificado localmente**: `cargo test --workspace` (333 passam), `clippy --all-targets -D warnings`, `fmt --check`. CI do PR: ver o PR.
+- **Não verificado**: queda de energia real (os estados de queda são montados à mão com as funções reais), `fsync` das pastas, outros sistemas de arquivos, macOS e Windows, `recover` concorrente.
+- **Fica**: P-28 (comando de limpeza dos perdedores); 2b; P-09, P-22, P-25, P-26, P-29, P-30, P-31, P-32, P-33.
+
 ### 2026-11-02 — Sessão 38 (Fase 2a, PR 5: replicação e cenário de ponta a ponta)
 
 - **Pedido**: PR 5 da Fase 2a. Plano aprovado em plan mode. Decisões do dono: função `replicate(origem, destino)` (não store composto) e status incluído; depois da auditoria, achado 2 só com a validação simples do cabeçalho (resto em P-32), achado 5 corrigido, achados 4, 6 e 7 registrados.

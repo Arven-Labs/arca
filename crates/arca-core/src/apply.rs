@@ -11,12 +11,14 @@
 use crate::disk::{create_private_dir, write_atomic};
 use crate::engine::EngineError;
 use crate::manifest::{FileEntry, Hash32};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub(crate) enum Kind {
     Create,
     Update,
@@ -60,11 +62,11 @@ fn parent_of(path: &Path) -> Result<&Path, EngineError> {
         .ok_or(EngineError::Io(io::ErrorKind::InvalidInput))
 }
 
-fn new_name(n: usize) -> String {
+pub(crate) fn new_name(n: usize) -> String {
     format!(".arca-new-{n}")
 }
 
-fn old_name(n: usize) -> String {
+pub(crate) fn old_name(n: usize) -> String {
     format!(".arca-old-{n}")
 }
 
@@ -85,7 +87,7 @@ fn hash_file(path: &Path) -> io::Result<Hash32> {
 
 /// `None` se o caminho não existe; `LocalChanges` se é symlink ou algo que não é arquivo
 /// regular (nunca seguimos link); senão o `sha256` do conteúdo.
-fn current_sha(path: &Path) -> Result<Option<Hash32>, EngineError> {
+pub(crate) fn current_sha(path: &Path) -> Result<Option<Hash32>, EngineError> {
     match fs::symlink_metadata(path) {
         Ok(meta) if meta.file_type().is_file() => hash_file(path).map(Some).map_err(io_error),
         Ok(_) => Err(EngineError::LocalChanges),
@@ -96,7 +98,7 @@ fn current_sha(path: &Path) -> Result<Option<Hash32>, EngineError> {
 
 /// Nenhuma pasta entre a raiz e o destino pode ser symlink (ou outra coisa que não pasta):
 /// `safe_join` valida o texto do caminho, mas o sistema de arquivos segue links existentes.
-fn check_components(root: &Path, dest: &Path) -> Result<(), EngineError> {
+pub(crate) fn check_components(root: &Path, dest: &Path) -> Result<(), EngineError> {
     match fs::metadata(root) {
         Ok(meta) if meta.is_dir() => {}
         Ok(_) => return Err(EngineError::LocalChanges),
@@ -156,7 +158,7 @@ pub(crate) fn plan(items: Vec<Item>) -> Result<(Vec<Planned>, usize), EngineErro
     Ok((planned, unchanged))
 }
 
-fn ensure_absent(path: &Path) -> Result<(), EngineError> {
+pub(crate) fn ensure_absent(path: &Path) -> Result<(), EngineError> {
     match fs::symlink_metadata(path) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
         Ok(_) => Err(EngineError::Io(io::ErrorKind::AlreadyExists)),
@@ -263,6 +265,13 @@ pub(crate) fn finish(planned: &[Planned]) {
 /// Nomes que o `apply` usa para temporários (`.arca-new-<n>`, `.arca-old-<n>`) e que o
 /// `write_atomic` usa (`.tmp-<16 hex>`). Não entram no snapshot e não podem ser destino.
 pub(crate) fn is_reserved_name(name: &str) -> bool {
+    if name == crate::journal::JOURNAL_NAME {
+        return true;
+    }
+    // original que a recuperação não pôde devolver (`.arca-kept-<16 hex>`)
+    if let Some(hex) = name.strip_prefix(".arca-kept-") {
+        return hex.len() == 16 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    }
     if let Some(n) = name
         .strip_prefix(".arca-new-")
         .or_else(|| name.strip_prefix(".arca-old-"))
