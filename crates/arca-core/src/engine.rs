@@ -11,6 +11,7 @@ use crate::envelope::Header;
 use crate::error::Error;
 use crate::heads::{tips, Head};
 use crate::journal::{recover_root, Journal, Phase};
+use crate::losers::{self, ClearReport, LoserCopy};
 use crate::manifest::{validate_device, validate_path, Class, FileEntry, Hash32, Manifest};
 use crate::merge::{common_ancestor, merge_files, Conflict, Side};
 use crate::object::{ObjectId, ObjectKind};
@@ -797,6 +798,38 @@ impl<S: BlobStore> Engine<S> {
         .await
     }
 
+    /// As cópias de perdedores (`config` e `secret`) que `save_conflict_losers` gravou em `dir`
+    /// (P-28). `dir` passa pelas mesmas recusas da gravação (`UnsafeConflictsDir`).
+    pub async fn list_conflict_losers(
+        &self,
+        dir: &Path,
+        roots: &Roots,
+    ) -> Result<Vec<LoserCopy>, EngineError> {
+        let (dir, live) = (dir.to_path_buf(), live_dirs(roots));
+        run(move || {
+            check_conflicts_dir(&dir, &live)?;
+            losers::list(&dir)
+        })
+        .await
+    }
+
+    /// Apaga as cópias de `copies` que ainda são o que a arca gravou (P-28). Revalida cada item
+    /// no disco: fora de `dir/config` e `dir/secret`, link, nome fora do padrão ou cópia que a
+    /// pessoa editou nunca são apagados (ficam em `skipped`). Idempotente.
+    pub async fn clear_conflict_losers(
+        &self,
+        dir: &Path,
+        roots: &Roots,
+        copies: &[LoserCopy],
+    ) -> Result<ClearReport, EngineError> {
+        let (dir, live, copies) = (dir.to_path_buf(), live_dirs(roots), copies.to_vec());
+        run(move || {
+            check_conflicts_dir(&dir, &live)?;
+            losers::clear(&dir, &copies)
+        })
+        .await
+    }
+
     /// Restaura o manifest `id` nas pastas de `roots`, que têm de não existir ou estar vazias.
     pub async fn restore(&self, id: &ObjectId, roots: &Roots) -> Result<Restored, EngineError> {
         let manifest = self.read_manifest(id).await?;
@@ -1033,6 +1066,15 @@ where
         Ok(pair) => pair,
         Err(_) => (Vec::new(), Err(EngineError::Io(io::ErrorKind::Other))),
     }
+}
+
+/// As pastas das classes ligadas.
+fn live_dirs(roots: &Roots) -> Vec<PathBuf> {
+    roots
+        .enabled()
+        .into_iter()
+        .map(|(_, root)| root.to_path_buf())
+        .collect()
 }
 
 /// Alguma pasta ligada tem um diário de `apply` interrompido (P-27)?
@@ -3578,6 +3620,100 @@ mod tests {
             let after = tree(&h.target);
             no_leftovers(&after);
             assert_eq!(after, before);
+        }
+    }
+
+    // ---------- limpeza das cópias de perdedores (P-28) ----------
+
+    #[tokio::test]
+    async fn saved_losers_can_be_listed_and_cleared_and_the_folder_ends_empty() {
+        let v = vault3();
+        let a = stored_loser(&v.rig, Class::Config, "settings.toml", b"perdedor A").await;
+        let b = stored_loser(&v.rig, Class::Secret, "oauth/slack.json", b"{token-b}").await;
+        let eng = v.rig.engine("pc");
+        eng.save_conflict_losers(
+            &[
+                conflict(Class::Config, "settings.toml", "pa", Some(a)),
+                conflict(Class::Secret, "oauth/slack.json", "pb", Some(b)),
+            ],
+            &v.dir,
+            &v.roots,
+        )
+        .await
+        .unwrap();
+
+        let listed = eng.list_conflict_losers(&v.dir, &v.roots).await.unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(
+            (
+                listed[0].class,
+                listed[0].path.as_str(),
+                listed[0].device.as_str()
+            ),
+            (Class::Config, "settings.toml", "pa")
+        );
+        assert_eq!(
+            (
+                listed[1].class,
+                listed[1].path.as_str(),
+                listed[1].device.as_str()
+            ),
+            (Class::Secret, "oauth/slack.json", "pb")
+        );
+        assert!(listed.iter().all(|c| !c.edited));
+        assert_eq!(fs::read(&listed[1].file).unwrap(), b"{token-b}");
+
+        let report = eng
+            .clear_conflict_losers(&v.dir, &v.roots, &listed)
+            .await
+            .unwrap();
+        assert_eq!(report.removed, 2);
+        assert!(report.skipped.is_empty());
+        assert_eq!(
+            eng.list_conflict_losers(&v.dir, &v.roots).await.unwrap(),
+            vec![]
+        );
+        // a pasta de conflitos e a da classe ficam; as subpastas esvaziadas somem
+        assert!(v.dir.join("config").is_dir() && v.dir.join("secret").is_dir());
+        assert!(!v.dir.join("secret/oauth").exists());
+    }
+
+    #[tokio::test]
+    async fn list_and_clear_refuse_an_unsafe_conflicts_folder() {
+        let v = vault3();
+        let eng = v.rig.engine("pc");
+        let inside_live = v.roots.config.clone().unwrap().join("conflitos");
+        let fake = LoserCopy {
+            class: Class::Config,
+            path: "a".to_string(),
+            device: "pa".to_string(),
+            sha_prefix: [0; 8],
+            file: inside_live.join("config/a.conflito-pa-0000000000000000"),
+            edited: false,
+        };
+        for bad in [inside_live.clone(), v.dir.join("../conflitos")] {
+            assert_eq!(
+                eng.list_conflict_losers(&bad, &v.roots).await,
+                Err(EngineError::UnsafeConflictsDir),
+                "{bad:?}"
+            );
+            assert_eq!(
+                eng.clear_conflict_losers(&bad, &v.roots, std::slice::from_ref(&fake))
+                    .await
+                    .map(|_| ()),
+                Err(EngineError::UnsafeConflictsDir),
+                "{bad:?}"
+            );
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::create_dir_all(&v.dir).unwrap();
+            fs::set_permissions(&v.dir, fs::Permissions::from_mode(0o777)).unwrap();
+            assert_eq!(
+                eng.list_conflict_losers(&v.dir, &v.roots).await,
+                Err(EngineError::UnsafeConflictsDir)
+            );
         }
     }
 

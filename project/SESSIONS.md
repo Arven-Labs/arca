@@ -2,6 +2,17 @@
 
 Mais recente no topo.
 
+### 2026-11-02 — Sessão 40 (Fase 2a: listar e limpar as cópias de perdedores, P-28)
+
+- **Pedido**: P-28. Plano aprovado em plan mode. Decisões do dono: `list` + `clear(lista)` (descartados `clear_all` e limpeza por idade) e cópia editada nunca apagada (descartada a flag `include_edited`). Apaga arquivos do usuário e mexe em segredos (AGENTS.md §4).
+- **Testes primeiro** (revisados pelo dono): 10 falhavam no `todo!()`. Depois da auditoria **mudei dois testes já revisados** (`ClearReport` ganhou `kept`; `remove_if_unchanged` ganhou o parâmetro `kept`) e acrescentei sete; mostrado ao dono.
+- **Feito**: `losers.rs` (`list`, `clear`, `remove_if_unchanged`, `give_back`), `Engine::list_conflict_losers` e `Engine::clear_conflict_losers`. O `clear` ignora o que o chamador diz sobre a cópia e refaz a validação no disco; apaga movendo para `.tmp-<hex>` e conferindo o hash.
+- **Auditoria** (`security-auditor`, com reprodução numa cópia e 5 mutantes; conferi o achado 1 lendo o código antes de agir): nenhuma forma de apagar fora de `dir/config|secret`. Corrigidos o **1** (pânico em nome não ASCII: `list` e `clear` inteiros falhavam), o **2** (put-back que falha deixava o conteúdo num `.tmp-` sem aviso; agora `kept`), o **3** (erro de E/S num item abortava o lote e escondia o que já fora apagado; agora `Skip::Failed`), o **4** (lacuna de teste: o `..` não era provado; mutante sobrevivia), o **5** (profundidade: limite de 64), o **6** (teto de `MAX_FILE_BYTES`), e do **8** o `path` com pasta não UTF-8 e a validação do `path` no `clear`. O **7** (TOCTOU de symlink) e o restante em P-34. Os testes dos achados foram escritos junto com a correção: **não os vi falhar** antes (só conferi o achado 4 pela mutação do próprio auditor).
+- **Desvios de processo**: nenhum comando de edição por script nesta sessão.
+- **Verificado localmente**: `cargo test --workspace` (350 passam), `clippy --all-targets -D warnings`, `fmt --check`. CI do PR: ver o PR.
+- **Não verificado**: apagamento seguro do conteúdo, sistemas de arquivos sem hard link (só raciocinado), macOS e Windows, concorrência real com editor, a corrida do TOCTOU de symlink.
+- **Fica**: 2b; P-09, P-22, P-25, P-26, P-29, P-30, P-31, P-32, P-33, P-34; ADR 0010 sem a atualização do P-28 (a decidir).
+
 ### 2026-11-02 — Sessão 39 (Fase 2a, PR 3c: recuperar um `apply` interrompido, P-27)
 
 - **Pedido**: PR 3c da Fase 2a. Plano aprovado em plan mode. Decisões do dono: diário em disco (descartado o nome que carrega o original) e gatilho explícito `Engine::recover` (descartada a recuperação automática no `apply`). Toca dados do usuário e segredos (AGENTS.md §4).
