@@ -2,6 +2,16 @@
 
 Mais recente no topo.
 
+### 2026-11-02 — Sessão 43 (P-32.b: `replicate` deixa de ser público, entra `Engine::push`)
+
+- **Pedido**: fechar o caminho inseguro que a auditoria da sessão 42 apontou (`replicate(remoto, local)` reabre o P-32) antes de escrever o cliente do hub. Plano aprovado em plan mode; levantamento: ninguém fora de `replicate.rs` chamava `replicate`.
+- **Testes primeiro** (revisados pelo dono): 4 falhavam no `todo!()` (três de `push` em `replicate.rs` e a integração `tests/public_api.rs`). Nenhum teste antigo foi alterado. O `tests/public_api.rs` abre o padrão de teste de integração no repo (aprovado no plano), com uma pasta temporária própria porque o `testutil` do crate não é visível de fora.
+- **Feito**: `replicate` passou a `pub(crate)`; `Engine::push` (uma linha sobre `replicate`); docs do módulo e de `pull`. Docs: `SPEC-TECNICA.md` (§4), ADR 0014 (atualização), `PENDING.md` (P-32.b resolvida).
+- **Verificado localmente**: `cargo test --workspace --locked` (392 da lib e 1 de integração passam), `clippy --workspace --all-targets --locked -D warnings`, `fmt --check`, `cargo +1.88.0 check --workspace --locked`; `cargo doc --no-deps` não lista mais `replicate::replicate` (só `replica_status` e os tipos). CI do PR: ver o PR.
+- **Não verificado**: auditoria por agente (dispensada no plano: a mudança é visibilidade mais uma linha que delega ao código já auditado).
+- **Desvios de processo meus**: nenhum comando de edição por script.
+- **Fica**: o cliente do hub (2b-2 em diante) usa só `Engine::push`/`pull`; P-32 itens 2 a 4, 2b-2, 2b-3, 2b-4; P-09, P-22, P-25, P-26, P-29 a P-35.
+
 ### 2026-11-02 — Sessão 42 (P-32 item 1: pull com chave contra manifest forjado)
 
 - **Pedido**: o item mais importante do P-32 antes de seguir com a 2b. Plano aprovado em plan mode. Decisão do dono: **filtrar no pull, com a chave** (descartados `rejected` deixar de bloquear e quarentena com `dismiss_rejected`). Toca parsing de dado externo (AGENTS.md §4).

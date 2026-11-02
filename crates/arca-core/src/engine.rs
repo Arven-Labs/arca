@@ -15,7 +15,7 @@ use crate::losers::{self, ClearReport, LoserCopy};
 use crate::manifest::{validate_device, validate_path, Class, FileEntry, Hash32, Manifest};
 use crate::merge::{common_ancestor, merge_files, Conflict, Side};
 use crate::object::{ObjectId, ObjectKind};
-use crate::replicate::{replicate_filtered, ReplicateReport};
+use crate::replicate::{replicate, replicate_filtered, ReplicateReport};
 use crate::scan::{scan_class, Candidate, Skipped, MAX_FILE_BYTES};
 use crate::state::{descends, satisfied, DeviceState};
 use crate::store::{verified_get, BlobStore, StoreError};
@@ -384,8 +384,8 @@ impl<S: BlobStore> Engine<S> {
     /// viraria `rejected` e travaria `snapshot` e `merge` (P-32). Manifest de outra época não
     /// pode ser verificado sem a chave dela e passa (limite: um cabeçalho forjado de época maior
     /// ainda dá `NeedsNewKey`, e, num dispositivo sem nenhum manifest da própria época, um de
-    /// época menor vira `rejected` com `WrongKeyEpoch`, ver `load`). Use isto, e não `replicate`, para tudo que vem de fora; o
-    /// `replicate` cru serve para empurrar (push).
+    /// época menor vira `rejected` com `WrongKeyEpoch`, ver `load`). É o único caminho público
+    /// para trazer objetos de fora; o inverso é `push`.
     pub async fn pull<R: BlobStore>(&self, remote: &R) -> Result<ReplicateReport, StoreError> {
         replicate_filtered(remote, &self.store, |bytes| match Header::decode(bytes) {
             Ok((header, _)) if header.key_epoch == self.keys.epoch() => {
@@ -395,6 +395,14 @@ impl<S: BlobStore> Engine<S> {
             Err(_) => false,
         })
         .await
+    }
+
+    /// Empurra o armazenamento deste dispositivo (confiável) para `remote`: copia os blobs e
+    /// depois os manifests que o remoto não tem, sem apagar nada. Não filtra, porque a origem é
+    /// local. `Ok` com `manifests_withheld` não é sucesso (um blob local não pôde ser lido).
+    /// O caminho inverso é `pull`.
+    pub async fn push<R: BlobStore>(&self, remote: &R) -> Result<ReplicateReport, StoreError> {
+        replicate(&self.store, remote).await
     }
 
     /// Funde as duas primeiras pontas (ordem `(counter, hash)`) num manifest de fusão
