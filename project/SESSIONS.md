@@ -2,6 +2,19 @@
 
 Mais recente no topo.
 
+### 2026-11-02 — Sessão 41 (Fase 2b-1: contrato HTTP do hub e `HubStore`)
+
+- **Pedido**: 2b (hub HTTP), fatiada. Plano aprovado em plan mode. Decisões do dono: primeira fatia só no arca (contrato + cliente + hub de teste; descartados só docs e incluir as rotas no `warden-server`), transporte HTTP REST com o token do dispositivo (descartados mensagens novas no WebSocket do Warden e hub como S3 falso) e `reqwest` + rustls (descartados `hyper` direto e `ureq`). Minhas, aprovadas com o plano: feature `hub` ligada por padrão e `axum` só em testes. Toca autenticação e token (AGENTS.md §4) e traz dependência nova.
+- **Passo 0 (dependências)**: `reqwest` 0.13.5 (MSRV declarado 1.85), `cargo +1.88.0 check` passa, `cargo audit` limpo (186 pacotes), árvore de 80 para 269 linhas. Provedor TLS `aws-lc-rs` (o Warden fixou `ring`): mantido, revisitar na Fase 3 (P-35).
+- **Testes primeiro** (revisados pelo dono): 23 falhavam no `todo!()`. Mudei um teste já revisado: o cenário de dois dispositivos de `replicate.rs` virou `converge_through(remote)`, chamado pelo teste de disco e pelo novo teste contra o hub HTTP.
+- **Feito**: `hub.rs` (`HubStore`, `HubError`, tetos), `hub_testserver.rs` (hub de referência), `Backend::Hub`, `Cargo.toml` (feature `hub`, `reqwest`, `axum` em dev). Contrato em `SPEC-TECNICA.md` §4.2.
+- **Auditoria** (`security-auditor`, com reprodução numa cópia e leitura do código do `reqwest`): sem achado crítico ou alto. Corrigidos o **M1** (o `reqwest` lê `HTTP_PROXY`/`ALL_PROXY` mesmo sem a feature de proxy e o token ia ao proxy; agora `.no_proxy()`; **vi o teste falhar sem a correção**), o **M2** (o `read_timeout` reinicia a cada pedaço: uma resposta em gotas nunca estourava; agora prazo total por operação), o **M3** (o `read_timeout` era um prazo absoluto que incluía o envio: um blob grande numa linha lenta nunca subia; agora o prazo cresce com o tamanho do corpo), o **B1** (página vazia com `next` gerava 10 000 pedidos), o **B2** (falha de TLS saía como `ConnectionRefused`; agora `ConnectionAborted`), o **B3** (lacunas de teste: `next > after` era redundante e foi removido; corte multi-página, teto de página e redirect em `put`/`list`) e o **B4/O1** como documentação. Os testes dos achados M2, M3, B1, B2 e B3 foram escritos junto com a correção: **não os vi falhar** (só o do M1, por mutação).
+- **Não corrigido**: B5 (`localhost` pelo resolvedor), JNI no Android, presença alegada no hub, feature `hub` ligada por padrão (o auditor sugeriu `default = []`): tudo em P-35.
+- **Desvios de processo meus**: nenhum comando de edição por script nesta sessão (dois heredocs/`python3` sem efeito, só para checar).
+- **Verificado localmente**: `cargo test --workspace --locked` (380 passam), `clippy --workspace --all-targets --locked -D warnings`, `fmt --check`, `cargo +1.88.0 check --workspace --locked`, `cargo audit --deny warnings`. CI do PR: ver o PR.
+- **Não verificado**: hub real (`warden-server`), TLS com handshake bem-sucedido, latência real, 1 M de ids, blob de 256 MiB, Android, macOS e Windows.
+- **Fica**: ADR 0015 (a decidir); 2b-2 (rotas no `warden-server`), 2b-3 (pareamento), 2b-4 (modo "arca"); P-09, P-22, P-25, P-26, P-29 a P-35.
+
 ### 2026-11-02 — Sessão 40 (Fase 2a: listar e limpar as cópias de perdedores, P-28)
 
 - **Pedido**: P-28. Plano aprovado em plan mode. Decisões do dono: `list` + `clear(lista)` (descartados `clear_all` e limpeza por idade) e cópia editada nunca apagada (descartada a flag `include_edited`). Apaga arquivos do usuário e mexe em segredos (AGENTS.md §4).
