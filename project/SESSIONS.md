@@ -2,6 +2,17 @@
 
 Mais recente no topo.
 
+### 2026-11-02 — Sessão 42 (P-32 item 1: pull com chave contra manifest forjado)
+
+- **Pedido**: o item mais importante do P-32 antes de seguir com a 2b. Plano aprovado em plan mode. Decisão do dono: **filtrar no pull, com a chave** (descartados `rejected` deixar de bloquear e quarentena com `dismiss_rejected`). Toca parsing de dado externo (AGENTS.md §4).
+- **Testes primeiro** (revisados pelo dono): 7 falhavam no `todo!()` e 1 de contraste passava (o `replicate` cru ainda copia o forjado e o `snapshot` dá `Diverged`). Único teste antigo alterado: os dois literais de `ReplicateReport` ganharam `forged: vec![]`. Depois da auditoria acrescentei um teste (cifra autêntica com conteúdo inválido); mostrado ao dono.
+- **Feito**: `replicate_filtered` e o campo `forged` em `replicate.rs` (`replicate` chama com `|_| true`, comportamento idêntico); `Engine::pull` em `engine.rs` (mesmo critério do `classify_manifest`: cabeçalho, época, `Manifest::open`). Docs: `SPEC-TECNICA.md` (§4 e a linha do hub), ADR 0014 (atualização), `PENDING.md` (P-32), `OVERVIEW.md`.
+- **Auditoria** (`security-auditor`, com reprodução e mutantes numa cópia): sem bypass nem pânico. Corrigidos a lacuna de teste (um mutante que só conferia a tag sobrevivia) e a documentação (módulo `replicate`, `Engine::pull`). Registrados em P-32, sem correção: época diferente passa (e num dispositivo sem manifest da própria época um de época menor vira `rejected`), `replicate` cru segue `pub`, o pull não remove o que já entrou, banda repetida a cada rodada.
+- **Desvios de processo meus**: nenhum comando de edição por script.
+- **Verificado localmente**: `cargo test --workspace --locked` (389 passam), `clippy --workspace --all-targets --locked -D warnings`, `fmt --check`, `cargo +1.88.0 check --workspace --locked`, `cargo audit --deny warnings` (rodados antes do último teste e da doc; testes, clippy e fmt repetidos depois). CI do PR: ver o PR.
+- **Não verificado**: hub real e backend remoto (só `DiskStore`), `pull` com `with_state` em várias rodadas, memória com objeto de 64 MiB.
+- **Fica**: usar `Engine::pull` no cliente do hub (2b-2 em diante); decidir se `replicate` vira `pub(crate)` com `Engine::push` (P-32.b); 2b-2, 2b-3, 2b-4; P-09, P-22, P-25, P-26, P-29 a P-35.
+
 ### 2026-11-02 — Sessão 41 (Fase 2b-1: contrato HTTP do hub e `HubStore`)
 
 - **Pedido**: 2b (hub HTTP), fatiada. Plano aprovado em plan mode. Decisões do dono: primeira fatia só no arca (contrato + cliente + hub de teste; descartados só docs e incluir as rotas no `warden-server`), transporte HTTP REST com o token do dispositivo (descartados mensagens novas no WebSocket do Warden e hub como S3 falso) e `reqwest` + rustls (descartados `hyper` direto e `ureq`). Minhas, aprovadas com o plano: feature `hub` ligada por padrão e `axum` só em testes. Toca autenticação e token (AGENTS.md §4) e traz dependência nova.
