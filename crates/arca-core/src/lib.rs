@@ -11,6 +11,7 @@ pub mod envelope;
 pub mod error;
 pub mod heads;
 mod journal;
+pub mod losers;
 pub mod manifest;
 pub mod merge;
 pub mod object;
