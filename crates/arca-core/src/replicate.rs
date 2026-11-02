@@ -783,7 +783,28 @@ mod tests {
     async fn two_devices_diverge_offline_exchange_through_a_remote_and_converge() {
         let tmp = TempDir::new();
         let remote = disk(&tmp, "remoto");
-        let (a, b) = (Device::new(&tmp, "a", false), Device::new(&tmp, "b", false));
+        converge_through(&tmp, remote).await;
+    }
+
+    /// O mesmo cenário, com o remoto sendo um hub HTTP de verdade (2b-1): o hub de referência
+    /// do contrato `/arca/v1/`, autenticado pelo token de cada dispositivo.
+    #[cfg(feature = "hub")]
+    #[tokio::test]
+    async fn the_same_two_devices_converge_through_an_http_hub() {
+        use crate::hub::HubStore;
+        use crate::hub_testserver::TestHub;
+        let tmp = TempDir::new();
+        let hub = TestHub::start().await;
+        hub.approve("token-de-teste");
+        let remote = Backend::Hub(HubStore::new(&hub.url, "token-de-teste").unwrap());
+        converge_through(&tmp, remote).await;
+        // o hub só guardou objetos, e cada um com envelope válido
+        assert!(hub.object_count() > 0);
+    }
+
+    /// Dois dispositivos divergem offline, trocam objetos por `remote`, fundem e convergem.
+    async fn converge_through(tmp: &TempDir, remote: Backend) {
+        let (a, b) = (Device::new(tmp, "a", false), Device::new(tmp, "b", false));
 
         // A cria o Vault e publica; B baixa e aplica o mesmo estado
         write(&a.vault, "notas/comum.md", b"comum");

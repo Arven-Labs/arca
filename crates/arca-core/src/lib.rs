@@ -10,6 +10,10 @@ pub mod engine;
 pub mod envelope;
 pub mod error;
 pub mod heads;
+#[cfg(feature = "hub")]
+pub mod hub;
+#[cfg(all(feature = "hub", test))]
+mod hub_testserver;
 mod journal;
 pub mod losers;
 pub mod manifest;

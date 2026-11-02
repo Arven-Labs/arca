@@ -3,6 +3,8 @@
 //! como novas variantes nas Fases 2 e 3.
 
 use crate::disk::DiskStore;
+#[cfg(feature = "hub")]
+use crate::hub::HubStore;
 use crate::object::{ObjectId, ObjectKind};
 use crate::store::{BlobStore, Capabilities, StoreError};
 
@@ -10,42 +12,57 @@ use crate::store::{BlobStore, Capabilities, StoreError};
 #[non_exhaustive]
 pub enum Backend {
     Disk(DiskStore),
+    /// O hub (`warden-server`) como réplica, sobre HTTP (2b-1).
+    #[cfg(feature = "hub")]
+    Hub(HubStore),
 }
 
 impl BlobStore for Backend {
     async fn put(&self, id: &ObjectId, bytes: &[u8]) -> Result<(), StoreError> {
         match self {
             Backend::Disk(disk) => disk.put(id, bytes).await,
+            #[cfg(feature = "hub")]
+            Backend::Hub(hub) => hub.put(id, bytes).await,
         }
     }
 
     async fn get(&self, id: &ObjectId) -> Result<Option<Vec<u8>>, StoreError> {
         match self {
             Backend::Disk(disk) => disk.get(id).await,
+            #[cfg(feature = "hub")]
+            Backend::Hub(hub) => hub.get(id).await,
         }
     }
 
     async fn has(&self, id: &ObjectId) -> Result<bool, StoreError> {
         match self {
             Backend::Disk(disk) => disk.has(id).await,
+            #[cfg(feature = "hub")]
+            Backend::Hub(hub) => hub.has(id).await,
         }
     }
 
     async fn list(&self, kind: ObjectKind) -> Result<Vec<ObjectId>, StoreError> {
         match self {
             Backend::Disk(disk) => disk.list(kind).await,
+            #[cfg(feature = "hub")]
+            Backend::Hub(hub) => hub.list(kind).await,
         }
     }
 
     async fn delete(&self, id: &ObjectId) -> Result<(), StoreError> {
         match self {
             Backend::Disk(disk) => disk.delete(id).await,
+            #[cfg(feature = "hub")]
+            Backend::Hub(hub) => hub.delete(id).await,
         }
     }
 
     fn capabilities(&self) -> Capabilities {
         match self {
             Backend::Disk(disk) => disk.capabilities(),
+            #[cfg(feature = "hub")]
+            Backend::Hub(hub) => hub.capabilities(),
         }
     }
 }

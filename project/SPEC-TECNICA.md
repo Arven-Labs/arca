@@ -71,7 +71,7 @@ Regras:
 
 Esboços por backend:
 - **Disco** (`arca-core::disk::DiskStore`, implementado): um arquivo por objeto (`<raiz>/<tipo>/<hex>`), gravado em `.tmp-<aleatório>` no mesmo diretório (`create_new`), `fsync`, `rename` atômico e `fsync` do diretório; permissão `0o600` nos arquivos e `0o700` nas pastas criadas (uma raiz que já existia não é alterada). `list` ignora temporários, nomes que não são `<64 hex minúsculos>`, subdiretórios e symlinks. Um `put` interrompido deixa no máximo um `.tmp-*` órfão, nunca um objeto parcial; **não há limpeza automática** de temporários na v1. Sempre presente, é a cópia local. **Limites:** permissões e `fsync` de diretório só em unix (em outras plataformas compila sem o endurecimento e sem teste); um atacante local com escrita na pasta (symlink, corrida) está fora do modelo, a defesa é o `0o700`; queda de energia não foi testada.
-- **Hub** (`warden-server`): réplica, não autoridade (ADR 0007). Contrato HTTP fica para a Fase 2.
+- **Hub** (`warden-server`): réplica, não autoridade (ADR 0007). Contrato HTTP em §4.2; cliente `arca-core::hub::HubStore` (variante `Backend::Hub`) implementado na 2b-1; as rotas no `warden-server` ainda não existem (2b-2).
 - **S3-compatível**: chave do objeto = `<tipo>/<hex>`. Cliente: `object_store` (ADR 0008, P-15).
 
 ### 4.1 Núcleo local (`arca-core::engine`, Fase 1, PR 6)
@@ -98,6 +98,29 @@ Roots { vault, config, secret: Option<PathBuf> }   // classe sem pasta = desliga
 - **Erros que param o snapshot**: pasta de classe ligada ausente (`Io(NotFound)`: nunca vale como "vazia", para um disco desmontado não apagar a classe no próximo manifest) e `Diverged`. O mesmo `path` em classes diferentes **não** é erro: a identidade de uma entrada é `(classe, path)` (P-23).
 - **Restauração**: cada pasta de destino de classe ligada tem de não existir ou estar vazia (`TargetNotEmpty`, conferido para todas antes de escrever). Para cada entrada: `verified_get` do blob, `open`, confere `size` e `sha256` do texto claro (`Integrity`), `safe_join` (revalida o `path`) e grava com a mesma gravação atômica do disco (`0o600`, pastas `0o700`). Falha em qualquer ponto apaga o que a restauração criou. Classe sem destino é ignorada.
 - **Limites**: sem instantâneo atômico do Vault (um arquivo alterado durante a leitura entra com o conteúdo lido, consistente com o próprio `sha256`); uma pasta de classe que existe mas está vazia por um disco desmontado ainda leva ao manifest sem aquela classe; reaproveitar um blob não confere se ele ainda está no armazenamento (a restauração acusa `MissingObject`); a proteção contra rollback (§6, "último manifest aceito") e a junção de pontas ficam para a Fase 2.
+
+### 4.2 Contrato HTTP do hub (`/arca/v1/`, Fase 2b-1)
+**Implementado no cliente (`arca-core::hub::HubStore`) e num hub de referência só de testes (`hub_testserver.rs`). O `warden-server` ainda não tem as rotas (2b-2).** Mesma porta do hub, como o `/v1/` e o `/hooks/`.
+
+| Operação | Pedido | Resposta |
+|---|---|---|
+| gravar | `PUT /arca/v1/objects/{kind}/{hex}`, corpo = bytes do objeto | `204` (novo ou já existente); `400` hash ou envelope inválido; `413` acima do teto |
+| ler | `GET` no mesmo caminho | `200` com o corpo, ou `404` |
+| existe? | `HEAD` no mesmo caminho | `200` ou `404` |
+| listar | `GET /arca/v1/objects?kind=blob\|manifest&after=<hex>&limit=<n>` | `200` `{ "ids": ["<hex>", ...], "next": "<hex>"\|null }`, ordem crescente |
+| apagar | `DELETE` | `405` (a v1 não apaga, ADR 0011) |
+
+- `kind` = `blob` ou `manifest`; `hex` = 64 hex minúsculos = SHA-256 do corpo (o mesmo `ObjectId` em texto, `blob/<hex>`). O hub confere o hash (`400`) e **só aceita envelope válido do tipo do `kind`** (o mesmo filtro do `replicate`, sem chave). Isso barra lixo trivial, não um cabeçalho forjado com corpo aleatório (P-32).
+- **Autenticação em toda rota:** `Authorization: Bearer <token do dispositivo>`, o token que o hub já emite no `Hello` (ele guarda só o hash; só dispositivo `Approved` vale). `401` sem token ou token desconhecido, `403` dispositivo pendente ou revogado. Sem isso qualquer um leria ou plantaria objeto.
+- **Tetos:** blob até `MAX_FILE_BYTES` mais 1 KiB, manifest até `MAX_MANIFEST_JSON_BYTES` mais 1 KiB, página de listagem até 1 MiB e 1000 ids; o cliente desiste de uma listagem acima de 1 000 000 ids ou 10 000 páginas.
+- **Cliente (`HubStore`):**
+  - `https` em qualquer host; `http` só em loopback (`127.0.0.1`, `::1`, `localhost`), ou por `allow_insecure_http` (o token anda em claro; o nome é de propósito). URL sem credenciais, caminho, consulta nem fragmento.
+  - **Nunca segue redirecionamento e ignora o proxy do ambiente** (`HTTP_PROXY`, `ALL_PROXY`): o token iria para outro host.
+  - **Prazo total por operação** (30 s mais o tempo de mover os bytes a 256 KiB/s), não um `read_timeout` que reinicia a cada pedaço.
+  - Confere o id antes da rede (`IdMismatch`), corta a leitura no teto de bytes (também sem `Content-Length`), valida cada id da listagem (hex, estritamente crescente, `next` que avança, página vazia com `next` recusada).
+  - Erros: rede e 5xx = `Unavailable(...)`; `404` = `None`/`false`; `401`/`403` = `PermissionDenied`; falha de TLS = `ConnectionAborted` (distinta de `ConnectionRefused`); recusa do hub (`400`) e resposta acima do teto = `InvalidData`. O token nunca aparece em `Debug` nem em erro.
+  - `delete` devolve `Unsupported` sem ir à rede. `consistent_list = true` descreve o contrato; **a presença no hub é alegada, não provada**: um hub hostil pode mentir em `put`, `has` e `list`. A integridade do que se lê é provada por `verified_get`.
+- **Limites** em P-35 (hub real não testado, TLS real só por falha, `aws-lc-rs`, `localhost` pelo resolvedor).
 
 ## 5. Envelope e manifest
 
@@ -242,6 +265,6 @@ Tudo que vem de um backend ou do disco é entrada não confiável. Testes obriga
 
 ## 11. O que esta spec não resolve
 - Coleta de lixo: adiada para a Fase 3, a v1 guarda tudo (ADR 0011). Limite de tamanho por objeto.
-- Contrato HTTP do hub e fluxo de pareamento (Fase 2).
+- Fluxo de pareamento (Fase 2, 2b-3): como o dispositivo ganha o token do hub e como a `vault_key` chega a um dispositivo novo. O contrato HTTP do hub está em §4.2.
 - Os rótulos exatos do HKDF (Fase 1, ADR 0009) e a configuração por classe no Warden (Fase 2, ADR 0010).
 - Revisão de segurança independente (Fase 4). Nada aqui foi implementado nem testado; é desenho.
