@@ -15,6 +15,7 @@ use crate::losers::{self, ClearReport, LoserCopy};
 use crate::manifest::{validate_device, validate_path, Class, FileEntry, Hash32, Manifest};
 use crate::merge::{common_ancestor, merge_files, Conflict, Side};
 use crate::object::{ObjectId, ObjectKind};
+use crate::replicate::{replicate_filtered, ReplicateReport};
 use crate::scan::{scan_class, Candidate, Skipped, MAX_FILE_BYTES};
 use crate::state::{descends, satisfied, DeviceState};
 use crate::store::{verified_get, BlobStore, StoreError};
@@ -375,6 +376,25 @@ impl<S: BlobStore> Engine<S> {
             Ok(manifest) => Read::Opened(manifest),
             Err(e) => Read::Unreadable(e.into()),
         })
+    }
+
+    /// Puxa de `remote` (não confiável) para o armazenamento deste dispositivo (confiável).
+    /// Igual a `replicate(remote, store)`, mas um manifest da época das chaves que não abre com
+    /// elas (forjado, corrompido ou de outro Vault) não é gravado e vem em `forged`: sem isso ele
+    /// viraria `rejected` e travaria `snapshot` e `merge` (P-32). Manifest de outra época não
+    /// pode ser verificado sem a chave dela e passa (limite: um cabeçalho forjado de época maior
+    /// ainda dá `NeedsNewKey`, e, num dispositivo sem nenhum manifest da própria época, um de
+    /// época menor vira `rejected` com `WrongKeyEpoch`, ver `load`). Use isto, e não `replicate`, para tudo que vem de fora; o
+    /// `replicate` cru serve para empurrar (push).
+    pub async fn pull<R: BlobStore>(&self, remote: &R) -> Result<ReplicateReport, StoreError> {
+        replicate_filtered(remote, &self.store, |bytes| match Header::decode(bytes) {
+            Ok((header, _)) if header.key_epoch == self.keys.epoch() => {
+                Manifest::open(&self.keys, bytes).is_ok()
+            }
+            Ok(_) => true,
+            Err(_) => false,
+        })
+        .await
     }
 
     /// Funde as duas primeiras pontas (ordem `(counter, hash)`) num manifest de fusão

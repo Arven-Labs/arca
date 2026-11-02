@@ -1,8 +1,9 @@
 //! Replicação entre armazenamentos (`SPEC-TECNICA.md` §4 e §6, Fase 2a, PR 5).
 //!
-//! `replicate(origem, destino)` copia bytes opacos: não tem chave e não abre manifest. Pull e
-//! push são a mesma função com os lados trocados. Quem agenda (segundo plano, retry) é o
-//! consumidor; o núcleo não cria tarefas.
+//! `replicate(origem, destino)` copia bytes opacos: não tem chave e não abre manifest. Serve
+//! para **empurrar** (push) e para origens confiáveis. **Origem não confiável (remoto, hub) entra
+//! por `Engine::pull`**, que recusa o manifest forjado; `replicate(remoto, local)` reabre o
+//! P-32. Quem agenda (segundo plano, retry) é o consumidor; o núcleo não cria tarefas.
 
 use crate::backend::Backend;
 use crate::envelope::Header;
@@ -26,8 +27,12 @@ pub struct ReplicateReport {
     pub unreadable: Vec<ObjectId>,
     /// Objetos que não começam com um envelope válido do tipo do id (lixo, truncado, tipo
     /// trocado): nunca gravados, e não retêm os manifests (nenhum manifest legítimo cita lixo).
-    /// **Não detecta** cabeçalho forjado com corpo aleatório (P-32).
+    /// **Não detecta** cabeçalho forjado com corpo aleatório: isso é do `Engine::pull` (P-32).
     pub malformed: Vec<ObjectId>,
+    /// Manifests com envelope válido que o filtro da chamada recusou (em `Engine::pull`: não
+    /// abrem com a chave da época do dispositivo, ou seja, forjados ou de outro Vault): nunca
+    /// gravados, e não retêm os demais manifests. O `replicate` cru não filtra e deixa isto vazio.
+    pub forged: Vec<ObjectId>,
     /// `true` se os manifests foram retidos porque algum blob foi pulado (corrompido ou não
     /// entregue; sem a chave não dá para saber qual manifest o cita). **`Ok` com isto ligado
     /// não é sucesso**: a rodada ficou incompleta e o consumidor não deve marcar "replicado".
@@ -53,6 +58,17 @@ impl ReplicaStatus {
 pub async fn replicate<A: BlobStore, B: BlobStore>(
     from: &A,
     to: &B,
+) -> Result<ReplicateReport, StoreError> {
+    replicate_filtered(from, to, |_| true).await
+}
+
+/// Como `replicate`, mas só grava um manifest se `accept_manifest(bytes)` aceitar (os bytes já
+/// são um envelope de manifest com o hash certo). Um recusado vai para `forged`, não é gravado
+/// e não retém os demais. `Engine::pull` usa isto com a chave do dispositivo (P-32).
+pub(crate) async fn replicate_filtered<A: BlobStore, B: BlobStore>(
+    from: &A,
+    to: &B,
+    accept_manifest: impl Fn(&[u8]) -> bool,
 ) -> Result<ReplicateReport, StoreError> {
     let mut report = ReplicateReport::default();
     // Os manifests são listados ANTES de copiar os blobs: um manifest que a origem publicar
@@ -84,10 +100,14 @@ pub async fn replicate<A: BlobStore, B: BlobStore>(
             }
             match verified_get(from, &id).await {
                 Ok(Some(bytes)) => {
-                    // o cabeçalho é em claro: dá para barrar lixo sem chave. Não barra um
-                    // cabeçalho forjado com corpo aleatório (P-32).
+                    // o cabeçalho é em claro: dá para barrar lixo sem chave. Um cabeçalho
+                    // forjado com corpo aleatório só o `accept_manifest` (com chave) barra.
                     if !is_envelope_of(kind, &bytes) {
                         report.malformed.push(id);
+                        continue;
+                    }
+                    if kind == ObjectKind::Manifest && !accept_manifest(&bytes) {
+                        report.forged.push(id);
                         continue;
                     }
                     to.put(&id, &bytes).await?;
@@ -269,6 +289,7 @@ mod tests {
                 missing: vec![],
                 unreadable: vec![],
                 malformed: vec![],
+                forged: vec![],
                 manifests_withheld: false
             }
         );
@@ -285,6 +306,7 @@ mod tests {
                 missing: vec![],
                 unreadable: vec![],
                 malformed: vec![],
+                forged: vec![],
                 manifests_withheld: false
             }
         );
@@ -924,5 +946,304 @@ mod tests {
             again.snapshot(&b.roots, 3).await.map(|_| ()),
             Err(EngineError::Rollback)
         );
+    }
+
+    // ---------- pull filtrado com chave (P-32, item 1) ----------
+
+    fn sample_manifest(epoch: u32) -> crate::manifest::Manifest {
+        crate::manifest::Manifest {
+            format_version: FORMAT_VERSION as u16,
+            key_epoch: epoch,
+            base_version: None,
+            merged_from: vec![],
+            counter: 1,
+            device: "x".to_string(),
+            created_at: 0,
+            files: vec![],
+        }
+    }
+
+    /// Cabeçalho perfeito (época 1, tipo manifest) e corpo sem tag válida: o que o `replicate`
+    /// cru deixa passar.
+    fn forged_manifest() -> (ObjectId, Vec<u8>) {
+        object(ObjectKind::Manifest, b"corpo aleatorio sem tag valida")
+    }
+
+    /// Manifest legítimo de **outro Vault**, na mesma época: envelope e tag perfeitos, mas a
+    /// tag não confere com a chave deste dispositivo.
+    fn foreign_manifest() -> (ObjectId, Vec<u8>) {
+        let other = EpochKeys::derive(&VaultKey::from_bytes([9u8; 32]), 1);
+        let sealed = sample_manifest(1).seal(&other).unwrap();
+        (sealed.id, sealed.bytes)
+    }
+
+    /// `a` cria o Vault e publica em `remote`; devolve o id do manifest.
+    async fn publish_base(a: &Device, remote: &Backend) -> ObjectId {
+        write(&a.vault, "x.md", b"1");
+        let base = a.snapshot(1).await;
+        replicate(&a.local, remote).await.unwrap();
+        base
+    }
+
+    #[tokio::test]
+    async fn pull_skips_a_forged_manifest_keeps_the_real_ones_and_leaves_the_device_unblocked() {
+        let tmp = TempDir::new();
+        let remote = disk(&tmp, "remoto");
+        let (a, b) = (Device::new(&tmp, "a", false), Device::new(&tmp, "b", false));
+        let base = publish_base(&a, &remote).await;
+        let forged = forged_manifest();
+        remote.put(&forged.0, &forged.1).await.unwrap();
+
+        let report = b.engine.pull(&remote).await.unwrap();
+        assert_eq!(report.forged, vec![forged.0]);
+        assert!(report.malformed.is_empty() && report.corrupt.is_empty());
+        assert!(!report.manifests_withheld);
+        assert_eq!(b.local.has(&forged.0).await, Ok(false));
+        assert_eq!(b.local.has(&base).await, Ok(true));
+
+        // `tips()` falha se houver `rejected`: o armazenamento local está limpo
+        assert_eq!(b.tips().await, vec![base]);
+        b.engine.apply(None, &base, &b.roots).await.unwrap();
+        write(&b.vault, "y.md", b"2");
+        b.snapshot(2).await; // não dá Diverged
+    }
+
+    /// Contraste: é por isso que o pull existe. O `replicate` cru copia o forjado e o
+    /// armazenamento local passa a recusar o `snapshot`.
+    #[tokio::test]
+    async fn the_raw_replicate_still_copies_a_forged_manifest_and_that_blocks_the_snapshot() {
+        let tmp = TempDir::new();
+        let remote = disk(&tmp, "remoto");
+        let (a, b) = (Device::new(&tmp, "a", false), Device::new(&tmp, "b", false));
+        publish_base(&a, &remote).await;
+        let forged = forged_manifest();
+        remote.put(&forged.0, &forged.1).await.unwrap();
+
+        let report = replicate(&remote, &b.local).await.unwrap();
+        assert!(report.forged.is_empty());
+        assert_eq!(b.local.has(&forged.0).await, Ok(true));
+        write(&b.vault, "y.md", b"2");
+        assert_eq!(
+            b.engine.snapshot(&b.roots, 2).await.map(|_| ()),
+            Err(EngineError::Diverged {
+                tips: 1,
+                rejected: 1
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_skips_a_manifest_sealed_with_another_vault_key_in_the_same_epoch() {
+        let tmp = TempDir::new();
+        let remote = disk(&tmp, "remoto");
+        let (a, b) = (Device::new(&tmp, "a", false), Device::new(&tmp, "b", false));
+        let base = publish_base(&a, &remote).await;
+        let foreign = foreign_manifest();
+        remote.put(&foreign.0, &foreign.1).await.unwrap();
+
+        let report = b.engine.pull(&remote).await.unwrap();
+        assert_eq!(report.forged, vec![foreign.0]);
+        assert_eq!(b.local.has(&foreign.0).await, Ok(false));
+        assert_eq!(b.tips().await, vec![base]);
+    }
+
+    #[tokio::test]
+    async fn a_second_pull_copies_nothing_and_the_forged_one_is_tested_again() {
+        let tmp = TempDir::new();
+        let remote = disk(&tmp, "remoto");
+        let (a, b) = (Device::new(&tmp, "a", false), Device::new(&tmp, "b", false));
+        publish_base(&a, &remote).await;
+        let forged = forged_manifest();
+        remote.put(&forged.0, &forged.1).await.unwrap();
+
+        let first = b.engine.pull(&remote).await.unwrap();
+        assert!(first.copied > 0);
+        let second = b.engine.pull(&remote).await.unwrap();
+        assert_eq!(second.copied, 0);
+        assert_eq!(second.already, first.copied);
+        assert_eq!(second.forged, vec![forged.0]);
+    }
+
+    /// Sem a chave da outra época não há como autenticar: o manifest passa como no
+    /// `replicate`. Documenta o limite (um cabeçalho forjado de época maior ainda dá
+    /// `NeedsNewKey`; o de época menor vira histórico, salvo num dispositivo sem manifest da
+    /// própria época, onde vira `rejected`: limite herdado do ADR 0013).
+    #[tokio::test]
+    async fn a_manifest_of_another_epoch_cannot_be_verified_and_is_copied() {
+        let tmp = TempDir::new();
+        let remote = disk(&tmp, "remoto");
+        let local = disk(&tmp, "novo");
+        let keys2 = EpochKeys::derive(&VaultKey::from_bytes([3u8; 32]), 2);
+        let engine = Engine::new(local.clone(), keys2, "pc").unwrap();
+
+        let old = sample_manifest(1).seal(&keys()).unwrap();
+        remote.put(&old.id, &old.bytes).await.unwrap();
+        let header = Header {
+            format_version: FORMAT_VERSION as u16,
+            alg: Alg::XChaCha20Poly1305,
+            kind: ObjectKind::Manifest,
+            key_epoch: 3,
+            nonce: [7u8; NONCE_LEN],
+        };
+        let mut newer = header.encode().to_vec();
+        newer.extend_from_slice(b"nao da para verificar");
+        let newer_id = ObjectId::of(ObjectKind::Manifest, &newer);
+        remote.put(&newer_id, &newer).await.unwrap();
+
+        let report = engine.pull(&remote).await.unwrap();
+        assert!(report.forged.is_empty());
+        assert_eq!(local.has(&old.id).await, Ok(true));
+        assert_eq!(local.has(&newer_id).await, Ok(true));
+        assert!(matches!(
+            engine.heads().await,
+            Err(EngineError::NeedsNewKey { have: 2, found: 3 })
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_corrupt_blob_still_withholds_the_manifests_in_a_pull() {
+        let tmp = TempDir::new();
+        let remote = disk(&tmp, "remoto");
+        let (a, b) = (Device::new(&tmp, "a", false), Device::new(&tmp, "b", false));
+        let base = publish_base(&a, &remote).await;
+        let bad = object(ObjectKind::Blob, b"ruim");
+        remote.put(&bad.0, &bad.1).await.unwrap();
+        corrupt_on_disk(&tmp, "remoto", &bad.0);
+
+        let report = b.engine.pull(&remote).await.unwrap();
+        assert_eq!(report.corrupt, vec![bad.0]);
+        assert!(report.manifests_withheld);
+        assert_eq!(b.local.has(&base).await, Ok(false));
+    }
+
+    /// Fuzz: corpos aleatórios sob cabeçalho válido, manifests legítimos com um bit trocado
+    /// no corpo e truncados em qualquer ponto. Nenhum entra, nenhum causa pânico.
+    #[tokio::test]
+    async fn pull_never_copies_random_mutated_or_truncated_manifests() {
+        struct Rng(u64);
+        impl Rng {
+            fn next(&mut self) -> u64 {
+                self.0 ^= self.0 << 13;
+                self.0 ^= self.0 >> 7;
+                self.0 ^= self.0 << 17;
+                self.0
+            }
+        }
+        let tmp = TempDir::new();
+        let remote = disk(&tmp, "remoto");
+        let b = Device::new(&tmp, "b", false);
+        let real = sample_manifest(1).seal(&keys()).unwrap();
+        let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+        let mut bad: Vec<(ObjectId, Vec<u8>)> = Vec::new();
+
+        for _ in 0..100 {
+            let mut header = Header {
+                format_version: FORMAT_VERSION as u16,
+                alg: Alg::XChaCha20Poly1305,
+                kind: ObjectKind::Manifest,
+                key_epoch: 1,
+                nonce: [0u8; NONCE_LEN],
+            };
+            header
+                .nonce
+                .iter_mut()
+                .for_each(|byte| *byte = rng.next() as u8);
+            let mut bytes = header.encode().to_vec();
+            (0..(rng.next() % 200)).for_each(|_| bytes.push(rng.next() as u8));
+            bad.push((ObjectId::of(ObjectKind::Manifest, &bytes), bytes));
+        }
+        for _ in 0..100 {
+            let mut bytes = real.bytes.clone();
+            let at = crate::HEADER_LEN + (rng.next() as usize) % (bytes.len() - crate::HEADER_LEN);
+            bytes[at] ^= 1 << (rng.next() % 8);
+            bad.push((ObjectId::of(ObjectKind::Manifest, &bytes), bytes));
+        }
+        for cut in crate::HEADER_LEN..real.bytes.len() {
+            let bytes = real.bytes[..cut].to_vec();
+            bad.push((ObjectId::of(ObjectKind::Manifest, &bytes), bytes));
+        }
+        bad.sort_by_key(|(id, _)| id.hash);
+        bad.dedup_by_key(|(id, _)| id.hash);
+        put_all(&remote, &bad).await;
+        // o legítimo no meio do lixo é o único que entra
+        remote.put(&real.id, &real.bytes).await.unwrap();
+
+        let report = b.engine.pull(&remote).await.unwrap();
+        let mut forged = report.forged.clone();
+        forged.sort_by_key(|id| id.hash);
+        let expected: Vec<ObjectId> = bad.iter().map(|(id, _)| *id).collect();
+        assert_eq!(forged, expected);
+        assert_eq!(report.copied, 1);
+        assert_eq!(count(&b.local, ObjectKind::Manifest).await, 1);
+        assert_eq!(b.local.has(&real.id).await, Ok(true));
+    }
+
+    /// Auditoria do P-32: um manifest cifrado com a chave certa (tag válida) mas cujo conteúdo o
+    /// `Manifest::open` recusa também não pode entrar. O filtro tem de ser o mesmo critério do
+    /// `classify_manifest`; um filtro que só conferisse a tag deixaria isto virar `rejected`.
+    #[tokio::test]
+    async fn pull_refuses_authentic_ciphertext_whose_manifest_content_is_invalid() {
+        let tmp = TempDir::new();
+        let remote = disk(&tmp, "remoto");
+        let b = Device::new(&tmp, "b", false);
+        let json = String::from_utf8(sample_manifest(1).to_vec().unwrap()).unwrap();
+        let bodies = [
+            json.replace("\"key_epoch\":1", "\"key_epoch\":5"),
+            json.replace("\"device\":\"x\"", "\"device\":\"\""),
+            json.replacen('}', ",\"extra\":1}", 1),
+        ];
+        let mut planted = Vec::new();
+        for body in &bodies {
+            assert_ne!(body, &json, "a troca não aconteceu");
+            let sealed = crate::crypto::seal(&keys(), ObjectKind::Manifest, body.as_bytes());
+            let sealed = sealed.unwrap();
+            remote.put(&sealed.id, &sealed.bytes).await.unwrap();
+            planted.push(sealed.id);
+        }
+
+        let report = b.engine.pull(&remote).await.unwrap();
+        let mut forged = report.forged.clone();
+        forged.sort_by_key(|id| id.hash);
+        planted.sort_by_key(|id| id.hash);
+        assert_eq!(forged, planted);
+        assert_eq!(report.copied, 0);
+        // invariante: depois de um pull, o armazenamento local não tem nada ilegível
+        assert!(b.engine.heads().await.unwrap().rejected.is_empty());
+    }
+
+    /// Dois dispositivos divergem, trocam objetos por um remoto que tem manifests forjados e
+    /// convergem: nenhum dos dois fica travado.
+    #[tokio::test]
+    async fn two_devices_converge_through_a_remote_that_holds_forged_manifests() {
+        let tmp = TempDir::new();
+        let remote = disk(&tmp, "remoto");
+        let (a, b) = (Device::new(&tmp, "a", false), Device::new(&tmp, "b", false));
+        let base = publish_base(&a, &remote).await;
+        b.engine.pull(&remote).await.unwrap();
+        b.engine.apply(None, &base, &b.roots).await.unwrap();
+
+        for planted in [forged_manifest(), foreign_manifest()] {
+            remote.put(&planted.0, &planted.1).await.unwrap();
+        }
+        write(&a.vault, "so-a.md", b"a");
+        a.snapshot(10).await;
+        write(&b.vault, "so-b.md", b"b");
+        b.snapshot(20).await;
+        replicate(&a.local, &remote).await.unwrap();
+        replicate(&b.local, &remote).await.unwrap();
+        a.engine.pull(&remote).await.unwrap();
+        b.engine.pull(&remote).await.unwrap();
+        assert_eq!(a.tips().await.len(), 2);
+        assert_eq!(b.tips().await.len(), 2);
+
+        merge_locally(&a, 30).await;
+        merge_locally(&b, 31).await;
+        replicate(&a.local, &remote).await.unwrap();
+        replicate(&b.local, &remote).await.unwrap();
+        a.engine.pull(&remote).await.unwrap();
+        b.engine.pull(&remote).await.unwrap();
+        let (tips_a, tips_b) = (a.tips().await, b.tips().await);
+        assert_eq!(tips_a.len(), 1, "{tips_a:?}");
+        assert_eq!(tips_a, tips_b);
     }
 }
