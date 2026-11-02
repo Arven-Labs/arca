@@ -38,7 +38,7 @@ pub fn common_ancestor(
 }
 
 /// Hashes alcançáveis a partir de `from` (ele mesmo incluso) por `base_version`/`merged_from`.
-fn reachable(
+pub(crate) fn reachable(
     graph: &HashMap<[u8; 32], &(ObjectId, Manifest)>,
     from: [u8; 32],
 ) -> HashSet<[u8; 32]> {

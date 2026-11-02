@@ -150,6 +150,12 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let dir = path
         .parent()
         .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+    // caminho relativo sem pasta ("estado.json"): o pai é "", que não abre; a pasta é a atual
+    let dir = if dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        dir
+    };
     let mut random = [0u8; 8];
     getrandom::fill(&mut random).map_err(|_| io::Error::from(io::ErrorKind::Other))?;
     let suffix: String = random.iter().map(|b| format!("{b:02x}")).collect();

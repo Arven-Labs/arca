@@ -12,6 +12,7 @@ use crate::manifest::{validate_device, validate_path, Class, FileEntry, Hash32, 
 use crate::merge::{common_ancestor, merge_files, Conflict, Side};
 use crate::object::{ObjectId, ObjectKind};
 use crate::scan::{scan_class, Candidate, Skipped, MAX_FILE_BYTES};
+use crate::state::{descends, satisfied, DeviceState};
 use crate::store::{verified_get, BlobStore, StoreError};
 use crate::FORMAT_VERSION;
 use sha2::{Digest, Sha256};
@@ -80,6 +81,14 @@ pub enum EngineError {
     /// dos logins vivos poderia ser lido como outro login.
     #[error("the conflicts folder must be a real folder outside every enabled class folder")]
     UnsafeConflictsDir,
+    /// O armazenamento não continua a história que este dispositivo já aceitou (voltou no
+    /// tempo, foi trocado ou esvaziado): nada foi escrito. Para trocar de armazenamento de
+    /// propósito, apague o arquivo de estado.
+    #[error("the storage does not continue the history this device already accepted")]
+    Rollback,
+    /// O arquivo de estado local existe mas não é válido. Nunca vale como "sem estado".
+    #[error("the device state file is corrupt")]
+    CorruptState,
     /// Uma entrada do manifest tem nome de temporário da arca (`.arca-new-*`, `.arca-old-*`,
     /// `.tmp-*`): o `apply` recusa em vez de colidir com os próprios arquivos de trabalho.
     #[error("a manifest entry uses a name reserved for temporary files")]
@@ -195,6 +204,9 @@ pub struct Engine<S> {
     store: S,
     keys: EpochKeys,
     device: String,
+    /// Arquivo do último manifest aceito (`state.rs`). Sem ele o engine **não** protege contra
+    /// um armazenamento que volte no tempo.
+    state: Option<PathBuf>,
 }
 
 impl<S: BlobStore> Engine<S> {
@@ -210,7 +222,16 @@ impl<S: BlobStore> Engine<S> {
             store,
             keys,
             device,
+            state: None,
         })
+    }
+
+    /// Liga a proteção contra rollback: `snapshot`, `merge` e `apply` passam a consultar e a
+    /// atualizar o último manifest aceito em `path` (`SPEC-TECNICA.md` §6). Para trocar de
+    /// armazenamento de propósito, apague o arquivo.
+    pub fn with_state(mut self, path: impl Into<PathBuf>) -> Engine<S> {
+        self.state = Some(path.into());
+        self
     }
 
     /// Lê todos os manifests do armazenamento e calcula as pontas. Só a **maior época** vista
@@ -285,6 +306,29 @@ impl<S: BlobStore> Engine<S> {
         })
     }
 
+    /// O último manifest aceito, se a proteção está ligada e o arquivo existe. Arquivo
+    /// corrompido é `CorruptState`: nunca vale como "sem estado".
+    async fn load_state(&self) -> Result<Option<DeviceState>, EngineError> {
+        let Some(path) = self.state.clone() else {
+            return Ok(None);
+        };
+        run(move || DeviceState::load(&path)).await
+    }
+
+    /// Grava `id` como o último manifest aceito (se a proteção está ligada). Falhar aqui depois
+    /// de uma operação que já valeu devolve `Io`; o estado antigo continua ancestral, então a
+    /// próxima chamada não dá `Rollback` falso.
+    async fn remember(&self, id: &ObjectId) -> Result<(), EngineError> {
+        let Some(path) = self.state.clone() else {
+            return Ok(());
+        };
+        let state = DeviceState {
+            key_epoch: self.keys.epoch(),
+            last_accepted: Hash32(id.hash),
+        };
+        run(move || state.save(&path)).await
+    }
+
     /// Abre o manifest com as chaves do dispositivo (erro se for de outra época).
     async fn read_manifest(&self, id: &ObjectId) -> Result<Manifest, EngineError> {
         let bytes = verified_get(&self.store, id)
@@ -313,10 +357,12 @@ impl<S: BlobStore> Engine<S> {
     /// (`SPEC-TECNICA.md` §7, ADR 0014). Uma chamada resolve um par; repetir até `tips_after`
     /// chegar a 1.
     pub async fn merge(&self, now: u64) -> Result<MergeOutcome, EngineError> {
+        let state = self.load_state().await?;
         let Loaded {
             readable, rejected, ..
         } = self.load().await?;
         let heads = tips(readable.clone());
+        guard(state.as_ref(), &readable, &heads)?;
         // sem o grafo completo a base pode estar errada: mesma recusa do `snapshot`
         if !rejected.is_empty() {
             return Err(EngineError::Diverged {
@@ -371,6 +417,15 @@ impl<S: BlobStore> Engine<S> {
         };
         let sealed = manifest.seal(&self.keys)?;
         self.store.put(&sealed.id, &sealed.bytes).await?;
+        // o estado só avança: `guard` aceitou porque ALGUMA ponta continua o aceito, mas o par
+        // fundido são as duas primeiras por (counter, hash) e pode não incluí-la. Gravar uma
+        // fusão que não descende do aceito faria o estado recuar (achado C1 da auditoria).
+        let advances = state.as_ref().is_none_or(|state| {
+            descends(state, &readable, &first.id) || descends(state, &readable, &second.id)
+        });
+        if advances {
+            self.remember(&sealed.id).await?;
+        }
         Ok(MergeOutcome::Merged {
             id: sealed.id,
             manifest,
@@ -383,14 +438,26 @@ impl<S: BlobStore> Engine<S> {
     /// Fotografa as pastas de `roots` e grava o estado como um manifest novo (blobs primeiro,
     /// manifest por último). `now` são segundos Unix (UTC), injetados para testes determinísticos.
     pub async fn snapshot(&self, roots: &Roots, now: u64) -> Result<Snapshot, EngineError> {
-        let Heads { tips, rejected, .. } = self.heads().await?;
-        if tips.len() > 1 || !rejected.is_empty() {
+        let state = self.load_state().await?;
+        let Loaded {
+            readable, rejected, ..
+        } = self.load().await?;
+        let heads = match &state {
+            // com proteção ligada o grafo é preciso depois do cálculo das pontas
+            Some(_) => {
+                let heads = tips(readable.clone());
+                guard(state.as_ref(), &readable, &heads)?;
+                heads
+            }
+            None => tips(readable),
+        };
+        if heads.len() > 1 || !rejected.is_empty() {
             return Err(EngineError::Diverged {
-                tips: tips.len(),
+                tips: heads.len(),
                 rejected: rejected.len(),
             });
         }
-        let prev = tips.into_iter().next();
+        let prev = heads.into_iter().next();
         let prev_files: &[FileEntry] = prev.as_ref().map_or(&[], |h| &h.manifest.files);
 
         // 1. varrer as classes ligadas (nada é lido nem enviado ainda)
@@ -446,6 +513,8 @@ impl<S: BlobStore> Engine<S> {
 
         if let Some(head) = &prev {
             if head.manifest.files == files {
+                // a pasta já é igual à cabeça: o dispositivo a aceita como estado atual
+                self.remember(&head.id).await?;
                 return Ok(Snapshot::Unchanged {
                     head: head.id,
                     skipped,
@@ -468,6 +537,7 @@ impl<S: BlobStore> Engine<S> {
         };
         let sealed = manifest.seal(&self.keys)?;
         self.store.put(&sealed.id, &sealed.bytes).await?;
+        self.remember(&sealed.id).await?;
         Ok(Snapshot::Created {
             id: sealed.id,
             manifest,
@@ -485,11 +555,20 @@ impl<S: BlobStore> Engine<S> {
         to: &ObjectId,
         roots: &Roots,
     ) -> Result<Applied, EngineError> {
+        let state = self.load_state().await?;
         let from_manifest = match from {
             Some(id) => Some(self.read_manifest(id).await?),
             None => None,
         };
         let to_manifest = self.read_manifest(to).await?;
+        // adotar um manifest só vale se ele continua a história já aceita (voltar a uma versão
+        // mais velha é `restore`)
+        if let Some(state) = &state {
+            let Loaded { readable, .. } = self.load().await?;
+            if !descends(state, &readable, to) {
+                return Err(EngineError::Rollback);
+            }
+        }
         let enabled = roots.enabled();
 
         // o diff por (classe, path), só das classes com pasta ligada
@@ -569,6 +648,7 @@ impl<S: BlobStore> Engine<S> {
             Ok(())
         })
         .await?;
+        self.remember(to).await?;
         Ok(applied)
     }
 
@@ -853,6 +933,23 @@ fn write_loser(dest: &Path, plain: &[u8]) -> Result<(), EngineError> {
         .ok_or(EngineError::Io(io::ErrorKind::InvalidInput))?;
     create_private_dir(parent).map_err(io_error)?;
     write_atomic(dest, plain).map_err(io_error)
+}
+
+/// Com estado: alguma das pontas tem de continuar a história aceita, senão `Rollback`.
+fn guard(
+    state: Option<&DeviceState>,
+    graph: &[(ObjectId, Manifest)],
+    heads: &[Head],
+) -> Result<(), EngineError> {
+    let Some(state) = state else {
+        return Ok(());
+    };
+    let ids: Vec<ObjectId> = heads.iter().map(|h| h.id).collect();
+    if satisfied(state, graph, &ids) {
+        Ok(())
+    } else {
+        Err(EngineError::Rollback)
+    }
 }
 
 /// Como `run`, mas passa o diário de desfazer para dentro e o devolve junto com o resultado.
@@ -1912,6 +2009,414 @@ mod tests {
         }
         .to_string();
         assert!(text.contains("merge"), "{text}");
+    }
+
+    // ---------- último manifest aceito e rollback (Fase 2a, PR 4) ----------
+
+    use crate::state::DeviceState;
+
+    fn state_path(rig: &Rig) -> PathBuf {
+        rig.tmp.path().join("estado/estado.json")
+    }
+
+    fn accepted(id: &ObjectId, epoch: u32) -> DeviceState {
+        DeviceState {
+            key_epoch: epoch,
+            last_accepted: Hash32(id.hash),
+        }
+    }
+
+    fn saved(path: &Path) -> Option<DeviceState> {
+        DeviceState::load(path).unwrap()
+    }
+
+    /// Engine do `rig` com a proteção ligada no arquivo `state`.
+    fn guarded(rig: &Rig, device: &str, state: &Path) -> Engine<Backend> {
+        rig.engine(device).with_state(state)
+    }
+
+    #[tokio::test]
+    async fn without_a_state_file_nothing_is_protected_and_nothing_is_written() {
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        write(&vault, "a.md", b"1");
+        created(
+            rig.engine("pc")
+                .snapshot(&vault_only(&vault), 1)
+                .await
+                .unwrap(),
+        );
+        let old = forked(&rig);
+        write(&vault, "a.md", b"2");
+        created(
+            rig.engine("pc")
+                .snapshot(&vault_only(&vault), 2)
+                .await
+                .unwrap(),
+        );
+        // um armazenamento que voltou no tempo é aceito: é o comportamento sem `with_state`
+        write(&vault, "a.md", b"3");
+        created(
+            old.engine("pc")
+                .snapshot(&vault_only(&vault), 3)
+                .await
+                .unwrap(),
+        );
+        assert!(!state_path(&rig).exists());
+    }
+
+    #[tokio::test]
+    async fn the_state_follows_snapshot_unchanged_snapshot_merge_and_apply() {
+        // snapshot e snapshot sem mudança
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        let path = state_path(&rig);
+        let eng = guarded(&rig, "pc", &path);
+        write(&vault, "a.md", b"1");
+        let (s1, ..) = created(eng.snapshot(&vault_only(&vault), 1).await.unwrap());
+        assert_eq!(saved(&path), Some(accepted(&s1, 1)));
+        write(&vault, "a.md", b"2");
+        let (s2, ..) = created(eng.snapshot(&vault_only(&vault), 2).await.unwrap());
+        assert_eq!(saved(&path), Some(accepted(&s2, 1)));
+        assert!(matches!(
+            eng.snapshot(&vault_only(&vault), 3).await.unwrap(),
+            Snapshot::Unchanged { head, .. } if head == s2
+        ));
+        assert_eq!(saved(&path), Some(accepted(&s2, 1)));
+
+        // merge
+        let d = diverge(
+            &[("a.md", b"1"), ("b.md", b"1")],
+            vec![
+                ("pa", 10, vec![("a.md", b"A")]),
+                ("pb", 20, vec![("b.md", b"B")]),
+            ],
+        )
+        .await;
+        let merge_state = state_path(&d.rig);
+        let MergeOutcome::Merged { id, .. } =
+            guarded(&d.rig, "pc", &merge_state).merge(30).await.unwrap()
+        else {
+            panic!("esperava Merged");
+        };
+        assert_eq!(saved(&merge_state), Some(accepted(&id, 1)));
+
+        // apply
+        let h = hist().await;
+        let apply_state = state_path(&h.rig);
+        accepted(&h.v1, 1).save(&apply_state).unwrap();
+        guarded(&h.rig, "pc", &apply_state)
+            .apply(Some(&h.v1), &h.v2, &vault_only(&h.target))
+            .await
+            .unwrap();
+        assert_eq!(saved(&apply_state), Some(accepted(&h.v2, 1)));
+    }
+
+    /// O ataque: o armazenamento volta a uma cópia velha. Nada é escrito, em nenhuma operação.
+    #[tokio::test]
+    async fn a_storage_that_went_back_in_time_is_a_rollback_everywhere() {
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        let path = state_path(&rig);
+        let eng = guarded(&rig, "pc", &path);
+        write(&vault, "a.md", b"1");
+        let (s1, ..) = created(eng.snapshot(&vault_only(&vault), 1).await.unwrap());
+        let old = forked(&rig); // só tem s1
+        write(&vault, "a.md", b"2");
+        let (s2, ..) = created(eng.snapshot(&vault_only(&vault), 2).await.unwrap());
+
+        let stale = guarded(&old, "pc", &path);
+        let manifests = old.count(ObjectKind::Manifest).await;
+        let blobs = old.count(ObjectKind::Blob).await;
+
+        write(&vault, "a.md", b"3");
+        assert_eq!(
+            stale.snapshot(&vault_only(&vault), 3).await,
+            Err(EngineError::Rollback)
+        );
+        assert_eq!(stale.merge(4).await, Err(EngineError::Rollback));
+        let fresh = old.dir("destino");
+        assert_eq!(
+            stale.apply(None, &s1, &vault_only(&fresh)).await,
+            Err(EngineError::Rollback)
+        );
+        assert_eq!(fs::read_dir(&fresh).unwrap().count(), 0);
+
+        assert_eq!(old.count(ObjectKind::Manifest).await, manifests);
+        assert_eq!(old.count(ObjectKind::Blob).await, blobs);
+        assert_eq!(saved(&path), Some(accepted(&s2, 1)), "o estado não recua");
+    }
+
+    #[tokio::test]
+    async fn an_empty_or_unrelated_storage_is_a_rollback() {
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        let path = state_path(&rig);
+        write(&vault, "a.md", b"1");
+        created(
+            guarded(&rig, "pc", &path)
+                .snapshot(&vault_only(&vault), 1)
+                .await
+                .unwrap(),
+        );
+
+        // armazenamento vazio: o backend apagou tudo (ou o disco está vazio por engano)
+        let empty = Rig::new();
+        let eng = guarded(&empty, "pc", &path);
+        assert_eq!(
+            eng.snapshot(&vault_only(&vault), 2).await,
+            Err(EngineError::Rollback)
+        );
+        assert_eq!(eng.merge(3).await, Err(EngineError::Rollback));
+
+        // armazenamento com outra história, sem o manifest aceito
+        let other = Rig::new();
+        let other_vault = other.dir("vault");
+        write(&other_vault, "x.md", b"outro");
+        created(
+            other
+                .engine("pd")
+                .snapshot(&vault_only(&other_vault), 1)
+                .await
+                .unwrap(),
+        );
+        assert_eq!(
+            guarded(&other, "pc", &path)
+                .snapshot(&vault_only(&vault), 4)
+                .await,
+            Err(EngineError::Rollback)
+        );
+        assert_eq!(other.count(ObjectKind::Manifest).await, 1);
+    }
+
+    #[tokio::test]
+    async fn a_storage_that_moved_forward_is_accepted_and_remembered() {
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        let path = state_path(&rig);
+        write(&vault, "a.md", b"1");
+        created(
+            guarded(&rig, "pc", &path)
+                .snapshot(&vault_only(&vault), 1)
+                .await
+                .unwrap(),
+        );
+        // outro dispositivo avança a história
+        write(&vault, "b.md", b"2");
+        let (s2, ..) = created(
+            rig.engine("pd")
+                .snapshot(&vault_only(&vault), 2)
+                .await
+                .unwrap(),
+        );
+        assert!(matches!(
+            guarded(&rig, "pc", &path)
+                .snapshot(&vault_only(&vault), 3)
+                .await
+                .unwrap(),
+            Snapshot::Unchanged { head, .. } if head == s2
+        ));
+        assert_eq!(saved(&path), Some(accepted(&s2, 1)));
+    }
+
+    /// Falso `Rollback` seria o pior efeito prático: dois dispositivos fundiram o mesmo par, a
+    /// regra de colapso escolheu a gêmea de menor hash como ponta, e este dispositivo tinha
+    /// aceito a de **maior** hash (a que ele próprio gerou).
+    #[tokio::test]
+    async fn accepting_the_larger_hash_twin_of_a_merge_is_not_a_rollback() {
+        let d = diverge(
+            &[("a.md", b"1"), ("b.md", b"1")],
+            vec![
+                ("pa", 10, vec![("a.md", b"A")]),
+                ("pb", 20, vec![("b.md", b"B")]),
+            ],
+        )
+        .await;
+        let other = forked(&d.rig);
+        let merged = |out: MergeOutcome| match out {
+            MergeOutcome::Merged { id, .. } => id,
+            other => panic!("esperava Merged, veio {other:?}"),
+        };
+        let first = merged(d.rig.engine("pa").merge(30).await.unwrap());
+        let second = merged(other.engine("pb").merge(31).await.unwrap());
+        absorb(&d.rig, &other);
+        let (smaller, larger) = if first.hash < second.hash {
+            (first, second)
+        } else {
+            (second, first)
+        };
+
+        let path = state_path(&d.rig);
+        accepted(&larger, 1).save(&path).unwrap();
+        let eng = guarded(&d.rig, "pc", &path);
+        assert_eq!(ids_of(&eng.heads().await.unwrap()), [smaller]);
+        let work = d.rig.dir("trabalho");
+        eng.restore(&smaller, &vault_only(&work)).await.unwrap();
+        assert!(matches!(
+            eng.snapshot(&vault_only(&work), 40).await.unwrap(),
+            Snapshot::Unchanged { head, .. } if head == smaller
+        ));
+        assert_eq!(saved(&path), Some(accepted(&smaller, 1)));
+    }
+
+    #[tokio::test]
+    async fn a_rotation_to_a_newer_epoch_is_accepted_and_an_older_epoch_is_a_rollback() {
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        let path = state_path(&rig);
+        write(&vault, "a.md", b"1");
+        created(
+            guarded(&rig, "pc", &path)
+                .snapshot(&vault_only(&vault), 1)
+                .await
+                .unwrap(),
+        );
+        // rotação: a cadeia da época 2 começa com `base_version = null`
+        put_epoch_manifest(&rig, 2, None, 1).await;
+        let (next, ..) = created(
+            engine_at(&rig, 2)
+                .with_state(&path)
+                .snapshot(&vault_only(&vault), 5)
+                .await
+                .unwrap(),
+        );
+        assert_eq!(saved(&path), Some(accepted(&next, 2)));
+
+        // o estado é da época 2; um armazenamento só com a época 1 não é aceito
+        let old = Rig::new();
+        let old_vault = old.dir("vault");
+        write(&old_vault, "a.md", b"1");
+        created(
+            old.engine("pc")
+                .snapshot(&vault_only(&old_vault), 1)
+                .await
+                .unwrap(),
+        );
+        assert_eq!(
+            guarded(&old, "pc", &path)
+                .snapshot(&vault_only(&old_vault), 6)
+                .await,
+            Err(EngineError::Rollback)
+        );
+    }
+
+    /// O estado só avança (achado C1 da auditoria). `merge` junta as duas primeiras pontas por
+    /// `(counter, hash)`, que podem não incluir a que o dispositivo aceitou; gravar a fusão como
+    /// "aceita" faria o estado **recuar**, e um backend que escondesse a ponta aceita depois
+    /// passaria sem `Rollback`.
+    #[tokio::test]
+    async fn a_merge_that_does_not_include_the_accepted_tip_leaves_the_state_where_it_was() {
+        for accepted_index in [2usize, 1] {
+            let d = diverge(
+                &[("a.md", b"1")],
+                vec![
+                    ("pa", 10, vec![("x.md", b"X")]),
+                    ("pb", 20, vec![("y.md", b"Y")]),
+                    ("pc", 30, vec![("z.md", b"Z")]),
+                ],
+            )
+            .await;
+            let path = state_path(&d.rig);
+            let eng = guarded(&d.rig, "pd", &path);
+            let tips: Vec<ObjectId> = eng
+                .heads()
+                .await
+                .unwrap()
+                .tips
+                .iter()
+                .map(|h| h.id)
+                .collect();
+            // `merge` funde tips[0] e tips[1]; o índice 2 fica de fora, o 1 entra
+            let accepted_id = tips[accepted_index];
+            accepted(&accepted_id, 1).save(&path).unwrap();
+
+            let MergeOutcome::Merged { id: merged, .. } = eng.merge(40).await.unwrap() else {
+                panic!("esperava Merged");
+            };
+            if accepted_index == 2 {
+                assert_eq!(saved(&path), Some(accepted(&accepted_id, 1)), "não recua");
+                // o backend esconde a ponta aceita: o que sobra não a continua
+                fs::remove_file(d.rig.store_dir().join(accepted_id.to_string())).unwrap();
+                assert_eq!(eng.merge(41).await, Err(EngineError::Rollback));
+                let vault = d.rig.dir("vault-do-teste");
+                assert_eq!(
+                    eng.snapshot(&vault_only(&vault), 42).await,
+                    Err(EngineError::Rollback)
+                );
+            } else {
+                // controle: a fusão inclui o aceito, então o estado avança para ela
+                assert_eq!(saved(&path), Some(accepted(&merged, 1)));
+            }
+        }
+    }
+
+    /// `apply` adota um manifest: só um que continue a história aceita. Voltar a uma versão
+    /// mais velha é `restore`, que não mexe no estado.
+    #[tokio::test]
+    async fn applying_a_manifest_that_does_not_descend_from_the_accepted_one_is_a_rollback() {
+        let h = hist().await;
+        let path = state_path(&h.rig);
+        accepted(&h.v2, 1).save(&path).unwrap();
+        let before = tree(&h.target);
+        assert_eq!(
+            guarded(&h.rig, "pc", &path)
+                .apply(Some(&h.v1), &h.v1, &vault_only(&h.target))
+                .await,
+            Err(EngineError::Rollback)
+        );
+        assert_eq!(tree(&h.target), before);
+        assert_eq!(saved(&path), Some(accepted(&h.v2, 1)));
+
+        // restaurar a versão velha continua permitido e não mexe no estado
+        let elsewhere = h.rig.tmp.path().join("versao-antiga");
+        guarded(&h.rig, "pc", &path)
+            .restore(&h.v1, &vault_only(&elsewhere))
+            .await
+            .unwrap();
+        assert_eq!(saved(&path), Some(accepted(&h.v2, 1)));
+    }
+
+    #[tokio::test]
+    async fn a_failed_operation_does_not_touch_the_state() {
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        let path = state_path(&rig);
+        let eng = guarded(&rig, "pc", &path);
+        // falha antes de existir estado: nenhum arquivo nasce
+        let gone = rig.tmp.path().join("sumiu");
+        assert_eq!(
+            eng.snapshot(&vault_only(&gone), 1).await,
+            Err(EngineError::Io(io::ErrorKind::NotFound))
+        );
+        assert!(!path.exists());
+
+        write(&vault, "a.md", b"1");
+        let (s1, ..) = created(eng.snapshot(&vault_only(&vault), 2).await.unwrap());
+        assert_eq!(
+            eng.snapshot(&vault_only(&gone), 3).await,
+            Err(EngineError::Io(io::ErrorKind::NotFound))
+        );
+        assert_eq!(saved(&path), Some(accepted(&s1, 1)));
+    }
+
+    /// Estado corrompido nunca desliga a proteção, e o arquivo não é apagado.
+    #[tokio::test]
+    async fn a_corrupt_state_blocks_every_operation_and_is_kept() {
+        let h = hist().await;
+        let path = state_path(&h.rig);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"lixo").unwrap();
+        let eng = guarded(&h.rig, "pc", &path);
+        assert_eq!(
+            eng.snapshot(&vault_only(&h.target), 9).await,
+            Err(EngineError::CorruptState)
+        );
+        assert_eq!(eng.merge(9).await, Err(EngineError::CorruptState));
+        assert_eq!(
+            eng.apply(Some(&h.v1), &h.v2, &vault_only(&h.target)).await,
+            Err(EngineError::CorruptState)
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"lixo");
     }
 
     // ---------- perdedores de config e secret (Fase 2a, PR 3b) ----------
@@ -3571,6 +4076,8 @@ mod tests {
             EngineError::ReservedName,
             EngineError::OriginalKept,
             EngineError::UnsafeConflictsDir,
+            EngineError::Rollback,
+            EngineError::CorruptState,
             EngineError::NeedsNewKey { have: 1, found: 2 },
         ];
         for e in errors {

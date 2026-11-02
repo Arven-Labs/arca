@@ -15,6 +15,7 @@ pub mod merge;
 pub mod object;
 pub mod recovery;
 pub mod scan;
+pub mod state;
 pub mod store;
 
 #[cfg(test)]

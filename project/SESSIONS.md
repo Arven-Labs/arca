@@ -2,6 +2,18 @@
 
 Mais recente no topo.
 
+### 2026-11-01 — Sessão 37 (Fase 2a, PR 4: último manifest aceito e `Rollback`)
+
+- **Pedido**: PR 4 da Fase 2a, proteção contra um armazenamento que volte no tempo (spec §6). Plano aprovado em plan mode; toca segurança (AGENTS.md §4).
+- **Decisões do dono**: API opcional via `with_state`; manifest aceito sumido = `Rollback`. Auditoria: I2 e I3 documentados e adiados.
+- **Testes primeiro** (revisados pelo dono): 9 de engine falhavam; 5 de `state.rs` passavam desde o esqueleto (testam o formato do arquivo, que fazia parte do esqueleto; avisei).
+- **Feito**: `state.rs` (`DeviceState`, `load`, `save`, `satisfied`, `descends`), `Engine::with_state`, ganchos em `snapshot`, `merge` e `apply` (consulta antes, grava depois do sucesso), `merge::reachable` e `heads::equivalent_merges` como `pub(crate)`, erros `Rollback` e `CorruptState`.
+- **Auditoria** (`security-auditor`, com reprodução numa cópia): **crítico C1 conferido e corrigido** (o `merge` fazia o estado recuar; um backend sem chave desligava a proteção em dois passos), I1 (caminho relativo, em `write_atomic`), S1 (symlink) e S3 (índice uma vez). Três testes novos para eles, que falhavam antes. I2, I3 e I4 em P-31 e na spec. Eu tinha tratado "guard aceita se qualquer ponta satisfaz" como suficiente; não era.
+- **Processo**: segui para a implementação depois que o dono respondeu às duas decisões, sem uma confirmação explícita dos três testes de endurecimento; registrado aqui.
+- **Verificado localmente**: `cargo test --workspace` (291 passam), `clippy --all-targets -D warnings`, `fmt --check`. CI do PR: ver o PR.
+- **Não verificado**: backend remoto real, dois processos disputando o arquivo, Windows, medição de desempenho do `descends`.
+- **Fica**: PR 5 (replicação e o cenário de ponta a ponta), PR 3c (P-27), comando de limpeza (P-28); 2b; P-09, P-22, P-25, P-26, P-29, P-30, P-31.
+
 ### 2026-11-01 — Sessão 36 (Fase 2a, PR 3b: `save_conflict_losers` e auditoria)
 
 - **Pedido**: PR 3b da Fase 2a, gravar os perdedores de conflito das classes `config` e `secret` fora das pastas das classes (ADR 0010). Plano aprovado em plan mode. Toca segredos (AGENTS.md §4).
