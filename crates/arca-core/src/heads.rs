@@ -55,7 +55,7 @@ pub fn tips(mut manifests: Vec<(ObjectId, Manifest)>) -> Vec<Head> {
 
 /// Mesmos pais (`base_version` e o conjunto de `merged_from`), mesma época e mesmos `files`,
 /// ambos manifests de fusão.
-fn equivalent_merges(a: &Manifest, b: &Manifest) -> bool {
+pub(crate) fn equivalent_merges(a: &Manifest, b: &Manifest) -> bool {
     fn parents(m: &Manifest) -> Vec<[u8; 32]> {
         let mut parents: Vec<[u8; 32]> = m.merged_from.iter().map(|h| h.0).collect();
         parents.sort_unstable();
