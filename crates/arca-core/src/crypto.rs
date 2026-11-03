@@ -47,6 +47,13 @@ impl VaultKey {
     pub(crate) fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
+
+    /// Cópia dos 32 bytes para o consumidor cifrar na entrega a um dispositivo novo (pareamento,
+    /// Fase 2b-3). A cópia é apagada ao sair de escopo (`Zeroizing`), mas o `Debug` do
+    /// `Zeroizing<[u8; 32]>` mostra os bytes: o chamador nunca deve formatá-la nem logá-la.
+    pub fn export_bytes(&self) -> Zeroizing<[u8; 32]> {
+        self.0.clone()
+    }
 }
 
 impl fmt::Debug for VaultKey {
@@ -488,6 +495,44 @@ mod tests {
         for (salt, _) in &others[..6] {
             assert_ne!(*salt, HKDF_SALT);
         }
+    }
+
+    #[test]
+    fn export_bytes_returns_the_exact_key_bytes() {
+        let mut bytes = [0u8; 32];
+        for (i, b) in bytes.iter_mut().enumerate() {
+            *b = 0xF0u8.wrapping_add(i as u8);
+        }
+        let vk = VaultKey::from_bytes(bytes);
+        assert_eq!(*vk.export_bytes(), bytes);
+        // exportar não consome nem altera a chave
+        assert_eq!(*vk.export_bytes(), bytes);
+    }
+
+    #[test]
+    fn exported_key_opens_what_the_original_sealed() {
+        let original = VaultKey::generate().unwrap();
+        let sealed = seal(
+            &EpochKeys::derive(&original, 2),
+            ObjectKind::Blob,
+            b"conteudo",
+        )
+        .unwrap();
+        let copy = VaultKey::from_bytes(*original.export_bytes());
+        let opened = open(
+            &EpochKeys::derive(&copy, 2),
+            ObjectKind::Blob,
+            &sealed.bytes,
+        )
+        .unwrap();
+        assert_eq!(&opened[..], b"conteudo");
+    }
+
+    #[test]
+    fn export_of_different_keys_differs() {
+        let a = VaultKey::generate().unwrap();
+        let b = VaultKey::generate().unwrap();
+        assert_ne!(*a.export_bytes(), *b.export_bytes());
     }
 
     // 10

@@ -101,7 +101,7 @@ Roots { vault, config, secret: Option<PathBuf> }   // classe sem pasta = desliga
 - **Limites**: sem instantâneo atômico do Vault (um arquivo alterado durante a leitura entra com o conteúdo lido, consistente com o próprio `sha256`); uma pasta de classe que existe mas está vazia por um disco desmontado ainda leva ao manifest sem aquela classe; reaproveitar um blob não confere se ele ainda está no armazenamento (a restauração acusa `MissingObject`); a proteção contra rollback (§6, "último manifest aceito") e a junção de pontas ficam para a Fase 2.
 
 ### 4.2 Contrato HTTP do hub (`/arca/v1/`, Fase 2b-1)
-**Implementado no cliente (`arca-core::hub::HubStore`), no lado servidor sem rede e sem autenticação (`arca-core::server::{handle, body_limit}`, 2b-2a) e num hub de referência só de testes (`hub_testserver.rs`, que usa o `server::handle`). O `warden-server` ainda não tem as rotas (2b-2b): ele cuida do transporte e de quem pode chamar, e delega o resto ao `server::handle`.** Mesma porta do hub, como o `/v1/` e o `/hooks/`.
+**Implementado no cliente (`arca-core::hub::HubStore`), no lado servidor sem rede e sem autenticação (`arca-core::server::{handle, body_limit}`, 2b-2a) e num hub de referência só de testes (`hub_testserver.rs`, que usa o `server::handle`). O `warden-server` tem as rotas desde a 2b-2b (Warden#78, flag `--arca`, desligada por padrão): ele cuida do transporte e de quem pode chamar, e delega o resto ao `server::handle`.** Mesma porta do hub, como o `/v1/` e o `/hooks/`.
 
 | Operação | Pedido | Resposta |
 |---|---|---|
@@ -113,6 +113,7 @@ Roots { vault, config, secret: Option<PathBuf> }   // classe sem pasta = desliga
 
 - `kind` = `blob` ou `manifest`; `hex` = 64 hex minúsculos = SHA-256 do corpo (o mesmo `ObjectId` em texto, `blob/<hex>`). O hub confere o hash (`400`) e **só aceita envelope válido do tipo do `kind`** (o mesmo filtro do `replicate`, sem chave). Isso barra lixo trivial, não um cabeçalho forjado com corpo aleatório (o hub não tem a chave): quem puxa do hub usa `Engine::pull`, que recusa o forjado (P-32).
 - **Autenticação em toda rota:** `Authorization: Bearer <token do dispositivo>`, o token que o hub já emite no `Hello` (ele guarda só o hash; só dispositivo `Approved` vale). `401` sem token ou token desconhecido, `403` dispositivo pendente ou revogado. Sem isso qualquer um leria ou plantaria objeto.
+- **Respostas do host, fora do `server::handle`** (implementadas no `warden-server`, 2b-2b; o cliente trata como erro de disponibilidade ou de recusa): `507` cota de disco do dono esgotada; `408` corpo parado ou abaixo do piso de **64 KiB/s** (ociosidade de 10 s); `503` com `Retry-After` quando os permits por dono ou globais acabaram (sem fila). O cliente pode ver `ECONNRESET` em vez de `413`/`507` quando o hub recusa antes de ler um upload grande.
 - **Tetos:** blob até `MAX_FILE_BYTES` mais 1 KiB, manifest até `MAX_MANIFEST_JSON_BYTES` mais 1 KiB, página de listagem até 1 MiB e 1000 ids; o cliente desiste de uma listagem acima de 1 000 000 ids ou 10 000 páginas.
 - **Cliente (`HubStore`):**
   - `https` em qualquer host; `http` só em loopback (`127.0.0.1`, `::1`, `localhost`), ou por `allow_insecure_http` (o token anda em claro; o nome é de propósito). URL sem credenciais, caminho, consulta nem fragmento.
