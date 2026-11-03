@@ -2,6 +2,18 @@
 
 Mais recente no topo.
 
+### 2026-11-03 — Sessão 45 (Fase 2b-3, primeiro PR: `VaultKey::export_bytes`)
+
+- **Pedido**: `/projeto arca` mostrou a 2b-2b como pendente; o `/projeto warden` mostrou que ela já estava no Warden#78 (registro da arca defasado, corrigido aqui). Seguimos para a 2b-3. Plano aprovado em plan mode: **relay pelo hub com ECIES**, mesmo token do `Hello`, P-31(1) fica para a Fase 4. Dois PRs, arca primeiro.
+- **Feito**: `VaultKey::export_bytes() -> Zeroizing<[u8; 32]>` (`crypto.rs`), para o Warden cifrar a chave na entrega. ECIES e as rotas de pareamento ficam no Warden (`warden_truthid::crypto::{ecies_encrypt, ecies_decrypt}` já existem e o `warden-server` já depende do crate). Docs: `OVERVIEW.md`, `PENDING.md` (P-35), `SPEC-TECNICA.md` §4.2 (rotas do host já feitas; `507`, `408`, `503` e piso de 64 KiB/s registrados).
+- **Testes primeiro** (revisados pelo dono): 3 testes novos, os 3 falhavam no `todo!()`. Quebra proposital (devolver zeros) derrubou os 3; revertida.
+- **Verificado localmente**: `cargo test --workspace --locked` (424 da lib e 1 de integração), `clippy --all-targets -D warnings`, `fmt --check`. CI do PR: ver o PR.
+- **Não verificado**: nada do pareamento em si (vem no PR do Warden). O `Debug` da cópia exportada (`Zeroizing`) mostra os bytes; risco aceito pelo dono, só documentado no comentário.
+- **Risco de desenho registrado para o PR do Warden**: o hub escolhe qual chave pública entrega ao dispositivo antigo; sem um código de verificação conferido por uma pessoa nos dois dispositivos, um hub malicioso receberia a `vault_key`. É decisão minha no plano, ainda a revisar.
+- **Fica**: PR do Warden (rotas de oferta e concessão, ECIES, código de verificação); 2b-4; P-32 itens 2 a 4; P-09, P-22, P-25, P-26, P-29 a P-35.
+
+---
+
 ### 2026-11-02 — Sessão 44 (Fase 2b-2a: `arca-core::server`, o contrato servido sem rede)
 
 - **Pedido**: começar a 2b-2 (rotas `/arca/v1/` no `warden-server`). Plano aprovado em plan mode, em dois PRs (arca e warden); este é o primeiro. Decisões do dono: lógica no `arca-core`, uma pasta por dono no hub, só a 2b-2.
