@@ -2,6 +2,19 @@
 
 Mais recente no topo.
 
+### 2026-11-02 — Sessão 44 (Fase 2b-2a: `arca-core::server`, o contrato servido sem rede)
+
+- **Pedido**: começar a 2b-2 (rotas `/arca/v1/` no `warden-server`). Plano aprovado em plan mode, em dois PRs (arca e warden); este é o primeiro. Decisões do dono: lógica no `arca-core`, uma pasta por dono no hub, só a 2b-2.
+- **Testes primeiro** (revisados pelo dono): 25 testes novos, os 25 falhavam no `todo!()`; nenhum teste antigo foi alterado.
+- **Feito**: `server.rs` com `handle` e `body_limit` (sem rede, sem autenticação); `hub_testserver.rs` passou a usar o `handle` nas rotas honestas (os modos hostis continuam); `MAX_*_OBJECT_BYTES` movidos para `server` e reexportados por `hub`. Docs: `SPEC-TECNICA.md` §4.2, ADR 0015 (atualização), `PENDING.md` (P-35 item 9), `OVERVIEW.md`.
+- **Quebra proposital**: `>` por `>=` no teto de corpo derrubou `put_de_manifest_exatamente_no_teto_…`; `>` por `>=` no `after` derrubou `paginacao_percorre_tudo_…`; revertidas.
+- **Verificado localmente**: `cargo test --workspace --locked` (417 da lib e 1 de integração), `clippy --workspace --all-targets --locked -D warnings`, `fmt --check`, `cargo +1.88.0 check --workspace --locked`, `cargo check -p arca-core --no-default-features --locked`; `cargo tree --no-default-features` sem `reqwest` nem `aws-lc`. CI do PR: ver o PR.
+- **Auditoria** (`security-auditor`, a pedido do dono): sem crítico nem bypass. Corrigido no mesmo PR, com teste primeiro: `limit=+5` aceito (S-4, 1 teste falhava antes), `decode` antes do hash (S-1), listagem sem alocação por id (I-3 parcial), alvo cru no hub de teste, 4 testes novos (S-8; 3 já passavam, fixam comportamento). Quebra proposital no `partition_point` (`<=` por `<`) derrubou `paginacao_percorre_tudo_…`; revertida. **Ficou para o host (2b-2b):** I-1 (hash fora do executor), I-2 (memória), I-3 (cota por dono), S-2, S-3, S-5, S-6; contrato com o host escrito no `SPEC-TECNICA.md` §4.2 e em P-35 item 10.
+- **Verificado de novo depois da auditoria**: 421 testes da lib e 1 de integração, `clippy -D warnings`, `fmt --check`.
+- **Não verificado**: hub real (2b-2b); carga e concorrência (o custo de 0,68 s para 256 MiB é medida do auditor com `sha256sum`).
+- **Desvios de processo meus**: um `python3` vazio rodado por engano (não alterou nada); os ajustes do `rustfmt` foram aplicados à mão com `Edit`.
+- **Fica**: 2b-2b (warden), 2b-3, 2b-4; P-32 itens 2 a 4; P-09, P-22, P-25, P-26, P-29 a P-35.
+
 ### 2026-11-02 — Sessão 43 (P-32.b: `replicate` deixa de ser público, entra `Engine::push`)
 
 - **Pedido**: fechar o caminho inseguro que a auditoria da sessão 42 apontou (`replicate(remoto, local)` reabre o P-32) antes de escrever o cliente do hub. Plano aprovado em plan mode; levantamento: ninguém fora de `replicate.rs` chamava `replicate`.

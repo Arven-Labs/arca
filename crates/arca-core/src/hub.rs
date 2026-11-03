@@ -28,10 +28,8 @@ pub enum HubError {
     Client,
 }
 
-/// Teto de um blob no hub: o maior arquivo da arca mais o envelope e a margem.
-pub const MAX_BLOB_OBJECT_BYTES: u64 = crate::scan::MAX_FILE_BYTES + 1024;
-/// Teto de um manifest no hub.
-pub const MAX_MANIFEST_OBJECT_BYTES: u64 = crate::manifest::MAX_MANIFEST_JSON_BYTES as u64 + 1024;
+// Os tetos vivem em `server` (que compila sem a feature `hub`); aqui seguem na API do cliente.
+pub use crate::server::{MAX_BLOB_OBJECT_BYTES, MAX_MANIFEST_OBJECT_BYTES};
 /// Ids que uma listagem inteira pode somar antes de o cliente desistir.
 pub const MAX_LIST_IDS: usize = 1_000_000;
 

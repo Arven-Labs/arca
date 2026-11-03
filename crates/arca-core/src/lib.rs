@@ -22,6 +22,7 @@ pub mod object;
 pub mod recovery;
 pub mod replicate;
 pub mod scan;
+pub mod server;
 pub mod state;
 pub mod store;
 

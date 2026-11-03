@@ -101,7 +101,7 @@ Roots { vault, config, secret: Option<PathBuf> }   // classe sem pasta = desliga
 - **Limites**: sem instantâneo atômico do Vault (um arquivo alterado durante a leitura entra com o conteúdo lido, consistente com o próprio `sha256`); uma pasta de classe que existe mas está vazia por um disco desmontado ainda leva ao manifest sem aquela classe; reaproveitar um blob não confere se ele ainda está no armazenamento (a restauração acusa `MissingObject`); a proteção contra rollback (§6, "último manifest aceito") e a junção de pontas ficam para a Fase 2.
 
 ### 4.2 Contrato HTTP do hub (`/arca/v1/`, Fase 2b-1)
-**Implementado no cliente (`arca-core::hub::HubStore`) e num hub de referência só de testes (`hub_testserver.rs`). O `warden-server` ainda não tem as rotas (2b-2).** Mesma porta do hub, como o `/v1/` e o `/hooks/`.
+**Implementado no cliente (`arca-core::hub::HubStore`), no lado servidor sem rede e sem autenticação (`arca-core::server::{handle, body_limit}`, 2b-2a) e num hub de referência só de testes (`hub_testserver.rs`, que usa o `server::handle`). O `warden-server` ainda não tem as rotas (2b-2b): ele cuida do transporte e de quem pode chamar, e delega o resto ao `server::handle`.** Mesma porta do hub, como o `/v1/` e o `/hooks/`.
 
 | Operação | Pedido | Resposta |
 |---|---|---|
@@ -121,6 +121,13 @@ Roots { vault, config, secret: Option<PathBuf> }   // classe sem pasta = desliga
   - Confere o id antes da rede (`IdMismatch`), corta a leitura no teto de bytes (também sem `Content-Length`), valida cada id da listagem (hex, estritamente crescente, `next` que avança, página vazia com `next` recusada).
   - Erros: rede e 5xx = `Unavailable(...)`; `404` = `None`/`false`; `401`/`403` = `PermissionDenied`; falha de TLS = `ConnectionAborted` (distinta de `ConnectionRefused`); recusa do hub (`400`) e resposta acima do teto = `InvalidData`. O token nunca aparece em `Debug` nem em erro.
   - `delete` devolve `Unsupported` sem ir à rede. `consistent_list = true` descreve o contrato; **a presença no hub é alegada, não provada**: um hub hostil pode mentir em `put`, `has` e `list`. A integridade do que se lê é provada por `verified_get`.
+- **Contrato com quem hospeda o `server::handle`** (auditoria da 2b-2a; o `handle` não impõe nada disto, é do host):
+  - Passar o **alvo cru** da linha de requisição (caminho e consulta, `uri.path_and_query()`), nunca um caminho já decodificado (`Path<>` do axum decodifica `%xx`). Forma absoluta (`http://h/...`) cai em `404`.
+  - Limitar o tamanho do alvo e dos cabeçalhos antes de chamar (o `handle` é O(tamanho do alvo)).
+  - Autenticar antes de ler o corpo; recusar com `413` quando `Content-Length` passar de `body_limit`, **só para `PUT` de objeto com id válido**. Nos outros casos, chamar o `handle` com corpo vazio e deixar que ele diga `400`, `404` ou `405`, em vez de um `413` enganoso.
+  - `GET` e `HEAD` com corpo: o `handle` o ignora; o host deve descartá-lo ou recusá-lo, para não deixar bytes pendentes numa conexão reaproveitada.
+  - Escolher o `DiskStore` do dono do token: o isolamento entre donos depende só disto.
+  - **Custo por requisição:** o `handle` hasheia o objeto inteiro (até 256 MiB, ~0,7 s) na thread que o chama e mantém o corpo todo em memória (cerca de 2× o tamanho num `PUT`). Rodar o `handle` fora do executor que serve os outros pedidos (`spawn_blocking` ou pool próprio), com **semáforo de concorrência por dono e global**, e cota de objetos e de bytes por dono. Sem isso, um dispositivo aprovado derruba o hub (I-1, I-2 e I-3 da auditoria; P-35 itens 9 e 10).
 - **Limites** em P-35 (hub real não testado, TLS real só por falha, `aws-lc-rs`, `localhost` pelo resolvedor).
 
 ## 5. Envelope e manifest
