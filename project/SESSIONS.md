@@ -2,6 +2,16 @@
 
 Mais recente no topo.
 
+### 2026-11-03 — Sessão 46 (2b-3: registro do pareamento, ADR 0016)
+
+- **Pedido**: depois do arca#51 e do Warden#79 (as rotas de pareamento no hub), fechar o registro da arca. PR só de docs.
+- **Feito**: ADR 0016 (relay pelo hub com ECIES, as duas conferências por uma pessoa, alternativas descartadas); `SPEC-TECNICA.md` §4.2 (rotas de pareamento) e §11; `PENDING.md` (P-35) e `OVERVIEW.md` (2b-3: rotas feitas, falta a interface e o cliente); nota no ADR 0015 (a previsão de reaproveitar o pareamento LAN foi trocada).
+- **Verificado**: só leitura dos textos contra o código do Warden#79 (rotas, status, limites). Nenhum código nem teste mudou.
+- **Não verificado**: CI do PR; as tabelas foram escritas a partir do que li no Warden, não rodei nada.
+- **Fica**: a interface dos dois códigos e o cliente (Warden P182 item 1, **antes de ligar qualquer cliente às rotas**); 2b-4; P-31(1) e P-32 (Fase 4); P-09, P-22, P-25, P-26, P-29 a P-35.
+
+---
+
 ### 2026-11-03 — Sessão 45 (Fase 2b-3, primeiro PR: `VaultKey::export_bytes`)
 
 - **Pedido**: `/projeto arca` mostrou a 2b-2b como pendente; o `/projeto warden` mostrou que ela já estava no Warden#78 (registro da arca defasado, corrigido aqui). Seguimos para a 2b-3. Plano aprovado em plan mode: **relay pelo hub com ECIES**, mesmo token do `Hello`, P-31(1) fica para a Fase 4. Dois PRs, arca primeiro.

@@ -114,6 +114,16 @@ Roots { vault, config, secret: Option<PathBuf> }   // classe sem pasta = desliga
 - `kind` = `blob` ou `manifest`; `hex` = 64 hex minúsculos = SHA-256 do corpo (o mesmo `ObjectId` em texto, `blob/<hex>`). O hub confere o hash (`400`) e **só aceita envelope válido do tipo do `kind`** (o mesmo filtro do `replicate`, sem chave). Isso barra lixo trivial, não um cabeçalho forjado com corpo aleatório (o hub não tem a chave): quem puxa do hub usa `Engine::pull`, que recusa o forjado (P-32).
 - **Autenticação em toda rota:** `Authorization: Bearer <token do dispositivo>`, o token que o hub já emite no `Hello` (ele guarda só o hash; só dispositivo `Approved` vale). `401` sem token ou token desconhecido, `403` dispositivo pendente ou revogado. Sem isso qualquer um leria ou plantaria objeto.
 - **Respostas do host, fora do `server::handle`** (implementadas no `warden-server`, 2b-2b; o cliente trata como erro de disponibilidade ou de recusa): `507` cota de disco do dono esgotada; `408` corpo parado ou abaixo do piso de **64 KiB/s** (ociosidade de 10 s); `503` com `Retry-After` quando os permits por dono ou globais acabaram (sem fila). O cliente pode ver `ECONNRESET` em vez de `413`/`507` quando o hub recusa antes de ler um upload grande.
+- **Pareamento (rotas do host, não do `server::handle`; ADR 0016):** entrega da `vault_key` a um dispositivo novo por relay. Mesma autenticação (só `Approved`), mesmo dono. Oferta e concessão expiram em 10 min.
+
+  | Quem | Pedido | Resposta |
+  |---|---|---|
+  | dispositivo novo (B) | `PUT /arca/v1/pairing/offer`, corpo `{"public_key": "<secp256k1 SEC1 hex>"}` | `204`; `400` chave inválida; `413` acima de 4 KiB; `507` com 8 ofertas esperando |
+  | outro dispositivo (A) | `GET /arca/v1/pairing/offers` | `200` `{"offers": [{"device_id", "public_key"}]}`: ofertas vivas do dono, de dispositivos ainda aprovados, chave na forma comprimida minúscula |
+  | A | `PUT /arca/v1/pairing/grant/{device_id}?key=<chave que A viu>`, corpo = ECIES da `vault_key` | `204` (a oferta é consumida); `400` sem `key`, chave inválida ou para si mesmo; `404` sem oferta viva; `409` a oferta agora tem outra chave (e continua) |
+  | B | `GET /arca/v1/pairing/grant` | `200` com o corpo, **uma vez**; depois `404` |
+
+  Conferências por uma pessoa, calculadas localmente (o hub não as vê): `verification_code(device_id, chave pública)` antes de A conceder, `key_fingerprint(vault_key)` depois de B receber, cada um com 64 bits em 4 grupos de 4 hex. **Sem elas o hub poderia trocar a chave de B ou entregar uma `vault_key` própria.**
 - **Tetos:** blob até `MAX_FILE_BYTES` mais 1 KiB, manifest até `MAX_MANIFEST_JSON_BYTES` mais 1 KiB, página de listagem até 1 MiB e 1000 ids; o cliente desiste de uma listagem acima de 1 000 000 ids ou 10 000 páginas.
 - **Cliente (`HubStore`):**
   - `https` em qualquer host; `http` só em loopback (`127.0.0.1`, `::1`, `localhost`), ou por `allow_insecure_http` (o token anda em claro; o nome é de propósito). URL sem credenciais, caminho, consulta nem fragmento.
@@ -274,6 +284,6 @@ Tudo que vem de um backend ou do disco é entrada não confiável. Testes obriga
 
 ## 11. O que esta spec não resolve
 - Coleta de lixo: adiada para a Fase 3, a v1 guarda tudo (ADR 0011). Limite de tamanho por objeto.
-- Fluxo de pareamento (Fase 2, 2b-3): como o dispositivo ganha o token do hub e como a `vault_key` chega a um dispositivo novo. O contrato HTTP do hub está em §4.2.
+- Fluxo de pareamento (Fase 2, 2b-3): decidido no ADR 0016 e implementado no hub (Warden#79, rotas em §4.2); falta o cliente e a interface que mostra e confere os dois códigos (Warden P182). O token do hub vem do `Hello` do Warden (ADR 0015).
 - Os rótulos exatos do HKDF (Fase 1, ADR 0009) e a configuração por classe no Warden (Fase 2, ADR 0010).
 - Revisão de segurança independente (Fase 4). Nada aqui foi implementado nem testado; é desenho.

@@ -18,7 +18,7 @@ O hub já fala HTTP na mesma porta (`/v1/` com chave de API, `/hooks/` com token
   - **Tetos em tudo:** bytes por objeto (também sem `Content-Length`), 1 MiB por página de ids, 1 000 000 ids e 10 000 páginas por listagem, e **prazo total por operação** (30 s mais o tempo de mover os bytes a 256 KiB/s). Descartado o `read_timeout`: reinicia a cada pedaço (uma resposta em gotas nunca estoura) e inclui o envio do corpo (um blob grande numa linha lenta nunca sobe).
   - Listagem validada: ids em hex, estritamente crescentes, `next` que avança, página vazia com `next` recusada.
   - O token nunca aparece em `Debug`, erro ou log. Falha de TLS sai como `ConnectionAborted`, distinta de `ConnectionRefused`, para a interface não empurrar a pessoa para `allow_insecure_http`.
-- **O que é do hub e do Warden, não da arca:** as rotas no `warden-server` (2b-2), o pareamento do dispositivo e a entrega da `vault_key` a um dispositivo novo (2b-3, que também reaproveita o código de pareamento do `warden-sync` por LAN) e o modo "arca" com interruptor por Vault (2b-4, ADR 0012).
+- **O que é do hub e do Warden, não da arca:** as rotas no `warden-server` (2b-2), o pareamento do dispositivo e a entrega da `vault_key` a um dispositivo novo (2b-3; **decidido de outro jeito no ADR 0016**: relay pelo hub com ECIES, em vez de reaproveitar o pareamento por LAN do `warden-sync`) e o modo "arca" com interruptor por Vault (2b-4, ADR 0012).
 
 ## Alternativas descartadas
 - **Mensagens novas no protocolo WebSocket do Warden** (`ServerMessage` do `warden-server-protocol`): reaproveitaria o canal já autenticado, mas amarra a arca ao protocolo do Warden (o ADR 0003 quer a camada genérica para o Anchor), perde `curl` para depurar e muda o crate de protocolo do Warden a cada ajuste.
