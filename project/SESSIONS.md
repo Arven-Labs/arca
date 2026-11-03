@@ -2,6 +2,15 @@
 
 Mais recente no topo.
 
+### 2026-11-03 — Sessão 47 (2b-3: registro do CLI do pareamento)
+
+- **Pedido**: `/projeto arca` apontou a interface dos códigos como pendência; o trabalho vive no Warden. Feito lá o PR #81 (`/arca pair offer` e `/arca pair grant`, fluxo em `warden_sync::arca_pairing_flow`, token pedido no comando); este PR só atualiza o registro da arca. PR só de docs, nenhum código nem teste mudou.
+- **Verificado**: Warden#81 mesclado em 2026-11-03 com o CI verde (Rust, Android, Mobile, Browser against a real hub, guard e Changed areas passaram; Frontend pulado). Testes do fluxo: 7 de ponta a ponta contra o hub real, escritos antes e falhando no `todo!()`.
+- **Não verificado**: a tela real do CLI (campo mascarado, cartões) nunca foi rodada; falta passada manual com dois terminais. O PR do Warden não passou pelo `security-auditor`. CI deste PR: ver o PR.
+- **Fica**: a passada manual; desktop, mobile e web (Warden P182); 2b-4; P-31(1) e P-32 (Fase 4); P-09, P-22, P-25, P-26, P-29 a P-35.
+
+---
+
 ### 2026-11-03 — Sessão 46 (2b-3: registro do pareamento, ADR 0016)
 
 - **Pedido**: depois do arca#51 e do Warden#79 (as rotas de pareamento no hub), fechar o registro da arca. PR só de docs.
