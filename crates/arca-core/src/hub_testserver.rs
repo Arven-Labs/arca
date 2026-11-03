@@ -2,16 +2,17 @@
 //! (`SPEC-TECNICA.md` §4.2) e sabe se comportar mal de propósito (mentir, redirecionar,
 //! devolver listas hostis) para provar as defesas do `HubStore`.
 
-use crate::envelope::Header;
 use crate::object::{ObjectId, ObjectKind};
+use crate::server;
+use crate::store::{BlobStore, Capabilities, StoreError};
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::{header, HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
+use std::future::{ready, Future};
 use std::sync::{Arc, Mutex};
 
 /// O que um token pode.
@@ -156,8 +157,86 @@ fn gate(state: &Shared, method: &Method, uri: &Uri, headers: &HeaderMap) -> Opti
     }
 }
 
-fn parse_id(kind: &str, hex: &str) -> Option<ObjectId> {
-    format!("{kind}/{hex}").parse().ok()
+/// Os objetos do `HubState` como um `BlobStore`, para o hub de teste usar o mesmo
+/// `server::handle` que o hub real. O `Mutex` nunca fica preso através de um `await`.
+struct StateStore(Shared);
+
+impl BlobStore for StateStore {
+    fn put(
+        &self,
+        id: &ObjectId,
+        bytes: &[u8],
+    ) -> impl Future<Output = Result<(), StoreError>> + Send {
+        self.0
+            .lock()
+            .unwrap()
+            .objects
+            .insert(id.to_string(), bytes.to_vec());
+        ready(Ok(()))
+    }
+
+    fn get(
+        &self,
+        id: &ObjectId,
+    ) -> impl Future<Output = Result<Option<Vec<u8>>, StoreError>> + Send {
+        ready(Ok(self
+            .0
+            .lock()
+            .unwrap()
+            .objects
+            .get(&id.to_string())
+            .cloned()))
+    }
+
+    fn has(&self, id: &ObjectId) -> impl Future<Output = Result<bool, StoreError>> + Send {
+        ready(Ok(self
+            .0
+            .lock()
+            .unwrap()
+            .objects
+            .contains_key(&id.to_string())))
+    }
+
+    fn list(
+        &self,
+        kind: ObjectKind,
+    ) -> impl Future<Output = Result<Vec<ObjectId>, StoreError>> + Send {
+        let prefix = format!("{}/", kind.as_str());
+        let ids = self
+            .0
+            .lock()
+            .unwrap()
+            .objects
+            .keys()
+            .filter(|k| k.starts_with(&prefix))
+            .filter_map(|k| k.parse().ok())
+            .collect();
+        ready(Ok(ids))
+    }
+
+    fn delete(&self, _: &ObjectId) -> impl Future<Output = Result<(), StoreError>> + Send {
+        ready(Ok(()))
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            consistent_list: true,
+        }
+    }
+}
+
+/// Passa o pedido pelo `server::handle` e devolve a resposta HTTP. O alvo é a linha de
+/// requisição crua (caminho e consulta), como o `warden-server` fará; nada de `Path<>`, que
+/// decodifica `%xx`.
+async fn serve(state: &Shared, method: &Method, uri: &Uri, body: &[u8]) -> Response {
+    let target = uri.path_and_query().map_or("", |p| p.as_str());
+    let reply = server::handle(&StateStore(state.clone()), method.as_str(), target, body).await;
+    (
+        StatusCode::from_u16(reply.status).unwrap(),
+        [(header::CONTENT_TYPE, reply.content_type)],
+        reply.body,
+    )
+        .into_response()
 }
 
 async fn put_object(
@@ -165,28 +244,13 @@ async fn put_object(
     method: Method,
     uri: Uri,
     headers: HeaderMap,
-    Path((kind, hex)): Path<(String, String)>,
+    Path(_): Path<(String, String)>,
     body: Bytes,
 ) -> Response {
     if let Some(stop) = gate(&state, &method, &uri, &headers) {
         return stop;
     }
-    let Some(id) = parse_id(&kind, &hex) else {
-        return (StatusCode::BAD_REQUEST, "bad_id").into_response();
-    };
-    if Sha256::digest(&body)[..] != id.hash {
-        return (StatusCode::BAD_REQUEST, "hash_mismatch").into_response();
-    }
-    let envelope_ok = matches!(Header::decode(&body), Ok((h, _)) if h.kind == id.kind);
-    if !envelope_ok {
-        return (StatusCode::BAD_REQUEST, "bad_envelope").into_response();
-    }
-    state
-        .lock()
-        .unwrap()
-        .objects
-        .insert(id.to_string(), body.to_vec());
-    StatusCode::NO_CONTENT.into_response()
+    serve(&state, &method, &uri, &body).await
 }
 
 async fn get_object(
@@ -194,22 +258,17 @@ async fn get_object(
     method: Method,
     uri: Uri,
     headers: HeaderMap,
-    Path((kind, hex)): Path<(String, String)>,
+    Path(_): Path<(String, String)>,
 ) -> Response {
     if let Some(stop) = gate(&state, &method, &uri, &headers) {
         return stop;
     }
-    let Some(id) = parse_id(&kind, &hex) else {
-        return (StatusCode::BAD_REQUEST, "bad_id").into_response();
-    };
-    let st = state.lock().unwrap();
-    let Some(bytes) = st.objects.get(&id.to_string()) else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    if st.lie_on_get {
+    let lie = state.lock().unwrap().lie_on_get;
+    let response = serve(&state, &method, &uri, b"").await;
+    if lie && response.status() == StatusCode::OK {
         return (StatusCode::OK, b"outros bytes".to_vec()).into_response();
     }
-    (StatusCode::OK, bytes.clone()).into_response()
+    response
 }
 
 async fn refuse_delete(
@@ -221,7 +280,7 @@ async fn refuse_delete(
     if let Some(stop) = gate(&state, &method, &uri, &headers) {
         return stop;
     }
-    StatusCode::METHOD_NOT_ALLOWED.into_response()
+    serve(&state, &method, &uri, b"").await
 }
 
 async fn list_objects(
@@ -240,33 +299,38 @@ async fn list_objects(
         .filter_map(|pair| pair.split_once('='))
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
-    let kind = match query.get("kind").map(String::as_str) {
-        Some("blob") => ObjectKind::Blob,
-        Some("manifest") => ObjectKind::Manifest,
-        _ => return (StatusCode::BAD_REQUEST, "bad_kind").into_response(),
-    };
     let after = query.get("after").cloned();
     let asked = query
         .get("limit")
         .and_then(|l| l.parse::<usize>().ok())
         .unwrap_or(1000);
-    let st = state.lock().unwrap();
-    let limit = st.page_max.map_or(asked, |max| max.min(asked));
-    let mut ids: Vec<String> = st
-        .objects
-        .keys()
-        .filter_map(|k| {
-            k.strip_prefix(&format!("{}/", kind.as_str()))
-                .map(str::to_string)
-        })
-        .filter(|hex| after.as_ref().is_none_or(|a| hex > a))
+    let (page_max, list_mode) = {
+        let st = state.lock().unwrap();
+        (st.page_max, st.list_mode)
+    };
+    let limit = page_max.map_or(asked, |max| max.min(asked));
+    // A página honesta vem do `server::handle`; os modos hostis a estragam depois.
+    let mut target = format!(
+        "/arca/v1/objects?kind={}&limit={limit}",
+        query.get("kind").map_or("", String::as_str)
+    );
+    if let Some(after) = &after {
+        target.push_str(&format!("&after={after}"));
+    }
+    let honest = server::handle(&StateStore(state.clone()), "GET", &target, b"").await;
+    if honest.status != 200 {
+        return (StatusCode::from_u16(honest.status).unwrap(), honest.body).into_response();
+    }
+    let page: serde_json::Value = serde_json::from_slice(&honest.body).unwrap();
+    let mut ids: Vec<String> = page["ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
         .collect();
-    ids.sort();
-    let more = ids.len() > limit;
-    ids.truncate(limit);
-    let mut next = if more { ids.last().cloned() } else { None };
+    let mut next = page["next"].as_str().map(str::to_string);
 
-    match st.list_mode {
+    match list_mode {
         ListMode::Honest => {}
         ListMode::NotHex => ids.insert(ids.len() / 2, "../../etc/passwd".to_string()),
         ListMode::Unsorted => ids.reverse(),
