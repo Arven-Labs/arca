@@ -2,6 +2,29 @@
 
 Mais recente no topo.
 
+### 2026-11-04 — Sessão 48 (2b-3: passada do CLI do pareamento por driver de pty)
+
+- **Pedido**: a primeira pendência do `/projeto arca` (passada manual do `/arca pair offer` e `/arca pair grant`). Plano aprovado em plan mode; o dono escolheu automatizar por pty e, quando a etapa 0 achou que não há como obter token de dispositivo pelo terminal, um `example` Rust descartável. PR só de docs: nenhum código do arca nem do Warden mudou (o `example` foi apagado, nunca commitado).
+- **Como foi feito**: hub `warden-server serve --arca` em loopback, três `XDG_CONFIG_HOME` temporários (hub, A com chave por `sync init`, B vazio), tokens de teste, o binário `warden` real numa pty (driver em Python de stdlib, que responde ao `ESC[6n` de posição do cursor) e a tela lida por regex depois de tirar as sequências ANSI. Tudo apagado no fim.
+- **Resultado (8 cenários, todos como esperado)**:
+
+| # | Cenário | Observado |
+|---|---|---|
+| 1 | Caminho feliz | B mostrou o código, A pediu e aceitou, B pediu a impressão, "key stored"; o `vault_key` gravado em B é igual ao de A |
+| 2 | Código errado em A | "that is not the code of this offer"; A não mostrou impressão, B sem chave |
+| 3 | Impressão errada em B | "that is not the fingerprint of the key that arrived; nothing was stored"; sem `sync_secrets.json` |
+| 4 | Ctrl+D na espera de B | "cancelled", sem chave |
+| 5 | Ctrl+C na espera de B | "cancelled" (é tecla no modo raw, o processo segue vivo), sem chave |
+| 6 | `zzzz` digitado durante a espera | não entrou no campo da impressão; a impressão correta foi aceita |
+| 7 | Hub morto durante a espera | "the hub call failed: error sending request" após 4,8 s (poll de 2 s) |
+| 8 | B já tem chave | "this device already has a key; pairing is for a new device", sem código publicado |
+
+- **Não verificado**: a aparência da tela (o driver lê texto, não pixels) e um terminal real: a pty é falsa, então o item i8 do P182 (descarte de teclas) fica verificado só nesse modelo. Cenário 7: provei que aborta com o hub morto, não que tolera exatamente 2 falhas e aborta na 3ª (isso segue só no teste de unidade). Nenhum teste cobre código ou impressão colados (P182 i3). Só Linux, só `http` em loopback.
+- **Achado de uso, não de código**: não há como obter um token de dispositivo pelo terminal; o CLI pede o token, mas ele só sai do `Hello` por WebSocket (ou da biblioteca). Para o dono usar o `/arca pair` de verdade falta esse caminho, e eu não conferi qual é o oficial. Ficou como pergunta no P182 do Warden.
+- **Fica**: desktop, mobile e web (Warden P182); 2b-4; P-31(1) e P-32 (Fase 4); P-09, P-22, P-25, P-26, P-29 a P-35.
+
+---
+
 ### 2026-11-03 — Sessão 47 (2b-3: registro do CLI do pareamento)
 
 - **Pedido**: `/projeto arca` apontou a interface dos códigos como pendência; o trabalho vive no Warden. Feito lá o PR #81 (`/arca pair offer` e `/arca pair grant`, fluxo em `warden_sync::arca_pairing_flow`, token pedido no comando); este PR só atualiza o registro da arca. PR só de docs, nenhum código nem teste mudou.
