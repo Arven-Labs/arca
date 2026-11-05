@@ -2,6 +2,17 @@
 
 Mais recente no topo.
 
+### 2026-11-05 — Sessão 49 (2b-4, fatia 1: núcleo do modo "arca" no `warden-sync`)
+
+- **Pedido**: a 2b-4 (ADR 0012), escolhida no `/projeto arca`. Plano aprovado em plan mode; o dono escolheu: núcleo no `warden-sync` sem UI, interruptor em arquivo novo, só a classe `vault`. O código está no Warden ([Warden#87](https://github.com/Arven-Labs/warden/pull/87)); este PR só registra. Nenhum código da arca mudou (`rev` segue `69fec71`).
+- **Feito (no Warden)**: `arca_mode.rs` (interruptor), `arca_sync.rs` (`arca_enable`, `arca_sync`) atrás da feature `arca`, e a recusa dos motores de Arweave e git com o modo ligado. Primeira vez que o `Engine::snapshot/pull/merge/apply/push` roda de verdade num consumidor, contra o hub real, com dois dispositivos que convergem e conflito que guarda as duas versões.
+- **Achado de desenho para a arca**: o `Engine` não guarda qual manifest a pasta reflete, e `snapshot` constrói sobre a ponta. Um ciclo parado entre `merge` e `apply` (por exemplo um `apply` recusado por arquivo virando pasta, P-29 (4)) faz o snapshot seguinte publicar os arquivos ainda não recebidos como apagados. O Warden resolveu guardando o id num arquivo próprio. Se mais consumidores aparecerem, vale decidir se isso entra no `DeviceState` da arca; não fiz nada nesta sessão.
+- **Resultado**: 18 testes novos no Warden (6 do guarda, 12 de hub); antes de implementar falhavam 11 de 11 de hub e 4 de 6 do guarda; duas quebras de propósito foram pegas só pelo teste certo. CI do #87 todo verde (`Rust (clippy and tests)`, Android, Mobile, `Browser against a real hub`, `guard`).
+- **Não verificado**: hub real, TLS real, Android em aparelho, macOS e Windows; o teste de separação dos rótulos HKDF (ADR 0009) não saiu, porque a arca não expõe as subchaves.
+- **Fica**: pontos de entrada, `SyncRunner`, `config` e `secret` (Warden P183); P-31(1) e P-32 (Fase 4); P-09, P-22, P-25, P-26, P-29 a P-35.
+
+---
+
 ### 2026-11-04 — Sessão 48 (2b-3: passada do CLI do pareamento por driver de pty)
 
 - **Pedido**: a primeira pendência do `/projeto arca` (passada manual do `/arca pair offer` e `/arca pair grant`). Plano aprovado em plan mode; o dono escolheu automatizar por pty e, quando a etapa 0 achou que não há como obter token de dispositivo pelo terminal, um `example` Rust descartável. PR só de docs: nenhum código do arca nem do Warden mudou (o `example` foi apagado, nunca commitado).
