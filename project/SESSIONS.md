@@ -2,6 +2,14 @@
 
 Mais recente no topo.
 
+### 2026-11-06 — Sessão 52 (2b-4, fatia 4: o seletor de hub do sync automático)
+
+- **Pedido**: a primeira pendência da Sessão 51 (seletor de hub explícito). Plano aprovado em plan mode, em 1 PR no Warden ([#92](https://github.com/Arven-Labs/warden/pull/92)); este PR só registra. Nenhum código da arca mudou (`rev` segue `69fec71`). O dono escolheu: o seletor grava ao trocar (sem botão extra) e, se o hub gravado foi removido, a tela avisa e não mexe no arquivo.
+- **Feito (no Warden)**: `ModeStatus.hubId`; `set_hub` e o comando `arca_mode_set_hub` (confere o hub em `hubs.json`, grava via `arca_set_hub`, chama `resume_arca`); `hubChoice` (o seletor abre no hub gravado, nunca no primeiro da lista); linha "Automatic sync uses …", aviso de hub removido, "Sync now" desligado sem hub escolhido; textos novos em en e pt-BR (o `arca.onHint` não diz mais "não roda sozinho"); a mensagem do runner para "sem hub" agora aponta a seção "Arca mode".
+- **Resultado**: CI verde no #92 (`Rust (clippy and tests)`, Android, Mobile, `Frontend (desktop)`, `Browser against a real hub`, `Desktop screens in a browser`, `guard`). Testes novos: 4 no Rust do desktop, 4 de `hubChoice` e 4 de tela (e2e com backend falso). Antes de implementar nada compilava ou achava o export. Três quebras de propósito (`set_hub` sem conferir o hub; `hubChoice` ignorando o hub removido; a tela sem reler o status), todas pegas e revertidas.
+- **Não verificado**: app Tauri real contra um hub real com o loop rodando; Windows e macOS; tema escuro (as capturas do e2e foram geradas e não foram olhadas); o e2e usa backend falso, então o registro do comando no `invoke_handler` foi conferido à mão (não há guard automático).
+- **Fica**: variante `Arca` no backend do relatório (protocolo e web); CLI, `warden-server`, mobile; `config` e `secret`; a linha da Fase 2 no `OVERVIEW.md` (defasada desde as Sessões 49 e 50) e o P183 do Warden (ainda cita o loop e o seletor como "falta"); P-31(1) e P-32 (Fase 4); P-09, P-22, P-25, P-26, P-29 a P-35.
+
 ### 2026-11-06 — Sessão 51 (2b-4, fatia 3: o loop automático do modo "arca" no desktop)
 
 - **Pedido**: a primeira pendência do `/projeto arca` (o loop automático da arca). Plano aprovado em plan mode, em 2 PRs no Warden; o dono escolheu: hub guardado em `arca_mode.json`, token rejeitado para o loop **sem apagar o token**, gatilho dentro do `SyncRunner::round`. O código está no Warden ([#90](https://github.com/Arven-Labs/warden/pull/90) hub no interruptor, [#91](https://github.com/Arven-Labs/warden/pull/91) o loop); este PR só registra. Nenhum código da arca mudou (`rev` segue `69fec71`).
