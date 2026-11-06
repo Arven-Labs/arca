@@ -2,6 +2,15 @@
 
 Mais recente no topo.
 
+### 2026-11-05 — Sessão 50 (2b-4, fatia 2: o modo "arca" no desktop)
+
+- **Pedido**: a próxima fatia da 2b-4. Plano aprovado em plan mode, em 2 PRs; o dono escolheu o desktop como ponto de entrada (o único que já tem URL e token do hub), só manual, e, na dúvida sobre `SyncBackend::Arca` (espalharia por `warden-server`, protocolo e web), **sem variante nova**. O código está no Warden ([#88](https://github.com/Arven-Labs/warden/pull/88) backend, [#89](https://github.com/Arven-Labs/warden/pull/89) tela); este PR só registra. Nenhum código da arca mudou (`rev` segue `69fec71`).
+- **Feito (no Warden)**: comandos `arca_mode_status`, `arca_mode_enable`, `arca_sync_run(hub_id)`; ligar faz o Pull pelo `warden-sync` antes (ADR 0012, passo a) e não liga se ele falhar; o `SyncRunner` pula em silêncio o Vault em modo arca; a seção "Arca mode" no Sync, com ligar em dois cliques (a ação é irreversível) e "Sync now".
+- **Achado**: o desktop liga a feature `arca` do `warden-sync` e passa a compilar o cliente HTTP da arca, cujo TLS é `aws-lc-rs` (código C, P-35 limite 2). Só o Linux compilou aqui; o CI automático **não** cobre Windows nem macOS (o `windows-check.yml` é manual, e `build.yml` roda em tag).
+- **Resultado**: CI verde nos dois PRs (no #89 Rust, Android e Mobile foram pulados porque não houve mudança neles). Testes novos: 11 no desktop e 1 no runner (#88), 10 de lógica e 7 de E2E (#89). Quebras de propósito feitas e revertidas nos dois PRs.
+- **Não verificado**: Windows e macOS; sync de ponta a ponta no desktop com o app de verdade (só no `warden-server/tests/arca_mode.rs` e com o backend de mentira do E2E); o runner com Arweave pareado e o modo ligado (só o ramo git foi testado); o tema escuro da seção.
+- **Fica**: loop automático da arca (guardar o hub escolhido e decidir o que fazer com token expirado); variante `Arca` com protocolo e web; CLI, `warden-server`, mobile; `config` e `secret`; P-31(1) e P-32 (Fase 4); P-09, P-22, P-25, P-26, P-29 a P-35.
+
 ### 2026-11-05 — Sessão 49 (2b-4, fatia 1: núcleo do modo "arca" no `warden-sync`)
 
 - **Pedido**: a 2b-4 (ADR 0012), escolhida no `/projeto arca`. Plano aprovado em plan mode; o dono escolheu: núcleo no `warden-sync` sem UI, interruptor em arquivo novo, só a classe `vault`. O código está no Warden ([Warden#87](https://github.com/Arven-Labs/warden/pull/87)); este PR só registra. Nenhum código da arca mudou (`rev` segue `69fec71`).
