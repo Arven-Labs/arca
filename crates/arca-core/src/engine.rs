@@ -4795,4 +4795,32 @@ mod tests {
         assert_eq!(tree(&secret).keys().collect::<Vec<_>>(), ["ok.json"]);
         assert_eq!(tree(&vault).keys().collect::<Vec<_>>(), ["nota.md"]);
     }
+
+    #[tokio::test]
+    async fn a_refused_entry_that_the_next_manifest_drops_is_not_removed_from_disk() {
+        let rig = Rig::new();
+        let secret = rig.dir("src-secret");
+        write(&secret, "ok.json", b"{}");
+        write(&secret, "y.bak", b"b");
+        let eng = rig.engine("origin");
+        let roots = roots_of(Class::Secret, &secret);
+        let (v1, ..) = created(eng.snapshot(&roots, 1).await.unwrap());
+        fs::remove_file(secret.join("y.bak")).unwrap();
+        let (v2, ..) = created(eng.snapshot(&roots, 2).await.unwrap());
+
+        // aqui `y.bak` é um arquivo da pessoa, que nunca foi aplicado pela arca
+        let target = rig.dir("dst-secret");
+        write(&target, "ok.json", b"{}");
+        write(&target, "y.bak", b"da pessoa");
+
+        let applied = rig
+            .engine("pc")
+            .with_entry_filter(Class::Secret, small_flat_json)
+            .apply(Some(&v1), &v2, &roots_of(Class::Secret, &target))
+            .await
+            .unwrap();
+
+        assert_eq!(applied.created + applied.updated + applied.removed, 0);
+        assert_eq!(fs::read(target.join("y.bak")).unwrap(), b"da pessoa");
+    }
 }
