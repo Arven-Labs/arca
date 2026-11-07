@@ -2,6 +2,15 @@
 
 Mais recente no topo.
 
+### 2026-11-07 — Sessão 56 (I-2 da auditoria da classe `secret`: filtro de entradas por classe, **parada no meio**)
+
+- **Pedido**: "sim" ao plano do I-2. Plano aprovado em plan mode, em 2 PRs de código mais o de registro; o dono escolheu o filtro de entradas na arca. A sessão foi encerrada a pedido do dono antes do PR do Warden terminar.
+- **Feito**: [arca#64](https://github.com/Arven-Labs/arca/pull/64), mesclado (`44c9e6a`): `Engine::with_entry_filter` e o tipo `EntryFilter`; `apply` e `restore` ignoram as entradas recusadas (pula o caminho se a de `from` ou a de `to` é recusada; vale antes do `ReservedName`); parágrafo novo em `SPEC-TECNICA.md`. CI da `main` da arca verde no `44c9e6a` (`Rust` e `CI Private Files`).
+- **Resultado (arca#64)**: com o esqueleto que aceitava tudo, 4 dos 5 testes novos falharam e os 424 antigos passaram. Duas quebras de propósito, cada uma pega por um teste só e revertida: tratar "recusada" como "ausente" e filtrar só o destino. Antes disso o `rustfmt` e o `clippy` (`type_complexity`) barraram duas tentativas minhas, corrigidas no próprio PR.
+- **Em andamento**: [Warden#96](https://github.com/Arven-Labs/warden/pull/96), **rascunho, não mesclar**, branch `i2-filtro-de-logins`: só os testes novos (4, mais o antigo "not applied" reescrito) e o campo `ArcaSyncReport.secret_ignored` como esqueleto. Primeira rodada no CI: 4 falhas, 3 por bug do meu helper `publish_as_peer` (`Io(NotFound)`, pasta do peer inexistente; corrigido em `f8560df6`) e 1 pelo motivo certo. O CI do `f8560df6` **não foi conferido até o fim**.
+- **Não verificado**: tudo do lado do Warden (a correção não foi escrita); o teste "peer republica a entrada estranha no ciclo seguinte" foi cortado do plano; Windows e macOS; nada foi rodado localmente (só CI).
+- **Fica (para retomar)**: no Warden#96, conferir que os 4 testes falham pelo motivo certo; subir o `rev` da arca para `44c9e6a8e2c1e3fad37f8a5af2974975bb6d98e0` (`warden-sync/Cargo.toml`, `warden-server/Cargo.toml` x2, `Cargo.lock`); `.with_entry_filter(Class::Secret, is_login_entry)` em `arca_engine()` (`is_login_file_name` e até 1 MiB); trocar o `bail!` por `secret_ignored`; quebras de propósito; corpo do PR no modelo; marcar como pronto. Depois: o resto do P-36 (M-1, consentimento, guard com canonicalização, sugestões, `recovered_kept` e `secret_ignored` na tela do desktop); P-09, P-22, P-25, P-26, P-29 a P-36.
+
 ### 2026-11-07 — Sessão 55 (I-1 da auditoria da classe `secret`: o guard tolera os arquivos de trabalho do arca)
 
 - **Pedido**: "vamos no I-1". Plano aprovado em plan mode, em 2 PRs de código mais este de registro: [arca#62](https://github.com/Arven-Labs/arca/pull/62) (`is_reserved_name` pública, `rev` da arca passa de `69fec71` para `e9179c5`) e [Warden#95](https://github.com/Arven-Labs/warden/pull/95). O dono escolheu expor a regra na arca e reportar o `kept` como contagem.
