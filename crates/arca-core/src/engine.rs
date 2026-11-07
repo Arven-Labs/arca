@@ -668,7 +668,7 @@ impl<S: BlobStore> Engine<S> {
             };
             let (f, t) = (from_ix.get(key), to_ix.get(key));
             // entrada que o filtro recusa (de um lado ou do outro): o arquivo local fica como está
-            if t.is_some_and(|e| !self.accepts(e)) {
+            if f.is_some_and(|e| !self.accepts(e)) || t.is_some_and(|e| !self.accepts(e)) {
                 continue;
             }
             // o nome de um temporário do próprio `apply` não pode ser destino nem origem
