@@ -260,11 +260,7 @@ impl<S: BlobStore> Engine<S> {
     }
 
     /// ESQUELETO (os testes vêm primeiro): ainda aceita tudo.
-    pub fn with_entry_filter(
-        self,
-        class: Class,
-        accept: fn(&FileEntry) -> bool,
-    ) -> Engine<S> {
+    pub fn with_entry_filter(self, class: Class, accept: fn(&FileEntry) -> bool) -> Engine<S> {
         let _ = (class, accept);
         self
     }
