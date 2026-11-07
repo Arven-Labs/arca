@@ -2,6 +2,13 @@
 
 Mais recente no topo.
 
+### 2026-11-07 — Sessão 54 (auditoria de segurança da classe `secret`, só registro)
+
+- **Pedido**: depois de mesclar o #60 (arca) e o Warden#94, o dono pediu o `security-auditor` na classe `secret` do Warden (`aa9f5eb`). Nenhum código mudou, na arca nem no Warden; este PR só registra os achados no P-36.
+- **Resultado**: nada crítico. Dois importantes novos: **I-1** (uma queda no meio do `apply` trava o ciclo, porque o guard roda antes do `recover`; ordem conferida no código) e **I-2** (nome estranho vindo de um dispositivo pareado trava o vault dos outros, sem teto de tamanho). Um médio novo (**M-1**, perdedor perdido numa queda), a gravidade do consentimento rebaixada para média (**M-2**) e a do guard sem canonicalizar confirmada como baixa (**B-1**). Detalhes e correções sugeridas em P-36 (5) a (9).
+- **Não verificado**: a auditoria foi só leitura de código; nada foi compilado, rodado nem reproduzido (I-1 e I-2 incluídos). Windows, macOS e o corpo de `Engine::merge`, `pull` e `recover_root` ficaram fora.
+- **Fica**: decidir a correção do I-1 e do I-2 no Warden (plan mode, teste de queda primeiro; toca credenciais, AGENTS.md §4); o resto do P-36; P-09, P-22, P-25, P-26, P-29 a P-36.
+
 ### 2026-11-06 — Sessão 53 (2b-4, fatia 5: a classe `secret`, os logins OAuth, no modo arca)
 
 - **Pedido**: o `/projeto arca` sugeriu `config` e `secret`; o dono pulou a verificação manual do app e foi direto ao código. Plano aprovado em plan mode, em 1 PR no Warden ([#94](https://github.com/Arven-Labs/warden/pull/94)); este PR só registra. Nenhum código da arca mudou (`rev` segue `69fec71`). Decisões do dono: `secret` primeiro e `config` depois; `config` por pasta de preparo com cópia; arquivo fora de `[A-Za-z0-9_-]+.json` **para o ciclo inteiro** (em vez de pasta de preparo só com os válidos); perdedores em `arca-conflicts/` sem tela agora.
