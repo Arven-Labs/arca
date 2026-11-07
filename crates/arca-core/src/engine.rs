@@ -232,6 +232,8 @@ pub struct Engine<S> {
     /// Arquivo do último manifest aceito (`state.rs`). Sem ele o engine **não** protege contra
     /// um armazenamento que volte no tempo.
     state: Option<PathBuf>,
+    /// Filtros de entradas por classe (`with_entry_filter`). Vazio: tudo é aceito.
+    filters: Vec<(Class, fn(&FileEntry) -> bool)>,
 }
 
 impl<S: BlobStore> Engine<S> {
@@ -248,6 +250,7 @@ impl<S: BlobStore> Engine<S> {
             keys,
             device,
             state: None,
+            filters: Vec::new(),
         })
     }
 
@@ -259,10 +262,23 @@ impl<S: BlobStore> Engine<S> {
         self
     }
 
-    /// ESQUELETO (os testes vêm primeiro): ainda aceita tudo.
-    pub fn with_entry_filter(self, class: Class, accept: fn(&FileEntry) -> bool) -> Engine<S> {
-        let _ = (class, accept);
+    /// Diz quais entradas de `class` que **vêm de fora** (de outro dispositivo) este engine
+    /// aceita aplicar. `apply` e `restore` ignoram as recusadas: nunca criam, atualizam nem
+    /// apagam o arquivo local. Se a entrada de origem **ou** a de destino é recusada, o
+    /// caminho inteiro é pulado (tratar "recusada" como "ausente" deixaria um dispositivo
+    /// apagar um arquivo local publicando uma versão que o filtro recusa). `snapshot` não usa
+    /// o filtro: ele reconstrói a classe ligada a partir do disco, então as entradas recusadas
+    /// da ponta não são levadas para o manifest novo. Pode ser chamado mais de uma vez; todas
+    /// as funções da classe precisam aceitar.
+    pub fn with_entry_filter(mut self, class: Class, accept: fn(&FileEntry) -> bool) -> Engine<S> {
+        self.filters.push((class, accept));
         self
+    }
+
+    fn accepts(&self, entry: &FileEntry) -> bool {
+        self.filters
+            .iter()
+            .all(|(class, accept)| *class != entry.class || accept(entry))
     }
 
     /// Lê todos os manifests do armazenamento e calcula as pontas. Só a **maior época** vista
@@ -647,11 +663,15 @@ impl<S: BlobStore> Engine<S> {
             let Some((_, root)) = enabled.iter().find(|(class, _)| *class == key.0) else {
                 continue;
             };
+            let (f, t) = (from_ix.get(key), to_ix.get(key));
+            // entrada que o filtro recusa (de um lado ou do outro): o arquivo local fica como está
+            if f.is_some_and(|e| !self.accepts(e)) || t.is_some_and(|e| !self.accepts(e)) {
+                continue;
+            }
             // o nome de um temporário do próprio `apply` não pode ser destino nem origem
             if is_reserved_name(key.1.rsplit('/').next().unwrap_or(&key.1)) {
                 return Err(EngineError::ReservedName);
             }
-            let (f, t) = (from_ix.get(key), to_ix.get(key));
             let kind = match (f, t) {
                 (Some(f), Some(t)) if f.sha256 == t.sha256 => {
                     same += 1;
@@ -927,6 +947,9 @@ impl<S: BlobStore> Engine<S> {
             let Some((_, root)) = enabled.iter().find(|(class, _)| *class == entry.class) else {
                 continue;
             };
+            if !self.accepts(entry) {
+                continue;
+            }
             let plain = self.plain_blob(entry).await?;
             let dest = safe_join(root, &entry.path)?;
             run(move || {
