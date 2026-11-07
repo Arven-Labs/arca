@@ -112,3 +112,30 @@ async fn two_devices_converge_using_only_push_pull_and_merge() {
     assert_eq!(tips_a.len(), 1, "{tips_a:?}");
     assert_eq!(tips_a, tips_b);
 }
+
+/// Quem sincroniza uma pasta de classe por conta própria (o Warden com os logins) precisa saber quais
+/// nomes são do próprio arca e o snapshot ignora, sem copiar a regra (I-1, P-36).
+#[test]
+fn the_names_the_arca_keeps_for_itself_are_public() {
+    for name in [
+        ".arca-apply-journal",
+        ".arca-new-0",
+        ".arca-old-12",
+        ".arca-kept-0123456789abcdef",
+        ".tmp-0123456789abcdef",
+    ] {
+        assert!(arca_core::is_reserved_name(name), "{name}");
+    }
+    // quase iguais, mas que o arca trata como arquivo da pessoa
+    for name in [
+        "github.json",
+        ".arca-new-",
+        ".arca-old-x",
+        ".arca-kept-0123",
+        ".tmp-notes",
+        ".tmp-0123456789ABCDEF",
+        ".arca-apply-journal.bak",
+    ] {
+        assert!(!arca_core::is_reserved_name(name), "{name}");
+    }
+}

@@ -263,8 +263,10 @@ pub(crate) fn finish(planned: &[Planned]) {
 }
 
 /// Nomes que o `apply` usa para temporários (`.arca-new-<n>`, `.arca-old-<n>`) e que o
-/// `write_atomic` usa (`.tmp-<16 hex>`). Não entram no snapshot e não podem ser destino.
-pub(crate) fn is_reserved_name(name: &str) -> bool {
+/// `write_atomic` usa (`.tmp-<16 hex>`), mais o diário e o original que a recuperação não pôde
+/// devolver. Não entram no snapshot e não podem ser destino. É pública para quem valida a pasta de
+/// uma classe por conta própria (o Warden com os logins) não recusar os arquivos de trabalho do arca.
+pub fn is_reserved_name(name: &str) -> bool {
     if name == crate::journal::JOURNAL_NAME {
         return true;
     }

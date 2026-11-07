@@ -29,6 +29,7 @@ pub mod store;
 #[cfg(test)]
 mod testutil;
 
+pub use apply::is_reserved_name;
 pub use crypto::{open, seal, EpochKeys, Sealed, VaultKey};
 pub use envelope::{Alg, Header, HEADER_LEN, MAGIC, NONCE_LEN};
 pub use error::Error;
