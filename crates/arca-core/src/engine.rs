@@ -259,6 +259,16 @@ impl<S: BlobStore> Engine<S> {
         self
     }
 
+    /// ESQUELETO (os testes vêm primeiro): ainda aceita tudo.
+    pub fn with_entry_filter(
+        self,
+        class: Class,
+        accept: fn(&FileEntry) -> bool,
+    ) -> Engine<S> {
+        let _ = (class, accept);
+        self
+    }
+
     /// Lê todos os manifests do armazenamento e calcula as pontas. Só a **maior época** vista
     /// (lida do cabeçalho, em claro) conta (P-24): as anteriores vão para `superseded`, sem
     /// serem abertas. Se a maior época é mais nova que a das chaves, `NeedsNewKey`. Um manifest
@@ -4635,5 +4645,132 @@ mod tests {
                 assert!(!text.contains(forbidden), "{forbidden} em {text}");
             }
         }
+    }
+
+    // ---------- filtro de entradas por classe (I-2, P-36) ----------
+
+    /// O filtro do Warden para os logins, em miniatura: nome simples `*.json` e até 10 bytes.
+    fn small_flat_json(entry: &FileEntry) -> bool {
+        !entry.path.contains('/') && entry.path.ends_with(".json") && entry.size <= 10
+    }
+
+    /// Um manifest com a nota do Vault e, na classe `secret`, `ok.json` e duas entradas que o filtro recusa.
+    async fn manifest_with_strays(rig: &Rig) -> ObjectId {
+        let (vault, secret) = (rig.dir("src-vault"), rig.dir("src-secret"));
+        write(&vault, "nota.md", b"N");
+        write(&secret, "ok.json", b"{}");
+        write(&secret, "x/y.json", b"{}");
+        write(&secret, "y.bak", b"b");
+        let roots = Roots {
+            vault: Some(vault),
+            secret: Some(secret),
+            ..Roots::default()
+        };
+        created(rig.engine("origin").snapshot(&roots, 1).await.unwrap()).0
+    }
+
+    #[tokio::test]
+    async fn apply_ignores_the_entries_the_filter_refuses_and_applies_the_rest() {
+        let rig = Rig::new();
+        let to = manifest_with_strays(&rig).await;
+        let (vault, secret) = (rig.dir("dst-vault"), rig.dir("dst-secret"));
+        let roots = Roots {
+            vault: Some(vault.clone()),
+            secret: Some(secret.clone()),
+            ..Roots::default()
+        };
+        let engine = rig
+            .engine("pc")
+            .with_entry_filter(Class::Secret, small_flat_json);
+
+        let applied = engine.apply(None, &to, &roots).await.unwrap();
+
+        assert_eq!(applied.created, 2, "nota.md e ok.json");
+        assert_eq!(
+            tree(&secret).keys().collect::<Vec<_>>(),
+            ["ok.json"],
+            "nem x/y.json nem y.bak"
+        );
+        assert_eq!(
+            tree(&vault).keys().collect::<Vec<_>>(),
+            ["nota.md"],
+            "o Vault não é barrado por uma entrada estranha de outra classe"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_new_version_neither_updates_nor_deletes_the_local_file() {
+        let rig = Rig::new();
+        let secret = rig.dir("src-secret");
+        write(&secret, "login.json", b"ab");
+        let eng = rig.engine("origin");
+        let roots = roots_of(Class::Secret, &secret);
+        let (v1, ..) = created(eng.snapshot(&roots, 1).await.unwrap());
+        write(&secret, "login.json", b"0123456789ABCDEF"); // 16 bytes: o filtro recusa
+        let (v2, ..) = created(eng.snapshot(&roots, 2).await.unwrap());
+
+        let target = rig.dir("dst-secret");
+        let target_roots = roots_of(Class::Secret, &target);
+        rig.engine("pc")
+            .apply(None, &v1, &target_roots)
+            .await
+            .unwrap();
+        let before = tree(&target);
+
+        let applied = rig
+            .engine("pc")
+            .with_entry_filter(Class::Secret, small_flat_json)
+            .apply(Some(&v1), &v2, &target_roots)
+            .await
+            .unwrap();
+
+        assert_eq!(applied.created + applied.updated + applied.removed, 0);
+        assert_eq!(tree(&target), before, "o login local não mudou nem sumiu");
+    }
+
+    #[tokio::test]
+    async fn the_next_snapshot_drops_the_refused_entries_from_the_lineage() {
+        let rig = Rig::new();
+        let to = manifest_with_strays(&rig).await;
+        let (vault, secret) = (rig.dir("dst-vault"), rig.dir("dst-secret"));
+        let roots = Roots {
+            vault: Some(vault),
+            secret: Some(secret),
+            ..Roots::default()
+        };
+        let engine = rig
+            .engine("pc")
+            .with_entry_filter(Class::Secret, small_flat_json);
+        engine.apply(None, &to, &roots).await.unwrap();
+
+        let (_, manifest, ..) = created(engine.snapshot(&roots, 2).await.unwrap());
+
+        assert_eq!(file_paths(&manifest), ["nota.md", "ok.json"]);
+    }
+
+    #[tokio::test]
+    async fn restore_writes_only_the_entries_the_filter_accepts() {
+        let rig = Rig::new();
+        let to = manifest_with_strays(&rig).await;
+        let (vault, secret) = (
+            rig.tmp.path().join("r-vault"),
+            rig.tmp.path().join("r-secret"),
+        );
+        let roots = Roots {
+            vault: Some(vault.clone()),
+            secret: Some(secret.clone()),
+            ..Roots::default()
+        };
+
+        let restored = rig
+            .engine("pc")
+            .with_entry_filter(Class::Secret, small_flat_json)
+            .restore(&to, &roots)
+            .await
+            .unwrap();
+
+        assert_eq!(restored.files, 2);
+        assert_eq!(tree(&secret).keys().collect::<Vec<_>>(), ["ok.json"]);
+        assert_eq!(tree(&vault).keys().collect::<Vec<_>>(), ["nota.md"]);
     }
 }
