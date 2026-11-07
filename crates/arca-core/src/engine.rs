@@ -225,6 +225,9 @@ pub struct Restored {
     pub files: usize,
 }
 
+/// Decide se uma entrada de manifest que veio de fora pode ser aplicada (`with_entry_filter`).
+pub type EntryFilter = fn(&FileEntry) -> bool;
+
 pub struct Engine<S> {
     store: S,
     keys: EpochKeys,
@@ -232,6 +235,8 @@ pub struct Engine<S> {
     /// Arquivo do último manifest aceito (`state.rs`). Sem ele o engine **não** protege contra
     /// um armazenamento que volte no tempo.
     state: Option<PathBuf>,
+    /// Filtros de entradas por classe (`with_entry_filter`). Vazio: tudo é aceito.
+    filters: Vec<(Class, EntryFilter)>,
 }
 
 impl<S: BlobStore> Engine<S> {
@@ -248,6 +253,7 @@ impl<S: BlobStore> Engine<S> {
             keys,
             device,
             state: None,
+            filters: Vec::new(),
         })
     }
 
@@ -257,6 +263,25 @@ impl<S: BlobStore> Engine<S> {
     pub fn with_state(mut self, path: impl Into<PathBuf>) -> Engine<S> {
         self.state = Some(path.into());
         self
+    }
+
+    /// Diz quais entradas de `class` que **vêm de fora** (de outro dispositivo) este engine
+    /// aceita aplicar. `apply` e `restore` ignoram as recusadas: nunca criam, atualizam nem
+    /// apagam o arquivo local. Se a entrada de origem **ou** a de destino é recusada, o
+    /// caminho inteiro é pulado (tratar "recusada" como "ausente" deixaria um dispositivo
+    /// apagar um arquivo local publicando uma versão que o filtro recusa). `snapshot` não usa
+    /// o filtro: ele reconstrói a classe ligada a partir do disco, então as entradas recusadas
+    /// da ponta não são levadas para o manifest novo. Pode ser chamado mais de uma vez; todas
+    /// as funções da classe precisam aceitar.
+    pub fn with_entry_filter(mut self, class: Class, accept: EntryFilter) -> Engine<S> {
+        self.filters.push((class, accept));
+        self
+    }
+
+    fn accepts(&self, entry: &FileEntry) -> bool {
+        self.filters
+            .iter()
+            .all(|(class, accept)| *class != entry.class || accept(entry))
     }
 
     /// Lê todos os manifests do armazenamento e calcula as pontas. Só a **maior época** vista
@@ -641,11 +666,15 @@ impl<S: BlobStore> Engine<S> {
             let Some((_, root)) = enabled.iter().find(|(class, _)| *class == key.0) else {
                 continue;
             };
+            let (f, t) = (from_ix.get(key), to_ix.get(key));
+            // entrada que o filtro recusa (de um lado ou do outro): o arquivo local fica como está
+            if f.is_some_and(|e| !self.accepts(e)) || t.is_some_and(|e| !self.accepts(e)) {
+                continue;
+            }
             // o nome de um temporário do próprio `apply` não pode ser destino nem origem
             if is_reserved_name(key.1.rsplit('/').next().unwrap_or(&key.1)) {
                 return Err(EngineError::ReservedName);
             }
-            let (f, t) = (from_ix.get(key), to_ix.get(key));
             let kind = match (f, t) {
                 (Some(f), Some(t)) if f.sha256 == t.sha256 => {
                     same += 1;
@@ -921,6 +950,9 @@ impl<S: BlobStore> Engine<S> {
             let Some((_, root)) = enabled.iter().find(|(class, _)| *class == entry.class) else {
                 continue;
             };
+            if !self.accepts(entry) {
+                continue;
+            }
             let plain = self.plain_blob(entry).await?;
             let dest = safe_join(root, &entry.path)?;
             run(move || {
@@ -4635,5 +4667,160 @@ mod tests {
                 assert!(!text.contains(forbidden), "{forbidden} em {text}");
             }
         }
+    }
+
+    // ---------- filtro de entradas por classe (I-2, P-36) ----------
+
+    /// O filtro do Warden para os logins, em miniatura: nome simples `*.json` e até 10 bytes.
+    fn small_flat_json(entry: &FileEntry) -> bool {
+        !entry.path.contains('/') && entry.path.ends_with(".json") && entry.size <= 10
+    }
+
+    /// Um manifest com a nota do Vault e, na classe `secret`, `ok.json` e duas entradas que o filtro recusa.
+    async fn manifest_with_strays(rig: &Rig) -> ObjectId {
+        let (vault, secret) = (rig.dir("src-vault"), rig.dir("src-secret"));
+        write(&vault, "nota.md", b"N");
+        write(&secret, "ok.json", b"{}");
+        write(&secret, "x/y.json", b"{}");
+        write(&secret, "y.bak", b"b");
+        let roots = Roots {
+            vault: Some(vault),
+            secret: Some(secret),
+            ..Roots::default()
+        };
+        created(rig.engine("origin").snapshot(&roots, 1).await.unwrap()).0
+    }
+
+    #[tokio::test]
+    async fn apply_ignores_the_entries_the_filter_refuses_and_applies_the_rest() {
+        let rig = Rig::new();
+        let to = manifest_with_strays(&rig).await;
+        let (vault, secret) = (rig.dir("dst-vault"), rig.dir("dst-secret"));
+        let roots = Roots {
+            vault: Some(vault.clone()),
+            secret: Some(secret.clone()),
+            ..Roots::default()
+        };
+        let engine = rig
+            .engine("pc")
+            .with_entry_filter(Class::Secret, small_flat_json);
+
+        let applied = engine.apply(None, &to, &roots).await.unwrap();
+
+        assert_eq!(applied.created, 2, "nota.md e ok.json");
+        assert_eq!(
+            tree(&secret).keys().collect::<Vec<_>>(),
+            ["ok.json"],
+            "nem x/y.json nem y.bak"
+        );
+        assert_eq!(
+            tree(&vault).keys().collect::<Vec<_>>(),
+            ["nota.md"],
+            "o Vault não é barrado por uma entrada estranha de outra classe"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_new_version_neither_updates_nor_deletes_the_local_file() {
+        let rig = Rig::new();
+        let secret = rig.dir("src-secret");
+        write(&secret, "login.json", b"ab");
+        let eng = rig.engine("origin");
+        let roots = roots_of(Class::Secret, &secret);
+        let (v1, ..) = created(eng.snapshot(&roots, 1).await.unwrap());
+        write(&secret, "login.json", b"0123456789ABCDEF"); // 16 bytes: o filtro recusa
+        let (v2, ..) = created(eng.snapshot(&roots, 2).await.unwrap());
+
+        let target = rig.dir("dst-secret");
+        let target_roots = roots_of(Class::Secret, &target);
+        rig.engine("pc")
+            .apply(None, &v1, &target_roots)
+            .await
+            .unwrap();
+        let before = tree(&target);
+
+        let applied = rig
+            .engine("pc")
+            .with_entry_filter(Class::Secret, small_flat_json)
+            .apply(Some(&v1), &v2, &target_roots)
+            .await
+            .unwrap();
+
+        assert_eq!(applied.created + applied.updated + applied.removed, 0);
+        assert_eq!(tree(&target), before, "o login local não mudou nem sumiu");
+    }
+
+    #[tokio::test]
+    async fn the_next_snapshot_drops_the_refused_entries_from_the_lineage() {
+        let rig = Rig::new();
+        let to = manifest_with_strays(&rig).await;
+        let (vault, secret) = (rig.dir("dst-vault"), rig.dir("dst-secret"));
+        let roots = Roots {
+            vault: Some(vault),
+            secret: Some(secret),
+            ..Roots::default()
+        };
+        let engine = rig
+            .engine("pc")
+            .with_entry_filter(Class::Secret, small_flat_json);
+        engine.apply(None, &to, &roots).await.unwrap();
+
+        let (_, manifest, ..) = created(engine.snapshot(&roots, 2).await.unwrap());
+
+        assert_eq!(file_paths(&manifest), ["nota.md", "ok.json"]);
+    }
+
+    #[tokio::test]
+    async fn restore_writes_only_the_entries_the_filter_accepts() {
+        let rig = Rig::new();
+        let to = manifest_with_strays(&rig).await;
+        let (vault, secret) = (
+            rig.tmp.path().join("r-vault"),
+            rig.tmp.path().join("r-secret"),
+        );
+        let roots = Roots {
+            vault: Some(vault.clone()),
+            secret: Some(secret.clone()),
+            ..Roots::default()
+        };
+
+        let restored = rig
+            .engine("pc")
+            .with_entry_filter(Class::Secret, small_flat_json)
+            .restore(&to, &roots)
+            .await
+            .unwrap();
+
+        assert_eq!(restored.files, 2);
+        assert_eq!(tree(&secret).keys().collect::<Vec<_>>(), ["ok.json"]);
+        assert_eq!(tree(&vault).keys().collect::<Vec<_>>(), ["nota.md"]);
+    }
+
+    #[tokio::test]
+    async fn a_refused_entry_that_the_next_manifest_drops_is_not_removed_from_disk() {
+        let rig = Rig::new();
+        let secret = rig.dir("src-secret");
+        write(&secret, "ok.json", b"{}");
+        write(&secret, "y.bak", b"b");
+        let eng = rig.engine("origin");
+        let roots = roots_of(Class::Secret, &secret);
+        let (v1, ..) = created(eng.snapshot(&roots, 1).await.unwrap());
+        fs::remove_file(secret.join("y.bak")).unwrap();
+        let (v2, ..) = created(eng.snapshot(&roots, 2).await.unwrap());
+
+        // aqui `y.bak` é um arquivo da pessoa, que nunca foi aplicado pela arca
+        let target = rig.dir("dst-secret");
+        write(&target, "ok.json", b"{}");
+        write(&target, "y.bak", b"da pessoa");
+
+        let applied = rig
+            .engine("pc")
+            .with_entry_filter(Class::Secret, small_flat_json)
+            .apply(Some(&v1), &v2, &roots_of(Class::Secret, &target))
+            .await
+            .unwrap();
+
+        assert_eq!(applied.created + applied.updated + applied.removed, 0);
+        assert_eq!(fs::read(target.join("y.bak")).unwrap(), b"da pessoa");
     }
 }
