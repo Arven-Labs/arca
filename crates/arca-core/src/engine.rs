@@ -666,11 +666,10 @@ impl<S: BlobStore> Engine<S> {
             let Some((_, root)) = enabled.iter().find(|(class, _)| *class == key.0) else {
                 continue;
             };
-            let (f, t) = (from_ix.get(key), to_ix.get(key));
-            // entrada que o filtro recusa (de um lado ou do outro): o arquivo local fica como está
-            if f.is_some_and(|e| !self.accepts(e)) || t.is_some_and(|e| !self.accepts(e)) {
-                continue;
-            }
+            let (f, t) = (
+                from_ix.get(key).filter(|e| self.accepts(e)),
+                to_ix.get(key).filter(|e| self.accepts(e)),
+            );
             // o nome de um temporário do próprio `apply` não pode ser destino nem origem
             if is_reserved_name(key.1.rsplit('/').next().unwrap_or(&key.1)) {
                 return Err(EngineError::ReservedName);
