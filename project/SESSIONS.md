@@ -2,6 +2,16 @@
 
 Mais recente no topo.
 
+### 2026-11-07 — Sessão 55 (I-1 da auditoria da classe `secret`: o guard tolera os arquivos de trabalho do arca)
+
+- **Pedido**: "vamos no I-1". Plano aprovado em plan mode, em 2 PRs de código mais este de registro: [arca#62](https://github.com/Arven-Labs/arca/pull/62) (`is_reserved_name` pública, `rev` da arca passa de `69fec71` para `e9179c5`) e [Warden#95](https://github.com/Arven-Labs/warden/pull/95). O dono escolheu expor a regra na arca e reportar o `kept` como contagem.
+- **Feito**: o guard dos logins (`prepare_logins_root`) aceita os nomes de trabalho do arca pela regra exata; `ArcaSyncReport.recovered_kept`; 5 testes novos no `warden-server`. Código da arca: só a visibilidade (e 1 teste em `tests/public_api.rs`).
+- **Resultado**: testes antes da correção, no CI: 4 de 5 falharam com `.arca-apply-journal … is not an MCP login file` (o quinto, sobre nomes parecidos, já passava e protege contra correção frouxa). Depois, `Rust (clippy and tests)`, Mobile, Android, `Browser against a real hub` e `guard` verdes no #95. Três quebras de propósito, todas pegas e revertidas (tolerar por prefixo; zerar `recovered_kept`; o guard antigo como estado "antes").
+- **Desvio do plano**: o plano também movia a checagem para depois do `recover`. Ao montar a quebra de propósito vi que, com a tolerância, a ordem não muda o resultado (o diário e o `.arca-old-N` são reservados e passam em qualquer ordem). Ficou só a tolerância, com menos código numa área de credenciais.
+- **Não verificado**: queda real de processo (o teste monta o diário à mão e fica acoplado ao formato de `journal.rs`); Windows e macOS; nada foi rodado localmente (só CI).
+- **Infração minha, corrigida**: acrescentei o teste da arca#62 com heredoc no Bash (contra o `CLAUDE.md`), desfiz antes de qualquer commit e refiz com `Edit`.
+- **Fica**: I-2 (nome estranho de outro dispositivo trava o vault dos outros, sem teto de tamanho), M-1, consentimento, guard com canonicalização e as sugestões, todos no P-36; mostrar `recovered_kept` na tela do desktop; P-09, P-22, P-25, P-26, P-29 a P-36.
+
 ### 2026-11-07 — Sessão 54 (auditoria de segurança da classe `secret`, só registro)
 
 - **Pedido**: depois de mesclar o #60 (arca) e o Warden#94, o dono pediu o `security-auditor` na classe `secret` do Warden (`aa9f5eb`). Nenhum código mudou, na arca nem no Warden; este PR só registra os achados no P-36.
