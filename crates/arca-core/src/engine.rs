@@ -225,6 +225,9 @@ pub struct Restored {
     pub files: usize,
 }
 
+/// Decide se uma entrada de manifest que veio de fora pode ser aplicada (`with_entry_filter`).
+pub type EntryFilter = fn(&FileEntry) -> bool;
+
 pub struct Engine<S> {
     store: S,
     keys: EpochKeys,
@@ -233,7 +236,7 @@ pub struct Engine<S> {
     /// um armazenamento que volte no tempo.
     state: Option<PathBuf>,
     /// Filtros de entradas por classe (`with_entry_filter`). Vazio: tudo é aceito.
-    filters: Vec<(Class, fn(&FileEntry) -> bool)>,
+    filters: Vec<(Class, EntryFilter)>,
 }
 
 impl<S: BlobStore> Engine<S> {
@@ -270,7 +273,7 @@ impl<S: BlobStore> Engine<S> {
     /// o filtro: ele reconstrói a classe ligada a partir do disco, então as entradas recusadas
     /// da ponta não são levadas para o manifest novo. Pode ser chamado mais de uma vez; todas
     /// as funções da classe precisam aceitar.
-    pub fn with_entry_filter(mut self, class: Class, accept: fn(&FileEntry) -> bool) -> Engine<S> {
+    pub fn with_entry_filter(mut self, class: Class, accept: EntryFilter) -> Engine<S> {
         self.filters.push((class, accept));
         self
     }
