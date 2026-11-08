@@ -430,6 +430,27 @@ impl<S: BlobStore> Engine<S> {
         replicate(&self.store, remote).await
     }
 
+    /// ESQUELETO (M-1, passo 1 do plano): ainda na ordem antiga, funde e só depois grava os
+    /// perdedores. Os testes novos têm de falhar assim; o passo 2 troca a ordem.
+    pub async fn merge_with_losers(
+        &self,
+        now: u64,
+        dir: &Path,
+        roots: &Roots,
+    ) -> Result<(MergeOutcome, SavedLosers), EngineError> {
+        let outcome = self.merge(now).await?;
+        let saved = match &outcome {
+            MergeOutcome::Merged { conflicts, .. } => {
+                self.save_conflict_losers(conflicts, dir, roots).await?
+            }
+            MergeOutcome::Nothing { .. } => SavedLosers {
+                saved: 0,
+                already: 0,
+            },
+        };
+        Ok((outcome, saved))
+    }
+
     /// Funde as duas primeiras pontas (ordem `(counter, hash)`) num manifest de fusão
     /// (`SPEC-TECNICA.md` §7, ADR 0014). Uma chamada resolve um par; repetir até `tips_after`
     /// chegar a 1.
@@ -4822,5 +4843,149 @@ mod tests {
 
         assert_eq!(applied.created + applied.updated + applied.removed, 0);
         assert_eq!(fs::read(target.join("y.bak")).unwrap(), b"da pessoa");
+    }
+
+    // ---- M-1: o perdedor é gravado antes do manifest de fusão ----
+
+    /// Dois dispositivos editaram o mesmo `settings.toml` da classe `config`: `pa` (10) perde
+    /// para `pb` (20). Devolve também as raízes ligadas e uma pasta de conflitos segura.
+    async fn config_conflict() -> (Diverged, Roots, PathBuf) {
+        let d = diverge_in(
+            Class::Config,
+            &[("settings.toml", b"base")],
+            vec![
+                ("pa", 10, vec![("settings.toml", b"from-a")]),
+                ("pb", 20, vec![("settings.toml", b"from-b")]),
+            ],
+        )
+        .await;
+        let roots = roots_of(Class::Config, &d.rig.dir("cfg-vivo"));
+        let safe = d.rig.tmp.path().join("conflitos");
+        (d, roots, safe)
+    }
+
+    fn loser_copy(dir: &Path) -> PathBuf {
+        dir.join(format!(
+            "config/settings.toml.conflito-pa-{}",
+            short_hex(b"from-a")
+        ))
+    }
+
+    #[tokio::test]
+    async fn merge_with_losers_saves_the_loser_and_the_merge_manifest() {
+        let (d, roots, dir) = config_conflict().await;
+        let eng = d.rig.engine("pc");
+        let (outcome, saved) = eng.merge_with_losers(30, &dir, &roots).await.unwrap();
+        assert!(matches!(
+            outcome,
+            MergeOutcome::Merged { tips_after: 1, .. }
+        ));
+        assert_eq!(
+            saved,
+            SavedLosers {
+                saved: 1,
+                already: 0
+            }
+        );
+        assert_eq!(fs::read(loser_copy(&dir)).unwrap(), b"from-a");
+        assert_eq!(eng.heads().await.unwrap().tips.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_unsafe_conflicts_dir_stops_the_merge_before_the_manifest_is_stored() {
+        let (d, roots, _) = config_conflict().await;
+        let inside_a_live_root = d.rig.tmp.path().join("cfg-vivo/conflitos");
+        let eng = d.rig.engine("pc");
+        let err = eng
+            .merge_with_losers(30, &inside_a_live_root, &roots)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, EngineError::UnsafeConflictsDir));
+        // nada foi gravado: as duas pontas seguem lá e a fusão pode ser refeita
+        assert_eq!(eng.heads().await.unwrap().tips.len(), 2);
+        assert!(!loser_copy(&inside_a_live_root).exists());
+    }
+
+    #[tokio::test]
+    async fn after_a_refused_merge_the_next_one_still_sees_the_conflict() {
+        let (d, roots, dir) = config_conflict().await;
+        let eng = d.rig.engine("pc");
+        let inside_a_live_root = d.rig.tmp.path().join("cfg-vivo/conflitos");
+        eng.merge_with_losers(30, &inside_a_live_root, &roots)
+            .await
+            .unwrap_err();
+
+        let (outcome, saved) = eng.merge_with_losers(31, &dir, &roots).await.unwrap();
+        assert!(matches!(
+            outcome,
+            MergeOutcome::Merged { tips_after: 1, .. }
+        ));
+        assert_eq!(saved.saved, 1);
+        assert_eq!(fs::read(loser_copy(&dir)).unwrap(), b"from-a");
+        assert_eq!(eng.heads().await.unwrap().tips.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_loser_already_saved_before_a_crash_is_not_duplicated() {
+        let (d, roots, dir) = config_conflict().await;
+        let eng = d.rig.engine("pc");
+        // a queda aconteceu depois do save e antes do manifest: a cópia já está lá
+        let copy = loser_copy(&dir);
+        fs::create_dir_all(copy.parent().unwrap()).unwrap();
+        fs::write(&copy, b"from-a").unwrap();
+
+        let (outcome, saved) = eng.merge_with_losers(30, &dir, &roots).await.unwrap();
+        assert!(matches!(outcome, MergeOutcome::Merged { .. }));
+        assert_eq!(
+            saved,
+            SavedLosers {
+                saved: 0,
+                already: 1
+            }
+        );
+        assert_eq!(fs::read(&copy).unwrap(), b"from-a");
+    }
+
+    #[tokio::test]
+    async fn a_vault_conflict_has_nothing_to_save_and_merges_as_before() {
+        let d = diverge(
+            &[("a.md", b"1")],
+            vec![
+                ("pa", 10, vec![("a.md", b"from-a")]),
+                ("pb", 20, vec![("a.md", b"from-b")]),
+            ],
+        )
+        .await;
+        let roots = vault_only(&d.rig.dir("vault-vivo"));
+        let dir = d.rig.tmp.path().join("conflitos");
+        let (outcome, saved) = d
+            .rig
+            .engine("pc")
+            .merge_with_losers(30, &dir, &roots)
+            .await
+            .unwrap();
+        let MergeOutcome::Merged { conflicts, .. } = outcome else {
+            panic!("esperava Merged");
+        };
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(
+            saved,
+            SavedLosers {
+                saved: 0,
+                already: 0
+            }
+        );
+        assert!(!dir.exists());
+    }
+
+    #[tokio::test]
+    async fn plain_merge_still_works_without_a_conflicts_dir() {
+        let (d, _, _) = config_conflict().await;
+        let eng = d.rig.engine("pc");
+        let MergeOutcome::Merged { conflicts, .. } = eng.merge(30).await.unwrap() else {
+            panic!("esperava Merged");
+        };
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(eng.heads().await.unwrap().tips.len(), 1);
     }
 }
