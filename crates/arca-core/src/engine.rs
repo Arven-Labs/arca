@@ -510,11 +510,6 @@ impl<S: BlobStore> Engine<S> {
         }
         // M-1: o perdedor de `config`/`secret` não está em nenhum manifest; grava-se antes do
         // manifest de fusão, para que uma falha aqui deixe o armazenamento como estava
-        if let Some((dir, roots)) = losers_to {
-            saved = self
-                .save_conflict_losers(&merged.conflicts, dir, roots)
-                .await?;
-        }
         let manifest = Manifest {
             format_version: FORMAT_VERSION as u16,
             key_epoch: self.keys.epoch(),
@@ -531,6 +526,11 @@ impl<S: BlobStore> Engine<S> {
         };
         let sealed = manifest.seal(&self.keys)?;
         self.store.put(&sealed.id, &sealed.bytes).await?;
+        if let Some((dir, roots)) = losers_to {
+            saved = self
+                .save_conflict_losers(&merged.conflicts, dir, roots)
+                .await?;
+        }
         // o estado só avança: `guard` aceitou porque ALGUMA ponta continua o aceito, mas o par
         // fundido são as duas primeiras por (counter, hash) e pode não incluí-la. Gravar uma
         // fusão que não descende do aceito faria o estado recuar (achado C1 da auditoria).
