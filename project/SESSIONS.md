@@ -2,6 +2,16 @@
 
 Mais recente no topo.
 
+### 2026-11-08 — Sessão 57 (I-2 concluído no Warden#96; quebra do filtro **não verificada**)
+
+- **Pedido**: retomar o I-2 parado na Sessão 56. Nenhum código da arca mudou (`rev` segue `44c9e6a`); o código está no [Warden#96](https://github.com/Arven-Labs/warden/pull/96), este PR só registra. Ao abrir, o checkout local da arca estava na branch da Sessão 53, atrás da `main` (o dono tinha mexido depois e não sabia); atualizei a `main` sem conflito.
+- **Feito (no Warden#96)**: `rev` da arca para `44c9e6a`; `is_login_entry` (nome de login e até 1 MiB) ligado por `.with_entry_filter(Class::Secret, …)` em `arca_engine()`; o `bail!` "another device sent files that are not MCP logins" virou a contagem em `ArcaSyncReport.secret_ignored` (só a contagem); teste de fronteira novo (1 MiB exato entra, 1 MiB + 1 byte é ignorado). PR marcado como pronto, corpo no modelo do repositório.
+- **Resultado**: os 4 testes do I-2 falhavam no CI do `f8560df6` pelo motivo certo (o `bail!`); com a correção o CI do `df61266a` ficou verde (`Rust (clippy and tests)`, `Browser against a real hub`, Android, Mobile, `guard`; `Frontend` pulado).
+- **Quebras de propósito**: (1) `<` no lugar de `<=` no teto: **passou no CI** (nenhum teste cobria o limite exato), o que mostrou a lacuna; com o teste de fronteira, a mesma quebra falhou só nele (39 passaram, 1 falhou). (2) Sem o `.with_entry_filter`: **não verificada**. O CI travou no passo `Tests` por mais de 30 minutos, duas vezes; a segunda com `timeout 900`, que só mata o `cargo` (o teste órfão segura o pipe do `tee` e o passo nunca termina). Cancelei os dois runs e o log não ficou disponível, então não se sabe qual teste trava nem por quê. As quebras rodaram em 4 PRs descartáveis do Warden (#97 a #100), todos fechados sem mesclar e com as branches apagadas.
+- **Não verificado**: a quebra do filtro (acima); nada rodado localmente (regra do projeto: só CI); Windows e macOS; o loop no app real contra um hub real.
+- **Achados**: (1) o CI do Warden só roda em PR ou push na `main`, então uma quebra de propósito precisa de um PR descartável. (2) O travamento sem o filtro é suspeito: sem ele o `apply` deveria recusar com erro, não travar. (3) Deslize de processo: um `sed -i` numa quebra, contra o `CLAUDE.md`; desfeito na hora e refeito com `Edit`.
+- **Fica**: mesclar o Warden#96; repetir a quebra do filtro rodando o binário do teste direto, com `timeout -k`, para ver o nome do teste; o resto do P-36 (M-1, consentimento, guard com canonicalização, sugestões, `recovered_kept` e `secret_ignored` na tela do desktop); P-09, P-22, P-25, P-26, P-29 a P-36.
+
 ### 2026-11-07 — Sessão 56 (I-2 da auditoria da classe `secret`: filtro de entradas por classe, **parada no meio**)
 
 - **Pedido**: "sim" ao plano do I-2. Plano aprovado em plan mode, em 2 PRs de código mais o de registro; o dono escolheu o filtro de entradas na arca. A sessão foi encerrada a pedido do dono antes do PR do Warden terminar.
