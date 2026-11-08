@@ -2,6 +2,15 @@
 
 Mais recente no topo.
 
+### 2026-11-08 — Sessão 59 (o travamento do CI não reproduziu de novo; limpeza de disco)
+
+- **Pedido**: a primeira pendência da Sessão 58, achar o teste que travava o CI do Warden sem o filtro do I-2. Plano aprovado em plan mode. Nenhum código da arca mudou; este PR só registra.
+- **Feito**: PR descartável [Warden#102](https://github.com/Arven-Labs/warden/pull/102) (fechado sem mesclar, branch apagada) sem o `.with_entry_filter` e com o passo `Tests` trocado por um diagnóstico: `cargo test --workspace --no-run` lista os binários, cada um roda isolado (no diretório do crate) com limite de 300 s, sem pipe, e num timeout listaria as threads (o libtest nomeia a thread com o teste) antes do `kill -9`.
+- **Resultado**: 99 binários, nenhum travou; 2701 testes passaram e 5 falharam, as esperadas do `arca_mode` sem o filtro; o mais lento levou 8,4 s; doctests terminaram. Job Rust verde. **O travamento não reproduziu.** Braço de controle (com o filtro) não rodado, pois só serviria se o A travasse.
+- **Não verificado**: uma rodada só; o CI de produção usa `cargo test | tee`, que esta rodada não reproduziu (binários rodados direto); só Linux; nada rodado localmente (regra do projeto: só CI). Pode ter sido intermitência do runner.
+- **Disco**: o `scripts/disk-report.sh` deu ALERTA com `/home` em 97%; com a confirmação do dono, `cargo clean` em `kin` (54,4 GiB) e `warden` (38,5 GiB), e `/home` caiu para 49%.
+- **Fica**: o resto do P-36 (M-1, consentimento, guard com canonicalização, sugestões, `recovered_kept` e `secret_ignored` na tela do desktop); P-09, P-22, P-25, P-26, P-29 a P-36.
+
 ### 2026-11-08 — Sessão 58 (quebra do filtro do I-2 verificada; o travamento do CI não reproduziu)
 
 - **Pedido**: repetir a quebra de propósito do filtro (item 1 da Sessão 57) e achar o teste que travava. Plano aprovado em plan mode. Nenhum código da arca mudou; este PR só registra.
