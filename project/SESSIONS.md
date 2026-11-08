@@ -2,6 +2,16 @@
 
 Mais recente no topo.
 
+### 2026-11-08 — Sessão 58 (quebra do filtro do I-2 verificada; o travamento do CI não reproduziu)
+
+- **Pedido**: repetir a quebra de propósito do filtro (item 1 da Sessão 57) e achar o teste que travava. Plano aprovado em plan mode. Nenhum código da arca mudou; este PR só registra.
+- **Feito**: PR descartável [Warden#101](https://github.com/Arven-Labs/warden/pull/101) (fechado sem mesclar, branch apagada) sem o `.with_entry_filter` em `arca_engine()` e com o passo `Tests` trocado por diagnóstico. A `main` do Warden ficou limpa (`fa746901`, o #96 já estava mesclado).
+- **Resultado**: sem o filtro, o binário `arca_mode` inteiro roda em 2,8 s: 35 passam e 5 falham pelo motivo certo (a entrada estranha foi escrita): `a_file_that_is_not_a_login_coming_from_another_device_is_ignored…`, `a_login_a_peer_publishes_too_big…`, `a_login_of_exactly_one_mib…`, `after_an_ignored_entry_this_device_still_snapshots…` e `the_vault_and_the_valid_logins_of_a_peer_arrive_next_to_entries_that_are_ignored`. **A quebra do filtro está verificada.**
+- **Travamento, não reproduzido**: rodei o `arca_mode` de quatro jeitos (um teste por processo; loop completo; o teste de 1 MiB sozinho com stdin em `/dev/null`; binário inteiro em paralelo) e nada travou. A primeira rodada do loop ficou 1h26 parada depois do `too_big`, sem log, e não sei explicar. Pode ser intermitência do runner ou do meu script, ou um teste de outro crate do `cargo test --workspace`, que não rodei.
+- **Não verificado**: o `cargo test --workspace` completo sem o filtro (o suspeito que sobra); Windows e macOS; nada rodado localmente (regra do projeto: só CI).
+- **Achados**: (1) `set -e` num script de CI aborta no primeiro comando com código diferente de zero; o teste esperado falhar derrubou meu script e custou uma rodada (usar `set +e` quando a falha é o experimento). (2) O filtro por caminho do CI do Warden roda o job Rust quando `ci.yml` muda, então um PR só de workflow também serve para diagnóstico. (3) `gh run view --log` só libera o log depois que o job termina; para um job parado, cancelar primeiro.
+- **Fica**: opcional, achar a causa do travamento rodando o `cargo test --workspace` num PR descartável com `timeout -s KILL` por binário; o resto do P-36 (M-1, consentimento, guard com canonicalização, sugestões, `recovered_kept` e `secret_ignored` na tela do desktop); P-09, P-22, P-25, P-26, P-29 a P-36.
+
 ### 2026-11-08 — Sessão 57 (I-2 concluído no Warden#96; quebra do filtro **não verificada**)
 
 - **Pedido**: retomar o I-2 parado na Sessão 56. Nenhum código da arca mudou (`rev` segue `44c9e6a`); o código está no [Warden#96](https://github.com/Arven-Labs/warden/pull/96), este PR só registra. Ao abrir, o checkout local da arca estava na branch da Sessão 53, atrás da `main` (o dono tinha mexido depois e não sabia); atualizei a `main` sem conflito.
