@@ -430,31 +430,37 @@ impl<S: BlobStore> Engine<S> {
         replicate(&self.store, remote).await
     }
 
-    /// ESQUELETO (M-1, passo 1 do plano): ainda na ordem antiga, funde e só depois grava os
-    /// perdedores. Os testes novos têm de falhar assim; o passo 2 troca a ordem.
+    /// Como `merge`, mas grava os perdedores de conflito das classes `config` e `secret`
+    /// (`save_conflict_losers`, em `dir`) **antes** de gravar o manifest de fusão (M-1). A fusão
+    /// é determinística e a gravação é idempotente: se o save falhar ou o processo cair, nada
+    /// da fusão foi gravado e a próxima chamada recalcula os mesmos conflitos. Se o save
+    /// falhar, o erro volta e as pontas continuam como estavam.
     pub async fn merge_with_losers(
         &self,
         now: u64,
         dir: &Path,
         roots: &Roots,
     ) -> Result<(MergeOutcome, SavedLosers), EngineError> {
-        let outcome = self.merge(now).await?;
-        let saved = match &outcome {
-            MergeOutcome::Merged { conflicts, .. } => {
-                self.save_conflict_losers(conflicts, dir, roots).await?
-            }
-            MergeOutcome::Nothing { .. } => SavedLosers {
-                saved: 0,
-                already: 0,
-            },
-        };
-        Ok((outcome, saved))
+        self.merge_inner(now, Some((dir, roots))).await
     }
 
     /// Funde as duas primeiras pontas (ordem `(counter, hash)`) num manifest de fusão
     /// (`SPEC-TECNICA.md` §7, ADR 0014). Uma chamada resolve um par; repetir até `tips_after`
-    /// chegar a 1.
+    /// chegar a 1. Os perdedores de `config` e `secret` só voltam em `conflicts`, em memória:
+    /// quem os usa deve chamar `merge_with_losers`, que os grava antes do manifest.
     pub async fn merge(&self, now: u64) -> Result<MergeOutcome, EngineError> {
+        Ok(self.merge_inner(now, None).await?.0)
+    }
+
+    async fn merge_inner(
+        &self,
+        now: u64,
+        losers_to: Option<(&Path, &Roots)>,
+    ) -> Result<(MergeOutcome, SavedLosers), EngineError> {
+        let mut saved = SavedLosers {
+            saved: 0,
+            already: 0,
+        };
         let state = self.load_state().await?;
         let Loaded {
             readable, rejected, ..
@@ -469,9 +475,12 @@ impl<S: BlobStore> Engine<S> {
             });
         }
         let [first, second, ..] = heads.as_slice() else {
-            return Ok(MergeOutcome::Nothing {
-                head: heads.first().map(|h| h.id),
-            });
+            return Ok((
+                MergeOutcome::Nothing {
+                    head: heads.first().map(|h| h.id),
+                },
+                saved,
+            ));
         };
 
         // `first` vem antes de `second` em (counter, hash): `second` é a maior ponta
@@ -499,6 +508,13 @@ impl<S: BlobStore> Engine<S> {
                 return Err(EngineError::MissingObject);
             }
         }
+        // M-1: o perdedor de `config`/`secret` não está em nenhum manifest; grava-se antes do
+        // manifest de fusão, para que uma falha aqui deixe o armazenamento como estava
+        if let Some((dir, roots)) = losers_to {
+            saved = self
+                .save_conflict_losers(&merged.conflicts, dir, roots)
+                .await?;
+        }
         let manifest = Manifest {
             format_version: FORMAT_VERSION as u16,
             key_epoch: self.keys.epoch(),
@@ -524,13 +540,16 @@ impl<S: BlobStore> Engine<S> {
         if advances {
             self.remember(&sealed.id).await?;
         }
-        Ok(MergeOutcome::Merged {
-            id: sealed.id,
-            manifest,
-            conflicts: merged.conflicts,
-            // duas pontas viram uma
-            tips_after: heads.len() - 1,
-        })
+        Ok((
+            MergeOutcome::Merged {
+                id: sealed.id,
+                manifest,
+                conflicts: merged.conflicts,
+                // duas pontas viram uma
+                tips_after: heads.len() - 1,
+            },
+            saved,
+        ))
     }
 
     /// Fotografa as pastas de `roots` e grava o estado como um manifest novo (blobs primeiro,
