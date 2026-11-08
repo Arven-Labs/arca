@@ -430,10 +430,37 @@ impl<S: BlobStore> Engine<S> {
         replicate(&self.store, remote).await
     }
 
+    /// Como `merge`, mas grava os perdedores de conflito das classes `config` e `secret`
+    /// (`save_conflict_losers`, em `dir`) **antes** de gravar o manifest de fusão (M-1). A fusão
+    /// é determinística e a gravação é idempotente: se o save falhar ou o processo cair, nada
+    /// da fusão foi gravado e a próxima chamada recalcula os mesmos conflitos. Se o save
+    /// falhar, o erro volta e as pontas continuam como estavam.
+    pub async fn merge_with_losers(
+        &self,
+        now: u64,
+        dir: &Path,
+        roots: &Roots,
+    ) -> Result<(MergeOutcome, SavedLosers), EngineError> {
+        self.merge_inner(now, Some((dir, roots))).await
+    }
+
     /// Funde as duas primeiras pontas (ordem `(counter, hash)`) num manifest de fusão
     /// (`SPEC-TECNICA.md` §7, ADR 0014). Uma chamada resolve um par; repetir até `tips_after`
-    /// chegar a 1.
+    /// chegar a 1. Os perdedores de `config` e `secret` só voltam em `conflicts`, em memória:
+    /// quem os usa deve chamar `merge_with_losers`, que os grava antes do manifest.
     pub async fn merge(&self, now: u64) -> Result<MergeOutcome, EngineError> {
+        Ok(self.merge_inner(now, None).await?.0)
+    }
+
+    async fn merge_inner(
+        &self,
+        now: u64,
+        losers_to: Option<(&Path, &Roots)>,
+    ) -> Result<(MergeOutcome, SavedLosers), EngineError> {
+        let mut saved = SavedLosers {
+            saved: 0,
+            already: 0,
+        };
         let state = self.load_state().await?;
         let Loaded {
             readable, rejected, ..
@@ -448,9 +475,12 @@ impl<S: BlobStore> Engine<S> {
             });
         }
         let [first, second, ..] = heads.as_slice() else {
-            return Ok(MergeOutcome::Nothing {
-                head: heads.first().map(|h| h.id),
-            });
+            return Ok((
+                MergeOutcome::Nothing {
+                    head: heads.first().map(|h| h.id),
+                },
+                saved,
+            ));
         };
 
         // `first` vem antes de `second` em (counter, hash): `second` é a maior ponta
@@ -478,6 +508,13 @@ impl<S: BlobStore> Engine<S> {
                 return Err(EngineError::MissingObject);
             }
         }
+        // M-1: o perdedor de `config`/`secret` não está em nenhum manifest; grava-se antes do
+        // manifest de fusão, para que uma falha aqui deixe o armazenamento como estava
+        if let Some((dir, roots)) = losers_to {
+            saved = self
+                .save_conflict_losers(&merged.conflicts, dir, roots)
+                .await?;
+        }
         let manifest = Manifest {
             format_version: FORMAT_VERSION as u16,
             key_epoch: self.keys.epoch(),
@@ -503,13 +540,16 @@ impl<S: BlobStore> Engine<S> {
         if advances {
             self.remember(&sealed.id).await?;
         }
-        Ok(MergeOutcome::Merged {
-            id: sealed.id,
-            manifest,
-            conflicts: merged.conflicts,
-            // duas pontas viram uma
-            tips_after: heads.len() - 1,
-        })
+        Ok((
+            MergeOutcome::Merged {
+                id: sealed.id,
+                manifest,
+                conflicts: merged.conflicts,
+                // duas pontas viram uma
+                tips_after: heads.len() - 1,
+            },
+            saved,
+        ))
     }
 
     /// Fotografa as pastas de `roots` e grava o estado como um manifest novo (blobs primeiro,
@@ -4822,5 +4862,149 @@ mod tests {
 
         assert_eq!(applied.created + applied.updated + applied.removed, 0);
         assert_eq!(fs::read(target.join("y.bak")).unwrap(), b"da pessoa");
+    }
+
+    // ---- M-1: o perdedor é gravado antes do manifest de fusão ----
+
+    /// Dois dispositivos editaram o mesmo `settings.toml` da classe `config`: `pa` (10) perde
+    /// para `pb` (20). Devolve também as raízes ligadas e uma pasta de conflitos segura.
+    async fn config_conflict() -> (Diverged, Roots, PathBuf) {
+        let d = diverge_in(
+            Class::Config,
+            &[("settings.toml", b"base")],
+            vec![
+                ("pa", 10, vec![("settings.toml", b"from-a")]),
+                ("pb", 20, vec![("settings.toml", b"from-b")]),
+            ],
+        )
+        .await;
+        let roots = roots_of(Class::Config, &d.rig.dir("cfg-vivo"));
+        let safe = d.rig.tmp.path().join("conflitos");
+        (d, roots, safe)
+    }
+
+    fn loser_copy(dir: &Path) -> PathBuf {
+        dir.join(format!(
+            "config/settings.toml.conflito-pa-{}",
+            short_hex(b"from-a")
+        ))
+    }
+
+    #[tokio::test]
+    async fn merge_with_losers_saves_the_loser_and_the_merge_manifest() {
+        let (d, roots, dir) = config_conflict().await;
+        let eng = d.rig.engine("pc");
+        let (outcome, saved) = eng.merge_with_losers(30, &dir, &roots).await.unwrap();
+        assert!(matches!(
+            outcome,
+            MergeOutcome::Merged { tips_after: 1, .. }
+        ));
+        assert_eq!(
+            saved,
+            SavedLosers {
+                saved: 1,
+                already: 0
+            }
+        );
+        assert_eq!(fs::read(loser_copy(&dir)).unwrap(), b"from-a");
+        assert_eq!(eng.heads().await.unwrap().tips.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_unsafe_conflicts_dir_stops_the_merge_before_the_manifest_is_stored() {
+        let (d, roots, _) = config_conflict().await;
+        let inside_a_live_root = d.rig.tmp.path().join("cfg-vivo/conflitos");
+        let eng = d.rig.engine("pc");
+        let err = eng
+            .merge_with_losers(30, &inside_a_live_root, &roots)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, EngineError::UnsafeConflictsDir));
+        // nada foi gravado: as duas pontas seguem lá e a fusão pode ser refeita
+        assert_eq!(eng.heads().await.unwrap().tips.len(), 2);
+        assert!(!loser_copy(&inside_a_live_root).exists());
+    }
+
+    #[tokio::test]
+    async fn after_a_refused_merge_the_next_one_still_sees_the_conflict() {
+        let (d, roots, dir) = config_conflict().await;
+        let eng = d.rig.engine("pc");
+        let inside_a_live_root = d.rig.tmp.path().join("cfg-vivo/conflitos");
+        eng.merge_with_losers(30, &inside_a_live_root, &roots)
+            .await
+            .unwrap_err();
+
+        let (outcome, saved) = eng.merge_with_losers(31, &dir, &roots).await.unwrap();
+        assert!(matches!(
+            outcome,
+            MergeOutcome::Merged { tips_after: 1, .. }
+        ));
+        assert_eq!(saved.saved, 1);
+        assert_eq!(fs::read(loser_copy(&dir)).unwrap(), b"from-a");
+        assert_eq!(eng.heads().await.unwrap().tips.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_loser_already_saved_before_a_crash_is_not_duplicated() {
+        let (d, roots, dir) = config_conflict().await;
+        let eng = d.rig.engine("pc");
+        // a queda aconteceu depois do save e antes do manifest: a cópia já está lá
+        let copy = loser_copy(&dir);
+        fs::create_dir_all(copy.parent().unwrap()).unwrap();
+        fs::write(&copy, b"from-a").unwrap();
+
+        let (outcome, saved) = eng.merge_with_losers(30, &dir, &roots).await.unwrap();
+        assert!(matches!(outcome, MergeOutcome::Merged { .. }));
+        assert_eq!(
+            saved,
+            SavedLosers {
+                saved: 0,
+                already: 1
+            }
+        );
+        assert_eq!(fs::read(&copy).unwrap(), b"from-a");
+    }
+
+    #[tokio::test]
+    async fn a_vault_conflict_has_nothing_to_save_and_merges_as_before() {
+        let d = diverge(
+            &[("a.md", b"1")],
+            vec![
+                ("pa", 10, vec![("a.md", b"from-a")]),
+                ("pb", 20, vec![("a.md", b"from-b")]),
+            ],
+        )
+        .await;
+        let roots = vault_only(&d.rig.dir("vault-vivo"));
+        let dir = d.rig.tmp.path().join("conflitos");
+        let (outcome, saved) = d
+            .rig
+            .engine("pc")
+            .merge_with_losers(30, &dir, &roots)
+            .await
+            .unwrap();
+        let MergeOutcome::Merged { conflicts, .. } = outcome else {
+            panic!("esperava Merged");
+        };
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(
+            saved,
+            SavedLosers {
+                saved: 0,
+                already: 0
+            }
+        );
+        assert!(!dir.exists());
+    }
+
+    #[tokio::test]
+    async fn plain_merge_still_works_without_a_conflicts_dir() {
+        let (d, _, _) = config_conflict().await;
+        let eng = d.rig.engine("pc");
+        let MergeOutcome::Merged { conflicts, .. } = eng.merge(30).await.unwrap() else {
+            panic!("esperava Merged");
+        };
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(eng.heads().await.unwrap().tips.len(), 1);
     }
 }

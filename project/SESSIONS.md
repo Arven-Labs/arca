@@ -2,6 +2,15 @@
 
 Mais recente no topo.
 
+### 2026-11-08 — Sessão 60 (M-1, metade a: o perdedor é gravado antes do manifest de fusão)
+
+- **Pedido**: o M-1 do P-36. Plano aprovado em plan mode; escopo decidido pelo dono: só a metade (a), o dispositivo que faz o merge. Código em [arca#69](https://github.com/Arven-Labs/arca/pull/69); o Warden fica para o PR seguinte.
+- **Feito**: `Engine::merge_with_losers(now, dir, roots)` em `engine.rs`; `merge` virou `merge_inner(now, Option<(dir, roots)>)`, e o save (`save_conflict_losers`) roda depois de conferir os blobs e **antes** de gravar o manifest de fusão e de `remember`. Se o save falhar, o `merge` falha e nada da fusão fica gravado. `merge` sem pasta não mudou.
+- **Testes (CI)**: seis novos. Com o esqueleto na ordem antiga, 433 passaram e 2 falharam pelo motivo certo (`an_unsafe_conflicts_dir_stops_the_merge_before_the_manifest_is_stored`: ficou 1 ponta em vez de 2; `after_a_refused_merge_the_next_one_still_sees_the_conflict`: o 2º merge deu `Nothing`). Com a correção, tudo verde. **Quebra de propósito:** save depois do `put` (commit `44402b8`) fez falhar exatamente esses dois (433 passaram, 2 falharam); revertida no `23a710b`, e o código ficou idêntico ao da correção (`git diff 5d68d81 HEAD` vazio).
+- **Não verificado**: queda real de processo entre o save e o manifest (só simulada pela cópia que já existe); Windows e macOS; nada rodado localmente (regra: só CI; `cargo fmt --check` ok).
+- **Achados**: (1) o hook `guard-heavy` bloqueia até `cargo check` local; só `fmt --check` passa. (2) O esqueleto com a ordem antiga foi o que deu a prova "falhou antes": sem ele os testes nem compilariam.
+- **Fica**: Warden usar `merge_with_losers` (PR depois do merge da arca#69, com `rev` novo); metade (b) do M-1; o resto do P-36 (consentimento, guard com canonicalização, sugestões, `recovered_kept` e `secret_ignored` na tela do desktop); P-09, P-22, P-25, P-26, P-29 a P-36.
+
 ### 2026-11-08 — Sessão 59 (o travamento do CI não reproduziu de novo; limpeza de disco)
 
 - **Pedido**: a primeira pendência da Sessão 58, achar o teste que travava o CI do Warden sem o filtro do I-2. Plano aprovado em plan mode. Nenhum código da arca mudou; este PR só registra.
