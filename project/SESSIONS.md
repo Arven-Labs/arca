@@ -2,6 +2,15 @@
 
 Mais recente no topo.
 
+### 2026-11-08 — Sessão 63 (M-1, metade b: o ciclo do Warden usa `conflicts_between`)
+
+- **Pedido**: o PR do Warden que sobrou da Sessão 62 (plano da Sessão 62, etapa 3). Nenhum código da arca mudou; o código está no [Warden#105](https://github.com/Arven-Labs/warden/pull/105) (mesclado em `cac10716`), este PR só registra.
+- **Feito (no Warden#105)**: `rev` da arca em `cfadcfc` (3 `Cargo.toml` e `Cargo.lock`); `arca_sync.rs` chama `conflicts_between(Some(&folder), &tip.id)` e `save_conflict_losers` antes do `apply`; teste novo em `arca_mode.rs`. O registro do lado do Warden mora aqui.
+- **Resultado**: sem a chamada, só o teste novo falhou (41 passaram, 1 falhou, `secret_losers_saved` 0 em vez de 1, run 42545547995); com a chamada, CI verde (Rust, Android, Mobile, Browser, guard; run 42546439097). **Quebra de propósito:** não rodei um run separado; o run sem a chamada é essa quebra (mesmo `rev`, sem as 4 linhas), dito no corpo do PR.
+- **Não verificado**: fusões equivalentes (ADR 0014) em cadeia; custo em grafo grande; Windows e macOS; nada rodado localmente (só CI).
+- **Achados**: o CI do Warden leva ~10 min por rodada (Rust) e ~10–13 (Android); duas rodadas por PR (falha e verde) custam ~25 min de espera.
+- **Fica**: o resto do P-36 (consentimento da classe `secret`, guard com canonicalização, sugestões, `recovered_kept` e `secret_ignored` na tela do desktop); P-09, P-22, P-25, P-26, P-29 a P-36.
+
 ### 2026-11-08 — Sessão 62 (M-1, metade b na arca: `conflicts_between`)
 
 - **Pedido**: a metade (b) do M-1. Plano aprovado em plan mode (derivar dos pais, salvar de todos os dispositivos, pular fusão com pai ausente). Código em [arca#71](https://github.com/Arven-Labs/arca/pull/71); o Warden fica para o PR seguinte.
