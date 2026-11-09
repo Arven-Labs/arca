@@ -2,6 +2,15 @@
 
 Mais recente no topo.
 
+### 2026-11-08 — Sessão 62 (M-1, metade b na arca: `conflicts_between`)
+
+- **Pedido**: a metade (b) do M-1. Plano aprovado em plan mode (derivar dos pais, salvar de todos os dispositivos, pular fusão com pai ausente). Código em [arca#71](https://github.com/Arven-Labs/arca/pull/71); o Warden fica para o PR seguinte.
+- **Feito**: `Engine::conflicts_between(from, to)` em `engine.rs`: manifests alcançáveis de `to` e não de `from` com `merged_from` não vazio; para cada um, `common_ancestor` dos pais e `merge_files`, juntando os `conflicts`. Reaproveita `save_conflict_losers` sem mudança.
+- **Testes (CI)**: cinco novos. Com o esqueleto vazio, 437 passaram e 3 falharam pelo motivo certo (os que esperam 1 conflito ou `saved: 1`). Com a implementação, verde. **Quebra de propósito:** ignorar o `from` (commit `53e515c`) fez falhar só `a_merge_the_folder_already_reflects_has_nothing_to_derive` (439 passaram, 1 falhou); revertida em `f29409f`.
+- **Não verificado**: o fluxo no Warden (próximo PR); fusões equivalentes (ADR 0014) em cadeia; custo em grafo grande (percorre todos os manifests a cada chamada); Windows e macOS; só CI.
+- **Achados**: (1) o primeiro push não compilou (closure com `Side<'_>`, "lifetime may not live long enough"; só o CI mostrou, porque `cargo check` local é bloqueado); virou `fn side` interna, como o `merge` já faz. (2) Deslizes de processo meus, contra o `CLAUDE.md`: um `sed -i` (uma linha de `use`) e `cargo fmt` que reescreveu o arquivo; o diff foi conferido e só tem o esperado.
+- **Fica**: Warden chamar `conflicts_between` antes do `apply` (rev novo + teste); o resto do P-36 (consentimento, guard com canonicalização, sugestões, `recovered_kept` e `secret_ignored` na tela do desktop); P-09, P-22, P-25, P-26, P-29 a P-36.
+
 ### 2026-11-08 — Sessão 61 (M-1, metade a: o ciclo do Warden usa `merge_with_losers`)
 
 - **Pedido**: o PR do Warden que sobrou da Sessão 60. Plano aprovado em plan mode. Nenhum código da arca mudou; o código está no [Warden#104](https://github.com/Arven-Labs/warden/pull/104) (mesclado em `c83527e6`), este PR só registra.

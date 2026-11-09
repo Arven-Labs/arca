@@ -13,7 +13,7 @@ use crate::heads::{tips, Head};
 use crate::journal::{recover_root, Journal, Phase};
 use crate::losers::{self, ClearReport, LoserCopy};
 use crate::manifest::{validate_device, validate_path, Class, FileEntry, Hash32, Manifest};
-use crate::merge::{common_ancestor, merge_files, Conflict, Side};
+use crate::merge::{common_ancestor, merge_files, reachable, Conflict, Side};
 use crate::object::{ObjectId, ObjectKind};
 use crate::replicate::{replicate, replicate_filtered, ReplicateReport};
 use crate::scan::{scan_class, Candidate, Skipped, MAX_FILE_BYTES};
@@ -428,6 +428,62 @@ impl<S: BlobStore> Engine<S> {
     /// O caminho inverso é `pull`.
     pub async fn push<R: BlobStore>(&self, remote: &R) -> Result<ReplicateReport, StoreError> {
         replicate(&self.store, remote).await
+    }
+
+    /// Os conflitos das fusões que `to` alcança e `from` (o manifest que a pasta reflete; `None`
+    /// = nenhum) não alcança, recalculados a partir dos pais de cada manifest de fusão (M-1 b).
+    /// Serve a quem perdeu um conflito sem fazer o merge: antes do `apply` sobrescrever o
+    /// arquivo, o chamador passa o resultado a `save_conflict_losers` (idempotente). `merge_files`
+    /// é determinística e simétrica, então o resultado é o mesmo que o dispositivo que fundiu
+    /// obteve. Uma fusão cujos pais não estão no armazenamento (histórico parcial) é pulada.
+    pub async fn conflicts_between(
+        &self,
+        from: Option<&ObjectId>,
+        to: &ObjectId,
+    ) -> Result<Vec<Conflict>, EngineError> {
+        let Loaded { readable, .. } = self.load().await?;
+        let graph: std::collections::HashMap<[u8; 32], &(ObjectId, Manifest)> =
+            readable.iter().map(|entry| (entry.0.hash, entry)).collect();
+        let already = from.map_or_else(HashSet::new, |id| reachable(&graph, id.hash));
+        let mut fresh: Vec<[u8; 32]> = reachable(&graph, to.hash)
+            .into_iter()
+            .filter(|hash| !already.contains(hash))
+            .filter(|hash| {
+                graph
+                    .get(hash)
+                    .is_some_and(|(_, manifest)| !manifest.merged_from.is_empty())
+            })
+            .collect();
+        fresh.sort_unstable();
+
+        let mut found = Vec::new();
+        for hash in fresh {
+            let (_, manifest) = graph[&hash];
+            let parents: Vec<&(ObjectId, Manifest)> = manifest
+                .base_version
+                .iter()
+                .chain(&manifest.merged_from)
+                .filter_map(|parent| graph.get(&parent.0).copied())
+                .collect();
+            let [left, right] = parents.as_slice() else {
+                continue;
+            };
+            let base_files: &[FileEntry] = common_ancestor(&readable, &left.0, &right.0)
+                .and_then(|id| readable.iter().find(|(other, _)| *other == id))
+                .map_or(&[], |(_, manifest)| &manifest.files);
+            fn side(entry: &(ObjectId, Manifest)) -> Side<'_> {
+                Side {
+                    id: entry.0,
+                    manifest: &entry.1,
+                }
+            }
+            let merged = merge_files(base_files, side(left), side(right)).map_err(|e| match e {
+                Error::InvalidPath(_) => EngineError::ConflictCopyName,
+                other => EngineError::Object(other),
+            })?;
+            found.extend(merged.conflicts);
+        }
+        Ok(found)
     }
 
     /// Como `merge`, mas grava os perdedores de conflito das classes `config` e `secret`
@@ -5006,5 +5062,120 @@ mod tests {
         };
         assert_eq!(conflicts.len(), 1);
         assert_eq!(eng.heads().await.unwrap().tips.len(), 1);
+    }
+
+    // ---- M-1 (b): quem perdeu sem fazer o merge deriva o perdedor do manifest de fusão ----
+
+    /// `pc` funde o conflito de `config` (`pa` perde) e devolve o id da fusão.
+    async fn merged_by_another_device() -> (Diverged, Roots, PathBuf, ObjectId) {
+        let (d, roots, dir) = config_conflict().await;
+        let MergeOutcome::Merged { id, .. } = d.rig.engine("pc").merge(30).await.unwrap() else {
+            panic!("esperava Merged");
+        };
+        (d, roots, dir, id)
+    }
+
+    #[tokio::test]
+    async fn the_device_that_lost_without_merging_gets_the_conflict_from_the_merge_manifest() {
+        let (d, _, _, merged) = merged_by_another_device().await;
+        // `pa` está em tips[0] (created_at 10) e perdeu para `pb`
+        let found = d
+            .rig
+            .engine("pa")
+            .conflicts_between(Some(&d.tips[0]), &merged)
+            .await
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].path, "settings.toml");
+        assert_eq!(found[0].loser_device, "pa");
+        assert_eq!(found[0].loser.as_ref().unwrap().sha256, sha(b"from-a"));
+    }
+
+    #[tokio::test]
+    async fn the_derived_loser_is_saved_once_and_matches_what_the_merging_device_saves() {
+        let (d, roots, dir, merged) = merged_by_another_device().await;
+        let eng = d.rig.engine("pa");
+        let found = eng
+            .conflicts_between(Some(&d.tips[0]), &merged)
+            .await
+            .unwrap();
+        let first = eng
+            .save_conflict_losers(&found, &dir, &roots)
+            .await
+            .unwrap();
+        assert_eq!(
+            first,
+            SavedLosers {
+                saved: 1,
+                already: 0
+            }
+        );
+        assert_eq!(fs::read(loser_copy(&dir)).unwrap(), b"from-a");
+        let again = eng
+            .save_conflict_losers(&found, &dir, &roots)
+            .await
+            .unwrap();
+        assert_eq!(
+            again,
+            SavedLosers {
+                saved: 0,
+                already: 1
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_merge_the_folder_already_reflects_has_nothing_to_derive() {
+        let (d, _, _, merged) = merged_by_another_device().await;
+        let found = d
+            .rig
+            .engine("pa")
+            .conflicts_between(Some(&merged), &merged)
+            .await
+            .unwrap();
+        assert!(found.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_vault_conflict_derives_but_has_nothing_to_save() {
+        let d = diverge(
+            &[("a.md", b"1")],
+            vec![
+                ("pa", 10, vec![("a.md", b"from-a")]),
+                ("pb", 20, vec![("a.md", b"from-b")]),
+            ],
+        )
+        .await;
+        let MergeOutcome::Merged { id, .. } = d.rig.engine("pc").merge(30).await.unwrap() else {
+            panic!("esperava Merged");
+        };
+        let eng = d.rig.engine("pa");
+        let found = eng.conflicts_between(Some(&d.tips[0]), &id).await.unwrap();
+        assert_eq!(found.len(), 1);
+        let dir = d.rig.tmp.path().join("conflitos");
+        let saved = eng
+            .save_conflict_losers(&found, &dir, &vault_only(&d.rig.dir("vault-vivo")))
+            .await
+            .unwrap();
+        assert_eq!(
+            saved,
+            SavedLosers {
+                saved: 0,
+                already: 0
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_merge_whose_parent_is_missing_is_skipped_without_error() {
+        let (d, _, _, merged) = merged_by_another_device().await;
+        d.rig.store.delete(&d.tips[0]).await.unwrap();
+        let found = d
+            .rig
+            .engine("pa")
+            .conflicts_between(None, &merged)
+            .await
+            .unwrap();
+        assert!(found.is_empty());
     }
 }
