@@ -281,8 +281,12 @@ impl<S: BlobStore> Engine<S> {
         self
     }
 
-    /// Diz quais arquivos locais de `class` o `snapshot` pode levar (`scan_class_with`).
+    /// Diz quais arquivos locais de `class` o `snapshot` pode levar (`scan_class_with`). Os
+    /// recusados nunca são lidos nem enviados e voltam em `skipped`; `apply` e `restore` não os
+    /// tocam (não estão no manifest, então não há o que apagar). Um filtro por classe: chamar de
+    /// novo para a mesma classe substitui o anterior.
     pub fn with_scan_filter(mut self, class: Class, accept: ScanFilter) -> Engine<S> {
+        self.scan_filters.retain(|(c, _)| *c != class);
         self.scan_filters.push((class, accept));
         self
     }
@@ -648,7 +652,12 @@ impl<S: BlobStore> Engine<S> {
         let mut skipped = Vec::new();
         for (class, root) in roots.enabled() {
             let root = root.to_path_buf();
-            let scan = run(move || scan_class_with(class, &root, None).map_err(io_error)).await?;
+            let accept = self
+                .scan_filters
+                .iter()
+                .find(|(c, _)| *c == class)
+                .map(|(_, accept)| *accept);
+            let scan = run(move || scan_class_with(class, &root, accept).map_err(io_error)).await?;
             candidates.extend(scan.candidates);
             skipped.extend(scan.skipped);
         }

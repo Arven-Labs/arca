@@ -51,7 +51,7 @@ pub fn scan_class(class: Class, root: &Path) -> io::Result<Scan> {
 pub type ScanFilter = fn(&str) -> bool;
 
 /// Como `scan_class`, mas `accept` (se houver) recusa arquivos antes de qualquer leitura.
-pub fn scan_class_with(class: Class, root: &Path, _accept: Option<ScanFilter>) -> io::Result<Scan> {
+pub fn scan_class_with(class: Class, root: &Path, accept: Option<ScanFilter>) -> io::Result<Scan> {
     if !fs::metadata(root)?.is_dir() {
         return Err(io::Error::from(io::ErrorKind::NotADirectory));
     }
@@ -86,6 +86,8 @@ pub fn scan_class_with(class: Class, root: &Path, _accept: Option<ScanFilter>) -
                 if is_reserved_name(name) {
                     // sobra do `apply` ou do `write_atomic`: pode ter a versão antiga de um segredo
                     skip(&mut scan, rel, "reserved name");
+                } else if accept.is_some_and(|accept| !accept(&rel)) {
+                    skip(&mut scan, rel, "not accepted by this device");
                 } else if len > MAX_FILE_BYTES {
                     skip(&mut scan, rel, "file too large");
                 } else {
