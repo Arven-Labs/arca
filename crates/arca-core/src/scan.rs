@@ -44,6 +44,14 @@ pub struct Scan {
 /// Varre `root` (que tem de existir e ser uma pasta: uma raiz ausente é erro, não "vazia",
 /// para um disco desmontado não apagar a classe inteira no próximo manifest).
 pub fn scan_class(class: Class, root: &Path) -> io::Result<Scan> {
+    scan_class_with(class, root, None)
+}
+
+/// Decide se um arquivo (caminho relativo, separador `/`) pode ser levado no snapshot.
+pub type ScanFilter = fn(&str) -> bool;
+
+/// Como `scan_class`, mas `accept` (se houver) recusa arquivos antes de qualquer leitura.
+pub fn scan_class_with(class: Class, root: &Path, accept: Option<ScanFilter>) -> io::Result<Scan> {
     if !fs::metadata(root)?.is_dir() {
         return Err(io::Error::from(io::ErrorKind::NotADirectory));
     }
@@ -78,6 +86,8 @@ pub fn scan_class(class: Class, root: &Path) -> io::Result<Scan> {
                 if is_reserved_name(name) {
                     // sobra do `apply` ou do `write_atomic`: pode ter a versão antiga de um segredo
                     skip(&mut scan, rel, "reserved name");
+                } else if accept.is_some_and(|accept| !accept(&rel)) {
+                    skip(&mut scan, rel, "not accepted by this device");
                 } else if len > MAX_FILE_BYTES {
                     skip(&mut scan, rel, "file too large");
                 } else {
@@ -189,6 +199,62 @@ mod tests {
         write(tmp.path(), "login.json", b"{}");
         let scan = scan_class(Class::Secret, tmp.path()).unwrap();
         assert_eq!(scan.candidates[0].class, Class::Secret);
+    }
+
+    fn flat_json(rel: &str) -> bool {
+        !rel.contains('/') && rel.ends_with(".json")
+    }
+
+    #[test]
+    fn the_host_filter_skips_what_it_refuses_without_listing_it_as_a_candidate() {
+        let tmp = TempDir::new();
+        write(tmp.path(), "ok.json", b"{}");
+        write(tmp.path(), "login.json.bak", b"old-token");
+        write(tmp.path(), "notes.txt", b"n");
+        write(tmp.path(), "sub/deep.json", b"{}");
+        let scan = scan_class_with(Class::Secret, tmp.path(), Some(flat_json)).unwrap();
+        let candidates: Vec<&str> = scan.candidates.iter().map(|c| c.path.as_str()).collect();
+        assert_eq!(candidates, ["ok.json"]);
+        let skipped: Vec<(&str, &str)> = scan
+            .skipped
+            .iter()
+            .map(|s| (s.path.as_str(), s.reason))
+            .collect();
+        assert_eq!(
+            skipped,
+            [
+                ("login.json.bak", "not accepted by this device"),
+                ("notes.txt", "not accepted by this device"),
+                ("sub/deep.json", "not accepted by this device"),
+            ]
+        );
+    }
+
+    #[test]
+    fn without_a_host_filter_the_scan_is_the_same_as_before() {
+        let tmp = TempDir::new();
+        write(tmp.path(), "ok.json", b"{}");
+        write(tmp.path(), "login.json.bak", b"b");
+        assert_eq!(
+            scan_class_with(Class::Secret, tmp.path(), None).unwrap(),
+            scan_class(Class::Secret, tmp.path()).unwrap()
+        );
+        assert_eq!(
+            scan_class(Class::Secret, tmp.path())
+                .unwrap()
+                .candidates
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn a_reserved_work_file_keeps_its_own_reason_even_with_a_host_filter() {
+        let tmp = TempDir::new();
+        write(tmp.path(), ".tmp-0123456789abcdef", b"old-secret");
+        let scan = scan_class_with(Class::Secret, tmp.path(), Some(flat_json)).unwrap();
+        assert!(scan.candidates.is_empty());
+        assert_eq!(scan.skipped[0].reason, "reserved name");
     }
 
     #[test]

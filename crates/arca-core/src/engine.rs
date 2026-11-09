@@ -16,7 +16,7 @@ use crate::manifest::{validate_device, validate_path, Class, FileEntry, Hash32, 
 use crate::merge::{common_ancestor, merge_files, reachable, Conflict, Side};
 use crate::object::{ObjectId, ObjectKind};
 use crate::replicate::{replicate, replicate_filtered, ReplicateReport};
-use crate::scan::{scan_class, Candidate, Skipped, MAX_FILE_BYTES};
+use crate::scan::{scan_class_with, Candidate, ScanFilter, Skipped, MAX_FILE_BYTES};
 use crate::state::{descends, satisfied, DeviceState};
 use crate::store::{verified_get, BlobStore, StoreError};
 use crate::FORMAT_VERSION;
@@ -237,6 +237,8 @@ pub struct Engine<S> {
     state: Option<PathBuf>,
     /// Filtros de entradas por classe (`with_entry_filter`). Vazio: tudo é aceito.
     filters: Vec<(Class, EntryFilter)>,
+    /// Filtros de arquivos locais por classe (`with_scan_filter`).
+    scan_filters: Vec<(Class, ScanFilter)>,
 }
 
 impl<S: BlobStore> Engine<S> {
@@ -254,6 +256,7 @@ impl<S: BlobStore> Engine<S> {
             device,
             state: None,
             filters: Vec::new(),
+            scan_filters: Vec::new(),
         })
     }
 
@@ -275,6 +278,16 @@ impl<S: BlobStore> Engine<S> {
     /// as funções da classe precisam aceitar.
     pub fn with_entry_filter(mut self, class: Class, accept: EntryFilter) -> Engine<S> {
         self.filters.push((class, accept));
+        self
+    }
+
+    /// Diz quais arquivos locais de `class` o `snapshot` pode levar (`scan_class_with`). Os
+    /// recusados nunca são lidos nem enviados e voltam em `skipped`; `apply` e `restore` não os
+    /// tocam (não estão no manifest, então não há o que apagar). Um filtro por classe: chamar de
+    /// novo para a mesma classe substitui o anterior.
+    pub fn with_scan_filter(mut self, class: Class, accept: ScanFilter) -> Engine<S> {
+        self.scan_filters.retain(|(c, _)| *c != class);
+        self.scan_filters.push((class, accept));
         self
     }
 
@@ -639,7 +652,12 @@ impl<S: BlobStore> Engine<S> {
         let mut skipped = Vec::new();
         for (class, root) in roots.enabled() {
             let root = root.to_path_buf();
-            let scan = run(move || scan_class(class, &root).map_err(io_error)).await?;
+            let accept = self
+                .scan_filters
+                .iter()
+                .find(|(c, _)| *c == class)
+                .map(|(_, accept)| *accept);
+            let scan = run(move || scan_class_with(class, &root, accept).map_err(io_error)).await?;
             candidates.extend(scan.candidates);
             skipped.extend(scan.skipped);
         }
@@ -4785,6 +4803,95 @@ mod tests {
             ..Roots::default()
         };
         created(rig.engine("origin").snapshot(&roots, 1).await.unwrap()).0
+    }
+
+    fn flat_json_name(rel: &str) -> bool {
+        !rel.contains('/') && rel.ends_with(".json")
+    }
+
+    #[tokio::test]
+    async fn snapshot_leaves_out_the_local_files_the_scan_filter_refuses() {
+        let rig = Rig::new();
+        let secret = rig.dir("src-secret");
+        write(&secret, "ok.json", b"{}");
+        write(&secret, "ok.json.bak", b"old-token");
+        write(&secret, "x/y.json", b"{}");
+        let engine = rig
+            .engine("pc")
+            .with_scan_filter(Class::Secret, flat_json_name);
+
+        let (_, manifest, _, skipped) = created(
+            engine
+                .snapshot(&roots_of(Class::Secret, &secret), 1)
+                .await
+                .unwrap(),
+        );
+
+        assert_eq!(file_paths(&manifest), ["ok.json"]);
+        let mut left_out: Vec<&str> = skipped.iter().map(|s| s.path.as_str()).collect();
+        left_out.sort();
+        assert_eq!(left_out, ["ok.json.bak", "x/y.json"]);
+        assert_eq!(
+            rig.count(ObjectKind::Blob).await,
+            1,
+            "só o ok.json vira blob: o conteúdo do .bak não chega ao armazenamento"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_scan_filter_does_not_touch_other_classes() {
+        let rig = Rig::new();
+        let (vault, secret) = (rig.dir("src-vault"), rig.dir("src-secret"));
+        write(&vault, "nota.txt", b"N");
+        write(&secret, "ok.json", b"{}");
+        let engine = rig
+            .engine("pc")
+            .with_scan_filter(Class::Secret, flat_json_name);
+        let roots = Roots {
+            vault: Some(vault),
+            secret: Some(secret),
+            ..Roots::default()
+        };
+
+        let (_, manifest, _, skipped) = created(engine.snapshot(&roots, 1).await.unwrap());
+
+        assert_eq!(file_paths(&manifest), ["nota.txt", "ok.json"]);
+        assert!(skipped.is_empty());
+    }
+
+    #[tokio::test]
+    async fn apply_never_deletes_nor_overwrites_a_local_file_the_scan_filter_refuses() {
+        let rig = Rig::new();
+        let src = rig.dir("src-secret");
+        write(&src, "ok.json", b"a");
+        let origin = rig.engine("origin");
+        let (v1, ..) = created(
+            origin
+                .snapshot(&roots_of(Class::Secret, &src), 1)
+                .await
+                .unwrap(),
+        );
+        write(&src, "ok.json", b"b");
+        let (v2, ..) = created(
+            origin
+                .snapshot(&roots_of(Class::Secret, &src), 2)
+                .await
+                .unwrap(),
+        );
+
+        let dst = rig.dir("dst-secret");
+        let roots = roots_of(Class::Secret, &dst);
+        let pc = rig
+            .engine("pc")
+            .with_scan_filter(Class::Secret, flat_json_name);
+        pc.apply(None, &v1, &roots).await.unwrap();
+        write(&dst, "forgotten.json.bak", b"old-token");
+
+        pc.apply(Some(&v1), &v2, &roots).await.unwrap();
+
+        let files = tree(&dst);
+        assert_eq!(files["ok.json"], b"b");
+        assert_eq!(files["forgotten.json.bak"], b"old-token");
     }
 
     #[tokio::test]
