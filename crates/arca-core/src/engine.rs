@@ -471,7 +471,12 @@ impl<S: BlobStore> Engine<S> {
             let base_files: &[FileEntry] = common_ancestor(&readable, &left.0, &right.0)
                 .and_then(|id| readable.iter().find(|(other, _)| *other == id))
                 .map_or(&[], |(_, manifest)| &manifest.files);
-            let side = |(id, manifest): &(ObjectId, Manifest)| Side { id: *id, manifest };
+            fn side(entry: &(ObjectId, Manifest)) -> Side<'_> {
+                Side {
+                    id: entry.0,
+                    manifest: &entry.1,
+                }
+            }
             let merged = merge_files(base_files, side(left), side(right)).map_err(|e| match e {
                 Error::InvalidPath(_) => EngineError::ConflictCopyName,
                 other => EngineError::Object(other),
