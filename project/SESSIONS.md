@@ -2,6 +2,15 @@
 
 Mais recente no topo.
 
+### 2026-11-09 — Sessão 64 (P-36 item 3 / B-1: o guard da pasta de logins resolve links e `..`)
+
+- **Pedido**: a fatia "guard canonicalizado" do P-36, escolhida entre quatro; plano aprovado em plan mode. Nenhum código da arca mudou; o código está no [Warden#106](https://github.com/Arven-Labs/warden/pull/106), este PR só registra.
+- **Feito (no Warden#106)**: `prepare_logins_root` (`warden-sync/src/arca_sync.rs`) passa a comparar caminhos pelo destino real, com o helper `resolve_for_guard` (canonicaliza o maior ancestral que existe e reanexa o resto; `..` no trecho que não existe é recusado). A pasta de logins não pode ser um link e não pode conter nem estar dentro do vault. Sem dependência nova.
+- **Testes (CI)**: oito novos em `warden-server/tests/arca_mode.rs`. Sem a correção, o binário `arca_mode` teve 43 passando e 7 falhando pelo motivo certo (o guard antigo deixou passar, e um caso foi falso alarme do `..`); o oitavo (pasta ausente criada vazia) é de regressão e já passava. Com a correção, CI verde no `4b36d1c4` e no head final `447751a0` (Rust, Android, Mobile, Browser, guard). **Quebra de propósito:** voltar a comparação dos três arquivos ao texto cru (`29564e1b`) fez falhar 4 testes (46 passaram); revertida em `447751a0`, código idêntico ao `4b36d1c4`.
+- **Não verificado**: a corrida (TOCTOU) entre o guard e a leitura da pasta, que continua aberta (mesma classe do P-29 e P-34); Windows (`canonicalize` devolve `\\?\`) e macOS (`/var` para `/private/var`); nada rodado localmente (só CI); `hubs.json` e `arca_state.json` só ficam cobertos quando estão na pasta do manifest e a pasta de logins a contém.
+- **Achados**: (1) deslize de processo meu: um `git revert -q` com flag inválida não fez nada e o `--amend` seguinte reescreveu localmente o commit da quebra com mensagem de "Revert"; o push foi recusado (não fast-forward), nada errado chegou ao remoto; desfeito com `reset --hard` só nesse commit local e revert correto. (2) O loop de espera do CI saiu cedo uma vez porque os checks ainda não estavam registrados ("no checks reported"); a espera passou a filtrar pelo SHA. (3) O repo do Warden não segue rustfmt (o CI não roda `fmt --check`), então não há formatação local a conferir.
+- **Fica**: o resto do P-36 (consentimento da classe `secret`, a regra rígida `dir == <pasta do manifest>/mcp_oauth` se quiser, disponibilidade com `.bak` e nomes reservados, save atômico do login, permissões 0644, perdedores e `recovered_kept`/`secret_ignored` na tela do desktop); P-09, P-22, P-25, P-26, P-29 a P-36.
+
 ### 2026-11-08 — Sessão 63 (M-1, metade b: o ciclo do Warden usa `conflicts_between`)
 
 - **Pedido**: o PR do Warden que sobrou da Sessão 62 (plano da Sessão 62, etapa 3). Nenhum código da arca mudou; o código está no [Warden#105](https://github.com/Arven-Labs/warden/pull/105) (mesclado em `cac10716`), este PR só registra.
