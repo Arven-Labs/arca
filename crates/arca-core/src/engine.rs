@@ -430,6 +430,15 @@ impl<S: BlobStore> Engine<S> {
         replicate(&self.store, remote).await
     }
 
+    /// ESQUELETO (M-1 b, passo 1 do plano): ainda devolve vazio; os testes novos têm de falhar assim.
+    pub async fn conflicts_between(
+        &self,
+        _from: Option<&ObjectId>,
+        _to: &ObjectId,
+    ) -> Result<Vec<Conflict>, EngineError> {
+        Ok(Vec::new())
+    }
+
     /// Como `merge`, mas grava os perdedores de conflito das classes `config` e `secret`
     /// (`save_conflict_losers`, em `dir`) **antes** de gravar o manifest de fusão (M-1). A fusão
     /// é determinística e a gravação é idempotente: se o save falhar ou o processo cair, nada
@@ -5006,5 +5015,120 @@ mod tests {
         };
         assert_eq!(conflicts.len(), 1);
         assert_eq!(eng.heads().await.unwrap().tips.len(), 1);
+    }
+
+    // ---- M-1 (b): quem perdeu sem fazer o merge deriva o perdedor do manifest de fusão ----
+
+    /// `pc` funde o conflito de `config` (`pa` perde) e devolve o id da fusão.
+    async fn merged_by_another_device() -> (Diverged, Roots, PathBuf, ObjectId) {
+        let (d, roots, dir) = config_conflict().await;
+        let MergeOutcome::Merged { id, .. } = d.rig.engine("pc").merge(30).await.unwrap() else {
+            panic!("esperava Merged");
+        };
+        (d, roots, dir, id)
+    }
+
+    #[tokio::test]
+    async fn the_device_that_lost_without_merging_gets_the_conflict_from_the_merge_manifest() {
+        let (d, _, _, merged) = merged_by_another_device().await;
+        // `pa` está em tips[0] (created_at 10) e perdeu para `pb`
+        let found = d
+            .rig
+            .engine("pa")
+            .conflicts_between(Some(&d.tips[0]), &merged)
+            .await
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].path, "settings.toml");
+        assert_eq!(found[0].loser_device, "pa");
+        assert_eq!(found[0].loser.as_ref().unwrap().sha256, sha(b"from-a"));
+    }
+
+    #[tokio::test]
+    async fn the_derived_loser_is_saved_once_and_matches_what_the_merging_device_saves() {
+        let (d, roots, dir, merged) = merged_by_another_device().await;
+        let eng = d.rig.engine("pa");
+        let found = eng
+            .conflicts_between(Some(&d.tips[0]), &merged)
+            .await
+            .unwrap();
+        let first = eng
+            .save_conflict_losers(&found, &dir, &roots)
+            .await
+            .unwrap();
+        assert_eq!(
+            first,
+            SavedLosers {
+                saved: 1,
+                already: 0
+            }
+        );
+        assert_eq!(fs::read(loser_copy(&dir)).unwrap(), b"from-a");
+        let again = eng
+            .save_conflict_losers(&found, &dir, &roots)
+            .await
+            .unwrap();
+        assert_eq!(
+            again,
+            SavedLosers {
+                saved: 0,
+                already: 1
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_merge_the_folder_already_reflects_has_nothing_to_derive() {
+        let (d, _, _, merged) = merged_by_another_device().await;
+        let found = d
+            .rig
+            .engine("pa")
+            .conflicts_between(Some(&merged), &merged)
+            .await
+            .unwrap();
+        assert!(found.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_vault_conflict_derives_but_has_nothing_to_save() {
+        let d = diverge(
+            &[("a.md", b"1")],
+            vec![
+                ("pa", 10, vec![("a.md", b"from-a")]),
+                ("pb", 20, vec![("a.md", b"from-b")]),
+            ],
+        )
+        .await;
+        let MergeOutcome::Merged { id, .. } = d.rig.engine("pc").merge(30).await.unwrap() else {
+            panic!("esperava Merged");
+        };
+        let eng = d.rig.engine("pa");
+        let found = eng.conflicts_between(Some(&d.tips[0]), &id).await.unwrap();
+        assert_eq!(found.len(), 1);
+        let dir = d.rig.tmp.path().join("conflitos");
+        let saved = eng
+            .save_conflict_losers(&found, &dir, &vault_only(&d.rig.dir("vault-vivo")))
+            .await
+            .unwrap();
+        assert_eq!(
+            saved,
+            SavedLosers {
+                saved: 0,
+                already: 0
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_merge_whose_parent_is_missing_is_skipped_without_error() {
+        let (d, _, _, merged) = merged_by_another_device().await;
+        d.rig.store.delete(&d.tips[0]).await.unwrap();
+        let found = d
+            .rig
+            .engine("pa")
+            .conflicts_between(None, &merged)
+            .await
+            .unwrap();
+        assert!(found.is_empty());
     }
 }
