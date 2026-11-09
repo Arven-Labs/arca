@@ -2,6 +2,15 @@
 
 Mais recente no topo.
 
+### 2026-11-08 — Sessão 61 (M-1, metade a: o ciclo do Warden usa `merge_with_losers`)
+
+- **Pedido**: o PR do Warden que sobrou da Sessão 60. Plano aprovado em plan mode. Nenhum código da arca mudou; o código está no [Warden#104](https://github.com/Arven-Labs/warden/pull/104) (mesclado em `c83527e6`), este PR só registra.
+- **Feito (no Warden#104)**: `rev` da arca em `8ac313c` (3 `Cargo.toml` e `Cargo.lock`); `arca_sync.rs` troca `merge` + `save_conflict_losers` por `merge_with_losers`, e `create_private_dir` passa para antes do `loop`; teste novo em `arca_mode.rs`. O registro do lado do Warden não foi feito, seguindo o precedente dos Warden#95 e #96 (o registro mora aqui).
+- **Resultado**: com o `rev` novo e o ciclo velho, só o teste novo falhou (40 passaram, 1 falhou, `conflicts` 0 em vez de 1, run 42536577756); com a troca, CI verde (Rust, Android, Mobile, Browser, guard). **Quebra de propósito**: voltar a `merge` + save depois (commit `922a998e`) fez falhar só o teste novo (run 42538770681); revertida, e o código final ficou idêntico ao da troca.
+- **Não verificado**: queda real de processo entre o save e o manifest; Windows e macOS (o teste é `#[cfg(unix)]`); nada rodado localmente (só CI).
+- **Achados**: (1) o CI do Warden leva ~10–13 min (o Android pesa) mesmo numa mudança só de `rev` da arca; um filtro de caminho para o job Android seria decisão do dono e mexe em CI. (2) O `gh pr checks` sai com código 8 enquanto há check pendente, o que derruba um loop com `&&`.
+- **Fica**: metade (b) do M-1 (derivar os conflitos do manifest de fusão para o dispositivo que perde sem fazer o merge); o resto do P-36 (consentimento, guard com canonicalização, sugestões, `recovered_kept` e `secret_ignored` na tela do desktop); P-09, P-22, P-25, P-26, P-29 a P-36.
+
 ### 2026-11-08 — Sessão 60 (M-1, metade a: o perdedor é gravado antes do manifest de fusão)
 
 - **Pedido**: o M-1 do P-36. Plano aprovado em plan mode; escopo decidido pelo dono: só a metade (a), o dispositivo que faz o merge. Código em [arca#69](https://github.com/Arven-Labs/arca/pull/69); o Warden fica para o PR seguinte.
