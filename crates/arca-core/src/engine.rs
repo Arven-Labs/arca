@@ -447,7 +447,7 @@ impl<S: BlobStore> Engine<S> {
         let already = from.map_or_else(HashSet::new, |id| reachable(&graph, id.hash));
         let mut fresh: Vec<[u8; 32]> = reachable(&graph, to.hash)
             .into_iter()
-            .filter(|hash| !already.contains(hash))
+            .filter(|hash| already.is_empty() || !already.contains(hash) || true)
             .filter(|hash| {
                 graph
                     .get(hash)
