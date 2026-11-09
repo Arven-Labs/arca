@@ -13,7 +13,7 @@ use crate::heads::{tips, Head};
 use crate::journal::{recover_root, Journal, Phase};
 use crate::losers::{self, ClearReport, LoserCopy};
 use crate::manifest::{validate_device, validate_path, Class, FileEntry, Hash32, Manifest};
-use crate::merge::{common_ancestor, merge_files, Conflict, Side};
+use crate::merge::{common_ancestor, merge_files, reachable, Conflict, Side};
 use crate::object::{ObjectId, ObjectKind};
 use crate::replicate::{replicate, replicate_filtered, ReplicateReport};
 use crate::scan::{scan_class, Candidate, Skipped, MAX_FILE_BYTES};
@@ -430,13 +430,55 @@ impl<S: BlobStore> Engine<S> {
         replicate(&self.store, remote).await
     }
 
-    /// ESQUELETO (M-1 b, passo 1 do plano): ainda devolve vazio; os testes novos têm de falhar assim.
+    /// Os conflitos das fusões que `to` alcança e `from` (o manifest que a pasta reflete; `None`
+    /// = nenhum) não alcança, recalculados a partir dos pais de cada manifest de fusão (M-1 b).
+    /// Serve a quem perdeu um conflito sem fazer o merge: antes do `apply` sobrescrever o
+    /// arquivo, o chamador passa o resultado a `save_conflict_losers` (idempotente). `merge_files`
+    /// é determinística e simétrica, então o resultado é o mesmo que o dispositivo que fundiu
+    /// obteve. Uma fusão cujos pais não estão no armazenamento (histórico parcial) é pulada.
     pub async fn conflicts_between(
         &self,
-        _from: Option<&ObjectId>,
-        _to: &ObjectId,
+        from: Option<&ObjectId>,
+        to: &ObjectId,
     ) -> Result<Vec<Conflict>, EngineError> {
-        Ok(Vec::new())
+        let Loaded { readable, .. } = self.load().await?;
+        let graph: std::collections::HashMap<[u8; 32], &(ObjectId, Manifest)> =
+            readable.iter().map(|entry| (entry.0.hash, entry)).collect();
+        let already = from.map_or_else(HashSet::new, |id| reachable(&graph, id.hash));
+        let mut fresh: Vec<[u8; 32]> = reachable(&graph, to.hash)
+            .into_iter()
+            .filter(|hash| !already.contains(hash))
+            .filter(|hash| {
+                graph
+                    .get(hash)
+                    .is_some_and(|(_, manifest)| !manifest.merged_from.is_empty())
+            })
+            .collect();
+        fresh.sort_unstable();
+
+        let mut found = Vec::new();
+        for hash in fresh {
+            let (_, manifest) = graph[&hash];
+            let parents: Vec<&(ObjectId, Manifest)> = manifest
+                .base_version
+                .iter()
+                .chain(&manifest.merged_from)
+                .filter_map(|parent| graph.get(&parent.0).copied())
+                .collect();
+            let [left, right] = parents.as_slice() else {
+                continue;
+            };
+            let base_files: &[FileEntry] = common_ancestor(&readable, &left.0, &right.0)
+                .and_then(|id| readable.iter().find(|(other, _)| *other == id))
+                .map_or(&[], |(_, manifest)| &manifest.files);
+            let side = |(id, manifest): &(ObjectId, Manifest)| Side { id: *id, manifest };
+            let merged = merge_files(base_files, side(left), side(right)).map_err(|e| match e {
+                Error::InvalidPath(_) => EngineError::ConflictCopyName,
+                other => EngineError::Object(other),
+            })?;
+            found.extend(merged.conflicts);
+        }
+        Ok(found)
     }
 
     /// Como `merge`, mas grava os perdedores de conflito das classes `config` e `secret`
