@@ -2,6 +2,15 @@
 
 Mais recente no topo.
 
+### 2026-11-10 — Sessão 67 (P-36 item 2 e 9c: a tela do desktop mostra o relatório da classe `secret`)
+
+- **Pedido**: a fatia "tela do desktop" do P-36, escolhida entre quatro; plano aprovado em plan mode. Nenhum código da arca mudou; o código está no [Warden#110](https://github.com/Arven-Labs/warden/pull/110) (mesclado, `51ec89ac`), este PR só registra.
+- **Feito (Warden#110)**: `SyncPayload` ganhou `secretLosersSaved`, `secretIgnored`, `secretSkipped` (lista de `{path, reason}`, via `SkippedLoginPayload`) e `recoveredKept`; `noticesOf` em `arcaMode.ts` devolve os contadores maiores que zero e os arquivos pulados com o motivo traduzido (3 motivos conhecidos; o desconhecido aparece cru); `ArcaModeSection` lista os avisos abaixo da frase do "Sync now"; chaves novas em `en` e `pt-BR`.
+- **Testes (CI)**: escritos antes e empurrados num PR rascunho: Rust (JSON do payload), frontend (`noticesOf`, `Cannot find export`) e e2e (avisos ausentes) falharam pelo motivo certo. Com a implementação, Rust, Frontend, e2e e guard verdes. **Quebra de propósito** (`> 0` por `>= 0`, PR descartável #111, fechado): 3 testes do frontend falharam; o e2e passou (não cobre contador zero).
+- **Não verificado**: tela real do Tauri (só e2e com backend fingido); nada rodado localmente (só CI); texto `pt-BR` só conferido pelo teste de chaves.
+- **Achados**: (1) o ciclo automático descarta o relatório em `loop_cycle` e não há evento Tauri para ele; avisos do loop exigem canal novo. (2) Dois deslizes meus contra o `CLAUDE.md` (um `cat >>` e um `sed -i` no Bash para editar arquivo), desfeitos e refeitos com `Edit`; sugerido um hook que barre escrita por Bash em arquivo rastreado.
+- **Fica**: consentimento da classe `secret`, guard rígido e 9f, listar/limpar perdedores na tela, avisos do ciclo automático; P-09, P-22, P-25, P-26, P-29 a P-36.
+
 ### 2026-11-09 — Sessão 66 (P-36 itens 4 e 9c: arquivo estranho na pasta de logins é ignorado e reportado)
 
 - **Pedido**: a fatia "disponibilidade" do P-36, escolhida entre quatro; plano aprovado em plan mode. Dois repos: arca#75 (mesclado, `a30971c`) e [Warden#108](https://github.com/Arven-Labs/warden/pull/108).
