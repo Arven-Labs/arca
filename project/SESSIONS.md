@@ -2,6 +2,15 @@
 
 Mais recente no topo.
 
+### 2026-11-10 — Sessão 69 (P-36 item 3 e 9f: guard rígido da pasta de logins e pasta apagada)
+
+- **Pedido**: as fatias "guard rígido" e "9f" do P-36; plano aprovado em plan mode, com duas decisões suas: pular a classe e avisar (o vault segue sincronizando) e mostrar o aviso na tela. Nenhum código da arca mudou; o código está no [Warden#114](https://github.com/Arven-Labs/warden/pull/114) (mesclado, `20dbebba`), este PR só registra.
+- **Feito (Warden#114)**: `prepare_logins_root(create)` exige `<pasta do manifest>/mcp_oauth` (por caminho resolvido, última checagem) e só cria a pasta com `create`; `arca_engine(secret_accepted, create_logins)`; `ArcaSyncReport.secret_folder_missing` (aceito, pasta configurada e raiz `None`), no `SyncPayload` (`secretFolderMissing`), em `noticesOf` e na tela, com texto em `en` e `pt-BR` que manda restaurar a pasta com os arquivos.
+- **Testes (CI)**: escritos antes e empurrados num PR rascunho; o commit só com testes falhou no e2e do desktop (não conferi o motivo individual no Rust e no Frontend). Com a implementação, Rust, Frontend, e2e do desktop, e2e do hub, Android, Mobile e guard verdes. **Quebra de propósito** (rígido e não-recriar desligados, PR descartável #115, fechado): 2 testes do `warden-server` falharam, um por quebra (`only_the_folder_beside_the_manifest…` e `a_logins_folder_that_was_deleted_is_left_out…`). Um teste antigo foi reescrito (`a_missing_logins_folder_is_created_empty_when_the_person_accepts`, pasta no lugar padrão).
+- **Não verificado**: tela real do Tauri (só e2e com backend fingido); Windows e macOS; a corrida entre o guard e a leitura da pasta (TOCTOU); nada rodado localmente (só CI).
+- **Achados**: (1) criar a pasta a cada ciclo era o bug do 9f: anulava de propósito a proteção da arca contra raiz ausente. (2) Pasta vazia não é pasta ausente: a arca não tem piso contra "remove a classe inteira", então recriar a pasta vazia ainda apaga os logins do grupo. (3) Só o "Sync now" mostra o aviso; o ciclo automático segue sem canal.
+- **Fica**: listar/limpar perdedores na tela, avisos do ciclo automático, revogar o aceite, piso na arca; P-09, P-22, P-25, P-26, P-29 a P-36.
+
 ### 2026-11-10 — Sessão 68 (P-36 itens 1 e 8: os logins MCP só viajam depois do aceite)
 
 - **Pedido**: a fatia "consentimento da classe `secret`" do P-36, escolhida entre quatro; plano aprovado em plan mode, com duas decisões suas: opt-in para quem já estava ligado e caixa desmarcada no enable novo. Nenhum código da arca mudou; o código está no [Warden#112](https://github.com/Arven-Labs/warden/pull/112) (mesclado, `ff15e3b5`), este PR só registra.
