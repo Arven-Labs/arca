@@ -2,6 +2,15 @@
 
 Mais recente no topo.
 
+### 2026-11-10 — Sessão 68 (P-36 itens 1 e 8: os logins MCP só viajam depois do aceite)
+
+- **Pedido**: a fatia "consentimento da classe `secret`" do P-36, escolhida entre quatro; plano aprovado em plan mode, com duas decisões suas: opt-in para quem já estava ligado e caixa desmarcada no enable novo. Nenhum código da arca mudou; o código está no [Warden#112](https://github.com/Arven-Labs/warden/pull/112) (mesclado, `ff15e3b5`), este PR só registra.
+- **Feito (Warden#112)**: `ArcaMode.secret_accepted` (`serde(default)` false); `arca_engine(secret_accepted)` decide a raiz `secret`; `arca_enable_with` e `arca_accept_logins`; desktop com `arca_mode_enable(syncLogins)`, `arca_mode_accept_logins` e `ModeStatus.loginsAccepted`; caixa na confirmação e botão para quem já estava ligado; textos em `en` e `pt-BR`. **Desvio do plano**: `arca_enable(pending, now)` ficou como estava (agora sem logins) e o que liga com logins é `arca_enable_with`, para não mexer em ~60 chamadas; nos testes antigos um wrapper `TestEngine` mantém "logins aceitos".
+- **Testes (CI)**: escritos antes e empurrados num PR rascunho; o commit só com testes falhou no Rust e no Frontend (não conferi o motivo de cada teste). Com a implementação, Rust, Frontend, e2e do desktop, e2e do hub, Android, Mobile e guard verdes. Um teste meu do desktop falhou porque o dispositivo de teste não ligava a pasta de logins (erro do teste, não do código). **Quebra de propósito** (gate dando raiz sem aceite, PR descartável #113, fechado): 4 testes do `warden-server` falharam.
+- **Não verificado**: tela real do Tauri (só e2e com backend fingido); Windows e macOS; dois dispositivos reais no desktop; nada rodado localmente (só CI); `pt-BR` só pelo teste de chaves.
+- **Achados**: (1) o aceite é de mão única; revogar ficou de fora. (2) O headless não liga o modo hoje, então o consentimento deles entra quando ganharem `/arca on`. (3) Logins enviados antes do aceite existir continuam no histórico do hub. (4) Os dois deslizes de editar por Bash são da fatia anterior (Sessão 67); nesta só usei `Edit`/`Write`.
+- **Fica**: guard rígido e 9f, listar/limpar perdedores na tela, avisos do ciclo automático, revogar o aceite; P-09, P-22, P-25, P-26, P-29 a P-36.
+
 ### 2026-11-10 — Sessão 67 (P-36 item 2 e 9c: a tela do desktop mostra o relatório da classe `secret`)
 
 - **Pedido**: a fatia "tela do desktop" do P-36, escolhida entre quatro; plano aprovado em plan mode. Nenhum código da arca mudou; o código está no [Warden#110](https://github.com/Arven-Labs/warden/pull/110) (mesclado, `51ec89ac`), este PR só registra.
