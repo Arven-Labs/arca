@@ -727,7 +727,7 @@ impl<S: BlobStore> Engine<S> {
                 continue;
             }
             let had = prev_files.iter().filter(|f| f.class == class).count();
-            if had > 0 && !files.iter().any(|f| f.class == class) {
+            if had > 1 && !files.iter().any(|f| f.class == class) {
                 return Err(EngineError::ClassEmptied { class, had });
             }
         }
