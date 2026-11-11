@@ -2,6 +2,15 @@
 
 Mais recente no topo.
 
+### 2026-11-11 — Sessão 70 (P-36 9f: piso contra esvaziar a classe inteira no snapshot)
+
+- **Pedido**: "vamos lá de 1" (faxina) e depois o plano do piso, aprovado em plan mode. Decisões suas: vale para todas as classes por padrão; o consumidor autoriza por parâmetro explícito.
+- **Faxina**: Warden de volta na `main` (`20dbebba`), branch local `i2-filtro-de-logins` apagada depois de conferir o squash `fa746901` (Warden#96); `cargo clean` no `arca/target` (2,6 GiB); `/home` de 82% para 80%.
+- **Feito ([arca#80](https://github.com/Arven-Labs/arca/pull/80))**: `EngineError::ClassEmptied { class, had }`; `Engine::snapshot_allowing_empty(roots, now, &[Class])`; `snapshot` é o mesmo com lista vazia. A checagem fica depois do `sort_by` e antes do `Unchanged`: para cada classe ligada e não autorizada, `had > 0` na ponta e zero entradas no novo manifest recusa, sem gravar. Só o esvaziamento total é barrado. `SPEC-TECNICA.md` atualizada (piso e o limite do disco desmontado).
+- **Resultado**: com o esqueleto, 3 dos 8 testes novos falharam pelo motivo certo (451 passaram). Com a implementação, `rust`, `msrv`, `guard` e `audit` verdes. **Quebras de propósito** (PRs descartáveis #81 e #82, fechados): `had > 1` derrubou 2 testes (os de `had: 1`: só `.bak` e autorizar só `Config`); ignorar a lista autorizada derrubou 1 (`the_same_class_can_be_emptied_when_the_consumer_allows_it`).
+- **Não verificado**: nada rodado localmente (só `cargo fmt --check`); Windows e macOS; o lado do Warden (nada mudou lá); `merge` e `apply` seguem propagando a remoção de um manifest que já exista.
+- **Fica**: Warden usar `snapshot_allowing_empty`, tratar `ClassEmptied` no relatório e na tela e subir o `rev` nos 3 `Cargo.toml` (hoje o ciclo do Warden só recebe o erro como falha); avisos do ciclo automático, listar e limpar perdedores na tela, revogar o aceite; P-09, P-22, P-25, P-26, P-29 a P-36.
+
 ### 2026-11-10 — Sessão 69 (P-36 item 3 e 9f: guard rígido da pasta de logins e pasta apagada)
 
 - **Pedido**: as fatias "guard rígido" e "9f" do P-36; plano aprovado em plan mode, com duas decisões suas: pular a classe e avisar (o vault segue sincronizando) e mostrar o aviso na tela. Nenhum código da arca mudou; o código está no [Warden#114](https://github.com/Arven-Labs/warden/pull/114) (mesclado, `20dbebba`), este PR só registra.
