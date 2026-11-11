@@ -633,12 +633,13 @@ impl<S: BlobStore> Engine<S> {
     }
 
     /// Como `snapshot`, mas as classes em `allow_empty` podem ficar sem nenhuma entrada (a
-    /// pessoa apagou tudo de propósito). Esqueleto: ainda não recusa nada.
+    /// pessoa apagou tudo de propósito). Sem a autorização, uma classe ligada que tinha entradas
+    /// na ponta e ficaria sem nenhuma dá `ClassEmptied`, sem gravar o manifest.
     pub async fn snapshot_allowing_empty(
         &self,
         roots: &Roots,
         now: u64,
-        _allow_empty: &[Class],
+        allow_empty: &[Class],
     ) -> Result<Snapshot, EngineError> {
         ensure_not_interrupted(roots)?;
         let state = self.load_state().await?;
@@ -718,6 +719,18 @@ impl<S: BlobStore> Engine<S> {
             });
         }
         files.sort_by(|a, b| (a.class, &a.path).cmp(&(b.class, &b.path)));
+
+        // piso: uma classe ligada que tinha entradas e ficaria sem nenhuma só passa se o
+        // consumidor autorizou. Raiz ausente já parou no scan; vazia propagaria N remoções.
+        for (class, _) in roots.enabled() {
+            if allow_empty.contains(&class) {
+                continue;
+            }
+            let had = prev_files.iter().filter(|f| f.class == class).count();
+            if had > 0 && !files.iter().any(|f| f.class == class) {
+                return Err(EngineError::ClassEmptied { class, had });
+            }
+        }
 
         if let Some(head) = &prev {
             if head.manifest.files == files {
