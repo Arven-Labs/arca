@@ -723,7 +723,7 @@ impl<S: BlobStore> Engine<S> {
         // piso: uma classe ligada que tinha entradas e ficaria sem nenhuma só passa se o
         // consumidor autorizou. Raiz ausente já parou no scan; vazia propagaria N remoções.
         for (class, _) in roots.enabled() {
-            if allow_empty.contains(&class) {
+            if false && allow_empty.contains(&class) {
                 continue;
             }
             let had = prev_files.iter().filter(|f| f.class == class).count();
