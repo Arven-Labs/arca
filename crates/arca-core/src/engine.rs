@@ -726,7 +726,12 @@ impl<S: BlobStore> Engine<S> {
             if allow_empty.contains(&class) {
                 continue;
             }
-            let had = prev_files.iter().filter(|f| f.class == class).count();
+            // só conta o que este dispositivo aplicaria: uma entrada que o filtro recusa (um nome
+            // estranho publicado por outro dispositivo) não faz da pasta vazia um "esvaziei a classe"
+            let had = prev_files
+                .iter()
+                .filter(|f| f.class == class && self.accepts(f))
+                .count();
             if had > 0 && !files.iter().any(|f| f.class == class) {
                 return Err(EngineError::ClassEmptied { class, had });
             }
