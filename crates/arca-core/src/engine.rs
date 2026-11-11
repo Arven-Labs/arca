@@ -91,6 +91,11 @@ pub enum EngineError {
     /// propósito, apague o arquivo de estado.
     #[error("the storage does not continue the history this device already accepted")]
     Rollback,
+    /// O snapshot deixaria uma classe ligada sem nenhuma entrada, tendo `had` na ponta: uma
+    /// pasta recriada vazia propagaria a remoção de tudo aos outros dispositivos. Nada foi
+    /// gravado. Para esvaziar de propósito, use `Engine::snapshot_allowing_empty`.
+    #[error("the snapshot would leave class {class:?} empty ({had} entries on the tip)")]
+    ClassEmptied { class: Class, had: usize },
     /// O arquivo de estado local existe mas não é válido. Nunca vale como "sem estado".
     #[error("the device state file is corrupt")]
     CorruptState,
@@ -624,6 +629,17 @@ impl<S: BlobStore> Engine<S> {
     /// Fotografa as pastas de `roots` e grava o estado como um manifest novo (blobs primeiro,
     /// manifest por último). `now` são segundos Unix (UTC), injetados para testes determinísticos.
     pub async fn snapshot(&self, roots: &Roots, now: u64) -> Result<Snapshot, EngineError> {
+        self.snapshot_allowing_empty(roots, now, &[]).await
+    }
+
+    /// Como `snapshot`, mas as classes em `allow_empty` podem ficar sem nenhuma entrada (a
+    /// pessoa apagou tudo de propósito). Esqueleto: ainda não recusa nada.
+    pub async fn snapshot_allowing_empty(
+        &self,
+        roots: &Roots,
+        now: u64,
+        _allow_empty: &[Class],
+    ) -> Result<Snapshot, EngineError> {
         ensure_not_interrupted(roots)?;
         let state = self.load_state().await?;
         let Loaded {
@@ -5284,5 +5300,157 @@ mod tests {
             .await
             .unwrap();
         assert!(found.is_empty());
+    }
+
+    // ---------- piso: o snapshot não esvazia uma classe sem autorização ----------
+
+    /// Ponta com `files` em `class` (pasta `src`), vinda do dispositivo `pc`.
+    async fn tip_with(rig: &Rig, class: Class, files: &[&str]) -> (PathBuf, Engine<Backend>) {
+        let folder = rig.dir("pasta");
+        for name in files {
+            write(&folder, name, name.as_bytes());
+        }
+        let engine = rig.engine("pc");
+        created(engine.snapshot(&roots_of(class, &folder), 1).await.unwrap());
+        (folder, engine)
+    }
+
+    fn empty_the_folder(folder: &Path) {
+        for entry in fs::read_dir(folder).unwrap() {
+            fs::remove_file(entry.unwrap().path()).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_class_recreated_empty_is_refused_and_nothing_is_written() {
+        let rig = Rig::new();
+        let (folder, engine) = tip_with(&rig, Class::Secret, &["a.json", "b.json"]).await;
+        empty_the_folder(&folder);
+
+        assert_eq!(
+            engine.snapshot(&roots_of(Class::Secret, &folder), 2).await,
+            Err(EngineError::ClassEmptied {
+                class: Class::Secret,
+                had: 2
+            })
+        );
+        assert_eq!(rig.count(ObjectKind::Manifest).await, 1);
+    }
+
+    #[tokio::test]
+    async fn the_same_class_can_be_emptied_when_the_consumer_allows_it() {
+        let rig = Rig::new();
+        let (folder, engine) = tip_with(&rig, Class::Secret, &["a.json", "b.json"]).await;
+        empty_the_folder(&folder);
+
+        let (_, manifest, _, _) = created(
+            engine
+                .snapshot_allowing_empty(&roots_of(Class::Secret, &folder), 2, &[Class::Secret])
+                .await
+                .unwrap(),
+        );
+        assert!(file_paths(&manifest).is_empty());
+    }
+
+    #[tokio::test]
+    async fn removing_only_some_of_the_files_is_not_blocked() {
+        let rig = Rig::new();
+        let (folder, engine) = tip_with(&rig, Class::Secret, &["a.json", "b.json", "c.json"]).await;
+        fs::remove_file(folder.join("a.json")).unwrap();
+        fs::remove_file(folder.join("b.json")).unwrap();
+
+        let (_, manifest, _, _) = created(
+            engine
+                .snapshot(&roots_of(Class::Secret, &folder), 2)
+                .await
+                .unwrap(),
+        );
+        assert_eq!(file_paths(&manifest), ["c.json"]);
+    }
+
+    #[tokio::test]
+    async fn a_class_that_was_already_empty_stays_empty_without_error() {
+        let rig = Rig::new();
+        let (folder, engine) = tip_with(&rig, Class::Secret, &[]).await;
+
+        assert!(matches!(
+            engine.snapshot(&roots_of(Class::Secret, &folder), 2).await,
+            Ok(Snapshot::Unchanged { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_first_snapshot_of_an_empty_folder_is_allowed() {
+        let rig = Rig::new();
+        let folder = rig.dir("pasta");
+        let (_, manifest, _, _) = created(
+            rig.engine("pc")
+                .snapshot(&roots_of(Class::Secret, &folder), 1)
+                .await
+                .unwrap(),
+        );
+        assert!(file_paths(&manifest).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_folder_left_with_only_files_the_scan_filter_refuses_counts_as_emptied() {
+        let rig = Rig::new();
+        let (folder, engine) = tip_with(&rig, Class::Secret, &["a.json"]).await;
+        let engine = engine.with_scan_filter(Class::Secret, flat_json_name);
+        fs::remove_file(folder.join("a.json")).unwrap();
+        write(&folder, "a.json.bak", b"old-token");
+
+        assert_eq!(
+            engine.snapshot(&roots_of(Class::Secret, &folder), 2).await,
+            Err(EngineError::ClassEmptied {
+                class: Class::Secret,
+                had: 1
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn allowing_one_class_does_not_allow_another() {
+        let rig = Rig::new();
+        let (config, secret) = (rig.dir("cfg"), rig.dir("sec"));
+        write(&config, "c.toml", b"c");
+        write(&secret, "s.json", b"s");
+        let roots = Roots {
+            config: Some(config.clone()),
+            secret: Some(secret.clone()),
+            ..Roots::default()
+        };
+        let engine = rig.engine("pc");
+        created(engine.snapshot(&roots, 1).await.unwrap());
+        fs::remove_file(secret.join("s.json")).unwrap();
+
+        assert_eq!(
+            engine
+                .snapshot_allowing_empty(&roots, 2, &[Class::Config])
+                .await,
+            Err(EngineError::ClassEmptied {
+                class: Class::Secret,
+                had: 1
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_disabled_class_is_carried_and_never_counts_as_emptied() {
+        let rig = Rig::new();
+        let (vault, secret) = (rig.dir("vault"), rig.dir("sec"));
+        write(&vault, "v.md", b"v");
+        write(&secret, "s.json", b"s");
+        let both = Roots {
+            vault: Some(vault.clone()),
+            secret: Some(secret),
+            ..Roots::default()
+        };
+        let engine = rig.engine("pc");
+        created(engine.snapshot(&both, 1).await.unwrap());
+        write(&vault, "v.md", b"v2");
+
+        let (_, manifest, _, _) = created(engine.snapshot(&vault_only(&vault), 2).await.unwrap());
+        assert_eq!(file_paths(&manifest), ["v.md", "s.json"]);
     }
 }
