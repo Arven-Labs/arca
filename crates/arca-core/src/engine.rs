@@ -5448,6 +5448,55 @@ mod tests {
         );
     }
 
+    /// Um outro dispositivo publicou `files` na classe `secret` (sem filtro); devolve a pasta, vazia, de um segundo
+    /// dispositivo no mesmo armazenamento, que tem o filtro de entradas `small_flat_json`.
+    async fn tip_from_a_peer_with_secret(rig: &Rig, files: &[&str]) -> (PathBuf, Engine<Backend>) {
+        let theirs = rig.dir("src-secret");
+        for name in files {
+            write(&theirs, name, b"{}");
+        }
+        created(
+            rig.engine("peer")
+                .snapshot(&roots_of(Class::Secret, &theirs), 1)
+                .await
+                .unwrap(),
+        );
+        let mine = rig.dir("my-secret");
+        let engine = rig
+            .engine("pc")
+            .with_entry_filter(Class::Secret, small_flat_json);
+        (mine, engine)
+    }
+
+    #[tokio::test]
+    async fn entries_the_entry_filter_refuses_do_not_count_as_a_class_that_had_entries() {
+        // o dispositivo nunca aplicaria `y.bak`: a pasta vazia dele não é "esvaziei a classe"
+        let rig = Rig::new();
+        let (mine, engine) = tip_from_a_peer_with_secret(&rig, &["y.bak"]).await;
+
+        let (_, manifest, _, _) = created(
+            engine
+                .snapshot(&roots_of(Class::Secret, &mine), 2)
+                .await
+                .unwrap(),
+        );
+        assert!(file_paths(&manifest).is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_entry_the_filter_accepts_still_counts_when_the_class_is_emptied() {
+        let rig = Rig::new();
+        let (mine, engine) = tip_from_a_peer_with_secret(&rig, &["ok.json", "y.bak"]).await;
+
+        assert_eq!(
+            engine.snapshot(&roots_of(Class::Secret, &mine), 2).await,
+            Err(EngineError::ClassEmptied {
+                class: Class::Secret,
+                had: 1
+            })
+        );
+    }
+
     #[tokio::test]
     async fn a_disabled_class_is_carried_and_never_counts_as_emptied() {
         let rig = Rig::new();
