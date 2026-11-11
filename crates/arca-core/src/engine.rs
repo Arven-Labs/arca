@@ -726,7 +726,12 @@ impl<S: BlobStore> Engine<S> {
             if allow_empty.contains(&class) {
                 continue;
             }
-            let had = prev_files.iter().filter(|f| f.class == class).count();
+            // só conta o que este dispositivo aplicaria: uma entrada que o filtro recusa (um nome
+            // estranho publicado por outro dispositivo) não faz da pasta vazia um "esvaziei a classe"
+            let had = prev_files
+                .iter()
+                .filter(|f| f.class == class && self.accepts(f))
+                .count();
             if had > 0 && !files.iter().any(|f| f.class == class) {
                 return Err(EngineError::ClassEmptied { class, had });
             }
@@ -5441,6 +5446,55 @@ mod tests {
             engine
                 .snapshot_allowing_empty(&roots, 2, &[Class::Config])
                 .await,
+            Err(EngineError::ClassEmptied {
+                class: Class::Secret,
+                had: 1
+            })
+        );
+    }
+
+    /// Um outro dispositivo publicou `files` na classe `secret` (sem filtro); devolve a pasta, vazia, de um segundo
+    /// dispositivo no mesmo armazenamento, que tem o filtro de entradas `small_flat_json`.
+    async fn tip_from_a_peer_with_secret(rig: &Rig, files: &[&str]) -> (PathBuf, Engine<Backend>) {
+        let theirs = rig.dir("src-secret");
+        for name in files {
+            write(&theirs, name, b"{}");
+        }
+        created(
+            rig.engine("peer")
+                .snapshot(&roots_of(Class::Secret, &theirs), 1)
+                .await
+                .unwrap(),
+        );
+        let mine = rig.dir("my-secret");
+        let engine = rig
+            .engine("pc")
+            .with_entry_filter(Class::Secret, small_flat_json);
+        (mine, engine)
+    }
+
+    #[tokio::test]
+    async fn entries_the_entry_filter_refuses_do_not_count_as_a_class_that_had_entries() {
+        // o dispositivo nunca aplicaria `y.bak`: a pasta vazia dele não é "esvaziei a classe"
+        let rig = Rig::new();
+        let (mine, engine) = tip_from_a_peer_with_secret(&rig, &["y.bak"]).await;
+
+        let (_, manifest, _, _) = created(
+            engine
+                .snapshot(&roots_of(Class::Secret, &mine), 2)
+                .await
+                .unwrap(),
+        );
+        assert!(file_paths(&manifest).is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_entry_the_filter_accepts_still_counts_when_the_class_is_emptied() {
+        let rig = Rig::new();
+        let (mine, engine) = tip_from_a_peer_with_secret(&rig, &["ok.json", "y.bak"]).await;
+
+        assert_eq!(
+            engine.snapshot(&roots_of(Class::Secret, &mine), 2).await,
             Err(EngineError::ClassEmptied {
                 class: Class::Secret,
                 had: 1
