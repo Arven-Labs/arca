@@ -2,6 +2,16 @@
 
 Mais recente no topo.
 
+### 2026-11-12 — Sessão 71 (P-36 9f: confirmação para esvaziar de propósito)
+
+- **Pedido**: a fatia que a Sessão 70 deixou, escolhida entre as pendentes; plano aprovado em plan mode, com duas decisões suas: um botão por classe (e não um só para tudo) e a autorização vale só para aquele sync, sem gravar nada. Nenhum código da arca mudou; o código está no [Warden#120](https://github.com/Arven-Labs/warden/pull/120), este PR só registra.
+- **Antes**: o Warden#116 já estava mesclado (`e309942d`, 2026-11-12); o registro da Sessão 70 o dava como pronto e não mesclado.
+- **Feito (Warden#120)**: `SyncEngine::arca_sync_allowing_empty(hub, now, &[Class])` (`arca_sync` é o mesmo com `&[]`, assinatura intacta); comando `arca_sync_allow_empty(hub_id, class)` que só aceita `vault` e `secret` e confere a classe antes de olhar o hub; `loop_cycle` segue sem autorizar. A tela ganhou, ao lado de cada aviso de classe esvaziada, um botão de 2º clique (o primeiro só pergunta e diz que a remoção chega aos outros dispositivos; cancelar não envia). `rev` da arca não mudou (`a8e2677` já tinha `snapshot_allowing_empty`).
+- **Testes (CI)**: escritos antes e empurrados num PR rascunho; no esqueleto falharam 5 no Rust (3 no `warden-server`, 2 no desktop) e 2 no e2e, pelo motivo certo. Dois testes novos do `warden-server` já passavam no esqueleto (`the_confirmation_is_for_that_one_cycle…` e `confirming_a_class_that_was_not_emptied…`): o esqueleto se comporta como o `arca_sync` comum, então eles valem como guarda contra regressão e não provam a feature (o primeiro foi pego pela quebra 2, o segundo não foi pego por nenhuma quebra). Com a implementação, os 8 checks do `e734bb5` ficaram verdes.
+- **Quebras de propósito** (PRs descartáveis #121, #122, #123, fechados e branches apagadas): ignorar a lista autorizada derrubou 3 testes de remoção confirmada; o `arca_sync` comum autorizando as duas classes derrubou 6 (os de aviso e o de "a confirmação vale um ciclo"); o 1º clique já enviando derrubou 2 do e2e.
+- **Não verificado**: a tela real do Tauri (só e2e com backend fingido); Windows e macOS; nada rodado localmente (só `tsc`); a lista de avisos continua só no "Sync now" (o ciclo automático segue sem canal); texto `pt-BR` só pelo e2e e pela paridade de chaves.
+- **Fica**: mesclar o Warden#120; avisos do ciclo automático, listar e limpar perdedores na tela, revogar o aceite; P-09, P-22, P-25, P-26, P-29 a P-36.
+
 ### 2026-11-11 — Sessão 70 (P-36 9f: piso contra esvaziar a classe inteira no snapshot)
 
 - **Pedido**: "vamos lá de 1" (faxina) e depois o plano do piso, aprovado em plan mode. Decisões suas: vale para todas as classes por padrão; o consumidor autoriza por parâmetro explícito.
