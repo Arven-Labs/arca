@@ -2,6 +2,17 @@
 
 Mais recente no topo.
 
+### 2026-11-12 — Sessão 72 (P-36: avisos do ciclo automático)
+
+- **Pedido**: "vamos de avisos do ciclo automático", o que a Sessão 71 deixou; plano aprovado em plan mode, com duas decisões suas: canal por **estado + evento** (e não só estado, nem notificação do SO) e os **erros entram** como aviso. Nenhum código da arca mudou; o código está no [Warden#124](https://github.com/Arven-Labs/warden/pull/124), este PR só registra.
+- **Achado**: `loop_cycle` descartava o `ArcaSyncReport` inteiro (só devolvia `files_changed`), e um token recusado parava o loop em memória sem nada na tela. Como a rodada parada não chama mais o ciclo, o "parou" não pode vir do último relatório; vem de `SyncRunner::arca_halted()`.
+- **Feito (Warden#124)**: `ArcaLoopLast` (em memória) guarda o último ciclo (`LoopReport`: hora, relatório ou erro `authRejected`/`other`); `loop_cycle_recording` grava e mantém a assinatura de `loop_cycle`; comando `arca_loop_last` (`LoopStatus` com `stopped`, e a rejeição antiga some quando o runner já não está parado); evento `arca-loop-report` sem dados, emitido a cada rodada no `spawn_auto_sync`. A seção mostra os avisos e os botões do "Sync now" e o erro do ciclo (en e pt-BR); o mais novo entre o manual e o automático vence.
+- **Testes (CI)**: escritos antes, no rascunho: no esqueleto falharam 12 no Rust, 4 no front e 5 no e2e, pelo motivo certo; 2 do Rust, 2 do front e 1 do e2e já passavam (os de "nada a dizer"), então valem só como guarda. Com a implementação, `rust`, `frontend`, `e2e do desktop`, `e2e do hub` e `guard` verdes no `9458957` (Android e Mobile saíram como "skipping"; não conferi a regra do `Changed areas`).
+- **Quebras de propósito** (PRs descartáveis #125 a #128, fechados e branches apagadas): não gravar o relatório derrubou 3 testes Rust; manter a rejeição antiga derrubou 2; o evento sem refazer a consulta derrubou 2 no e2e. **A quarta (o automático sempre vencendo o manual) caiu primeiro no `tsc`**, por `manualAt` sem uso, então não provou nada; refeita sem o erro de tipo, o e2e "a manual sync made after the automatic cycle is not overwritten…" a pegou.
+- **Deslizes de processo**: um `cat >>` vazio no Bash contra a regra do `CLAUDE.md` (só `Edit`/`Write`), sem efeito no arquivo; um `git stash` e `pop` para comparar o `cargo fmt`, que não serviu (o repo não está limpo no rustfmt) e devolveu tudo.
+- **Não verificado**: a tela real do Tauri (só e2e com backend fingido); Windows e macOS; nada rodado localmente (só `tsc`); o estado é só em memória; o aviso de classe só vem quando o ciclo faz snapshot.
+- **Fica**: mesclar o Warden#124; listar e limpar perdedores na tela, revogar o aceite; P-09, P-22, P-25, P-26, P-29 a P-36.
+
 ### 2026-11-12 — Sessão 71 (P-36 9f: confirmação para esvaziar de propósito)
 
 - **Pedido**: a fatia que a Sessão 70 deixou, escolhida entre as pendentes; plano aprovado em plan mode, com duas decisões suas: um botão por classe (e não um só para tudo) e a autorização vale só para aquele sync, sem gravar nada. Nenhum código da arca mudou; o código está no [Warden#120](https://github.com/Arven-Labs/warden/pull/120), este PR só registra.
