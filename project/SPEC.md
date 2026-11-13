@@ -153,6 +153,7 @@ Ordem priorizada (local-first reduz a importância de latência de rede):
 - **Anchor:** dados financeiros sincronizados, com política própria de consistência.
 - **Kin:** anexos criptografados com expiração. Entrega de mensagens é um módulo separado, o storage não resolve isso.
 - **TruthID:** provedor opcional de identidade e chaves; âncora de integridade em Ethereum como módulo opcional.
+- **Drive pessoal (visão de longo prazo, registrada em 2026-11-13):** depois que a arca atender os outros projetos (Warden, Anchor, Kin, TruthID), ela pode virar um "drive" de arquivos do usuário (pastas sincronizadas, acesso por app, criptografia no cliente), reaproveitando a mesma infra de `BlobStore`, manifest e sync. É uma intenção do dono, **sem escopo, prazo nem desenho**; nada disso entra antes de os consumidores acima estarem atendidos. Ao tirar do papel: decidir interface (pasta montada, app, web), compartilhamento e chunking (a v1 não tem, ADR 0003), e conferir se já existe algo pronto (passo 0 de `padrao/dependencias-novas.md`).
 - **Git verificável (projeto separado):** repositórios content-addressed com commits assinados via TruthID, usando esta camada para armazenar objetos. Descoberta, issues, PRs e busca são uma plataforma à parte.
 
 ## 14. Riscos
