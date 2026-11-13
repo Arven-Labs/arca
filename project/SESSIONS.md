@@ -2,6 +2,15 @@
 
 Mais recente no topo.
 
+### 2026-11-13 — Sessão 76 (P-37 item 1: aceitar os logins não remove logins do grupo)
+
+- **Pedido**: "o que você me recomenda?" levou ao P-37; plano aprovado em plan mode, com duas decisões suas: login local divergente **recusa** o aceite, e o escopo é **só o item 1**. Toca consentimento sobre segredos (AGENTS §4), confirmado ao aprovar o plano. Nenhum código da arca mudou; o código está no [Warden#141](https://github.com/Arven-Labs/warden/pull/141) (mesclado em `1abb3f3f`), este PR só registra.
+- **Feito (Warden#141)**: `arca_accept_logins` traz os logins da ponta à pasta local antes de gravar o aceite (`apply(None, ponta)` só com a raiz `secret`); divergência local ou várias pontas recusam; sem ponta segue como antes. Saiu do texto do "Parar" a frase "aceitar de novo pode remover logins".
+- **Testes (CI)**: escritos antes: 3 falharam no rascunho pelo motivo certo (`arca_mode.rs:1567`, `1592`, `1616`), e passam com a correção (8 checks verdes). Quebra de propósito (#142, fechado, branch apagada): `apply` de ponta para ponta derrubou os mesmos 3.
+- **Desvio do combinado**: o teste de divergência exigia que o erro citasse o arquivo; o `apply` devolve só `LocalChanges`, então ele agora confere o motivo ("differs from the one the group has"). Nomear o arquivo exigiria mudar a arca.
+- **Não verificado**: aceite com 2 pontas (sem teste, a API pública não deixa montar); tela real do Tauri; Windows e macOS; nada rodado localmente (só `tsc`).
+- **Fica**: **P-37 item 2** (`save_conflict_losers` sem filtro de raiz: cópia do perdedor em texto claro num dispositivo sem aceite; mudança na arca, outro PR); decidir se a arca devolve o caminho em `LocalChanges`; ideias de 2026-11-13 do Warden (agent-desktop e OpenBot a confirmar); limpar `warden/target` (606 MB), se quiser; P-09, P-22, P-25, P-26, P-29 a P-36.
+
 ### 2026-11-13 — Sessão 75 (registro de ideias: drive pessoal na arca; ideias do Warden)
 
 - **Pedido**: registrar uma visão de longo prazo ("depois de atender todos os outros, virar tipo um drive") e, na sequência, ideias para o Warden. Só registro, sem código.
