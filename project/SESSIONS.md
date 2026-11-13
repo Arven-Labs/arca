@@ -2,6 +2,15 @@
 
 Mais recente no topo.
 
+### 2026-11-13 — Sessão 75 (registro de ideias: drive pessoal na arca; ideias do Warden)
+
+- **Pedido**: registrar uma visão de longo prazo ("depois de atender todos os outros, virar tipo um drive") e, na sequência, ideias para o Warden. Só registro, sem código.
+- **Feito (arca#89, mesclado em `0fff8eb`)**: item "Drive pessoal" no roadmap pós-MVP do `SPEC.md` §13, sem escopo, prazo nem desenho; ao tirar do papel, decidir interface, compartilhamento e chunking (a v1 não tem, ADR 0003) e procurar algo pronto antes.
+- **Feito no Warden (warden#140, mesclado em `7d329d26`)**: 12 ideias no `project/ROADMAP.md`, nas seções que já tratavam do tema: redes sociais (X, LinkedIn, Instagram, TikTok) e áudio (ElevenLabs e outras, e "tipo Alexa"); credenciais do TruthID; cadastro de APIs; Warden como ADE (investigar o Orca) e editor de código embutido; identificador de contexto por conversa (CLI, Code, opencode); fluxos visuais estilo n8n; agent-desktop; OpenBot (bot de agente open source, por baixo dos agentes). O `SESSIONS.md` do Warden não foi tocado (parou na Sessão 392; as sessões 393 em diante vivem aqui, por convenção do arca).
+- **CI**: arca#89 com os 4 checks verdes (guard, msrv, rust, audit); warden#140 com o `guard` verde, o único que o PR roda.
+- **Não verificado**: nada das ideias foi pesquisado (Orca, opencode, n8n, ElevenLabs, APIs das redes, editores candidatos); a licença do n8n está de memória.
+- **Fica**: o dono confirmar o que é o **agent-desktop** e qual é o **OpenBot** (nome e link); as **credenciais do TruthID** pedem confirmação e desenho antes de código (AGENTS §4) e convivem com a decisão de 2026-09-23 de manter o TruthID fora do MCP; **P-37** (corrigir o aceite dos logins, plan mode); limpar `warden/target` (606 MB), se quiser; P-09, P-22, P-25, P-26, P-29 a P-36.
+
 ### 2026-11-12 — Sessão 74 (P-36: revogar o aceite dos logins)
 
 - **Pedido**: "vamos de revogar o aceite", o que a Sessão 73 deixou; plano aprovado em plan mode, com uma decisão sua sobre o re-aceite: **medir e registrar**, sem corrigir nesta fatia. Nenhum código da arca mudou; o código está no [Warden#134](https://github.com/Arven-Labs/warden/pull/134), este PR só registra. Toca consentimento sobre segredos (AGENTS §4), confirmado ao aprovar o plano.
