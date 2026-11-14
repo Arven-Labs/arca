@@ -9,7 +9,8 @@ Mais recente no topo.
 - **Testes (CI)**: 4 novos, escritos antes; falharam todos pelo motivo certo (run 43535404336: `saved` 1 e 2 em vez de 0 e 1; o de ordem com `UnsafeConflictsDir`) e passam com a correção (run 43536188364, 4 checks verdes). O bug, antes só lido no código, ficou medido numa fusão real. Quebra de propósito (arca#93, fechado, branch apagada): filtro depois de `check_conflicts_dir` derrubou só o teste de ordem (run 43536767297).
 - **Medido de passagem**: entre o `rev` que o Warden usa (`a8e2677`) e a `main` não havia mudança em `crates/`, só docs; o bump traz só esta correção.
 - **Não verificado**: Windows e macOS; nada rodado localmente além de `cargo fmt --check`.
-- **Fica**: **Warden trocar o `rev` do `arca-core`** (3 `Cargo.toml` e o lock) depois do merge deste PR; decidir se a arca devolve o caminho em `LocalChanges`; ideias de 2026-11-13 do Warden (agent-desktop e OpenBot a confirmar); P-09, P-22, P-25, P-26, P-29 a P-36.
+- **Feito depois do merge ([Warden#143](https://github.com/Arven-Labs/warden/pull/143), mesclado em `692997f3`)**: `rev` do `arca-core` de `a8e2677` para `abc803e` nos 3 `Cargo.toml` e no `source` do lock (editado à mão: entre os dois só mudou `engine.rs`). CI verde (Rust clippy e testes, Android, Mobile, hub real, guard). P-37 movido para Resolvidas.
+- **Fica**: decidir se a arca devolve o caminho em `LocalChanges`; ideias de 2026-11-13 do Warden (agent-desktop e OpenBot a confirmar); P-09, P-22, P-25, P-26, P-29 a P-36.
 
 ### 2026-11-13 — Sessão 76 (P-37 item 1: aceitar os logins não remove logins do grupo)
 
