@@ -318,7 +318,7 @@ fn decide_phases(loaded: &[(&PathBuf, Journal)]) -> Result<Vec<Phase>, EngineErr
         if group.iter().any(|&i| loaded[i].1.peers != journal.peers) || group.len() > peers {
             return Err(EngineError::CorruptJournal);
         }
-        let committed = group.iter().any(|&i| loaded[i].1.phase == Phase::Committed);
+        let committed = group.iter().all(|&i| loaded[i].1.phase == Phase::Committed);
         if !committed && group.len() < peers {
             return Err(EngineError::IncompleteApply);
         }
