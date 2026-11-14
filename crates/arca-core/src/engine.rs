@@ -5326,6 +5326,54 @@ mod tests {
         assert!(!inside_a_live_root.exists());
     }
 
+    // ---- P-30 (1): o perdedor nunca sobrescreve o que apareceu no destino ----
+
+    /// Quantos temporários `.tmp-*` sobraram em `dir`.
+    fn leftover_temps(dir: &Path) -> usize {
+        fs::read_dir(dir)
+            .unwrap()
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".tmp-")
+            })
+            .count()
+    }
+
+    /// Um arquivo criado no destino depois do `needs_write` (a cópia que a pessoa editou, ou
+    /// outro processo) fica como está: gravar o perdedor não o substitui.
+    #[test]
+    fn a_loser_never_overwrites_a_file_that_appeared_after_the_check() {
+        let tmp = TempDir::new();
+        let dest = tmp
+            .path()
+            .join("conflitos/secret/oauth/slack.json.conflito-pb-0011223344556677");
+        fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        fs::write(&dest, b"da pessoa").unwrap();
+
+        let _ = write_loser(&dest, b"perdedor");
+
+        assert_eq!(fs::read(&dest).unwrap(), b"da pessoa");
+        assert_eq!(leftover_temps(dest.parent().unwrap()), 0);
+    }
+
+    /// Destino livre: o perdedor é gravado e nenhum temporário sobra.
+    #[test]
+    fn a_loser_is_written_when_the_destination_is_free() {
+        let tmp = TempDir::new();
+        let dest = tmp
+            .path()
+            .join("conflitos/secret/oauth/slack.json.conflito-pb-0011223344556677");
+
+        write_loser(&dest, b"perdedor").unwrap();
+
+        assert_eq!(fs::read(&dest).unwrap(), b"perdedor");
+        assert_eq!(leftover_temps(dest.parent().unwrap()), 0);
+    }
+
     #[tokio::test]
     async fn plain_merge_still_works_without_a_conflicts_dir() {
         let (d, _, _) = config_conflict().await;
