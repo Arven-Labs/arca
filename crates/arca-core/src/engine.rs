@@ -4188,6 +4188,31 @@ mod tests {
         assert_eq!(fs::read(h.target.join("a.md")).unwrap(), b"da pessoa");
     }
 
+    /// P-33 item 2: um diário corrompido em qualquer raiz recusa a recuperação **antes** de tocar
+    /// em qualquer raiz. Hoje a primeira raiz (vault) já foi recuperada quando a segunda falha, e
+    /// o conjunto fica meio voltado.
+    #[tokio::test]
+    async fn a_corrupt_journal_in_a_later_root_stops_the_recovery_before_touching_any_root() {
+        let h = hist().await;
+        let config = h.rig.tmp.path().join("config");
+        copy_dir(&h.target, &config);
+        interrupt_apply(&h.target);
+        interrupt_apply(&config);
+        fs::write(crate::journal::Journal::path(&config), b"lixo").unwrap();
+        let (before_vault, before_config) = (tree(&h.target), tree(&config));
+        let roots = Roots {
+            vault: Some(h.target.clone()),
+            config: Some(config.clone()),
+            ..Roots::default()
+        };
+        assert_eq!(
+            h.rig.engine("pc").recover(&roots).await,
+            Err(EngineError::CorruptJournal)
+        );
+        assert_eq!(tree(&h.target), before_vault);
+        assert_eq!(tree(&config), before_config);
+    }
+
     /// Uma pasta somente leitura faz o commit falhar no meio: tudo volta como estava.
     #[cfg(unix)]
     #[tokio::test]
