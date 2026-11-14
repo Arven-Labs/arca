@@ -508,7 +508,8 @@ impl<S: BlobStore> Engine<S> {
     /// (`save_conflict_losers`, em `dir`) **antes** de gravar o manifest de fusão (M-1). A fusão
     /// é determinística e a gravação é idempotente: se o save falhar ou o processo cair, nada
     /// da fusão foi gravado e a próxima chamada recalcula os mesmos conflitos. Se o save
-    /// falhar, o erro volta e as pontas continuam como estavam.
+    /// falhar, o erro volta e as pontas continuam como estavam. Classe sem raiz em `roots` não
+    /// tem perdedor gravado (P-37).
     pub async fn merge_with_losers(
         &self,
         now: u64,
@@ -926,16 +927,21 @@ impl<S: BlobStore> Engine<S> {
     /// Grava, em `dir/<classe>/<path>.conflito-<dispositivo>-<16 hex do sha256>`, o texto claro
     /// dos perdedores de conflito das classes `config` e `secret` (ADR 0010), fora das pastas
     /// das classes. Idempotente; `dir` dentro de uma pasta de classe ligada é recusado.
+    /// O perdedor de uma classe sem raiz em `roots` é pulado sem ser decifrado nem contado
+    /// (P-37): quem não liga `secret` não guarda segredo em texto claro. Quem perdeu tem a
+    /// raiz e grava a própria cópia ao aplicar (`conflicts_between`).
     pub async fn save_conflict_losers(
         &self,
         conflicts: &[Conflict],
         dir: &Path,
         roots: &Roots,
     ) -> Result<SavedLosers, EngineError> {
-        // `vault` já tem a cópia no manifest; remoção-vs-edição não tem perdedor com texto
+        // `vault` já tem a cópia no manifest; remoção-vs-edição não tem perdedor com texto;
+        // classe sem raiz neste dispositivo não recebe cópia
         let losers: Vec<(&Conflict, &FileEntry)> = conflicts
             .iter()
             .filter(|c| matches!(c.class, Class::Config | Class::Secret))
+            .filter(|c| roots.is_enabled(c.class))
             .filter_map(|c| c.loser.as_ref().map(|loser| (c, loser)))
             .collect();
         if losers.is_empty() {
