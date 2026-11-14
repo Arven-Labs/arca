@@ -82,7 +82,7 @@ mod imp {
 
     /// Uma subpasta de `fd`, sem seguir link.
     fn open_subfolder(fd: &OwnedFd, name: &OsStr) -> Result<OwnedFd, OpenError> {
-        match openat(fd, name, DIR.union(OFlags::NOFOLLOW), Mode::empty()) {
+        match openat(fd, name, DIR, Mode::empty()) {
             Ok(next) => Ok(next),
             // `ELOOP` (link) ou `ENOTDIR` (não é pasta; algumas plataformas o dão para link)
             Err(e) if e == Errno::LOOP || e == Errno::NOTDIR => Err(OpenError::NotAFolder),
