@@ -108,38 +108,11 @@ pub(crate) fn current_sha(path: &Path) -> Result<Option<Hash32>, EngineError> {
     }
 }
 
-/// Nenhuma pasta entre a raiz e o destino pode ser symlink (ou outra coisa que não pasta):
-/// `safe_join` valida o texto do caminho, mas o sistema de arquivos segue links existentes.
-pub(crate) fn check_components(root: &Path, dest: &Path) -> Result<(), EngineError> {
-    match fs::metadata(root) {
-        Ok(meta) if meta.is_dir() => {}
-        Ok(_) => return Err(EngineError::LocalChanges),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(io_error(e)),
-    }
-    let relative = dest
-        .strip_prefix(root)
-        .map_err(|_| EngineError::Io(io::ErrorKind::InvalidInput))?;
-    let mut path = root.to_path_buf();
-    let parts: Vec<_> = relative.components().collect();
-    for part in &parts[..parts.len().saturating_sub(1)] {
-        path.push(part);
-        match fs::symlink_metadata(&path) {
-            Ok(meta) if meta.file_type().is_dir() => {}
-            Ok(_) => return Err(EngineError::LocalChanges),
-            // daqui para baixo nada existe: não há o que seguir
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(e) => return Err(io_error(e)),
-        }
-    }
-    Ok(())
-}
-
 /// Abre a pasta-pai de `dest` descendo de `root` sem seguir link (P-29 item 1): quem confere e
 /// quem age usam o mesmo `Folder`, então uma troca por link entre os dois não muda onde se age.
 /// `None` se a raiz ou uma pasta do caminho não existe (nada abaixo existe); `LocalChanges` se
 /// um componente é link ou não é pasta.
-fn open_parent(root: &Path, dest: &Path) -> Result<Option<Folder>, EngineError> {
+pub(crate) fn open_parent(root: &Path, dest: &Path) -> Result<Option<Folder>, EngineError> {
     let relative = dest
         .strip_prefix(root)
         .map_err(|_| EngineError::Io(io::ErrorKind::InvalidInput))?;
@@ -159,7 +132,7 @@ fn open_parent(root: &Path, dest: &Path) -> Result<Option<Folder>, EngineError> 
 }
 
 /// O nome do arquivo de `dest` (vem de um `path` do manifest já validado, que é texto UTF-8).
-fn name_of(dest: &Path) -> Result<&str, EngineError> {
+pub(crate) fn name_of(dest: &Path) -> Result<&str, EngineError> {
     dest.file_name()
         .and_then(|n| n.to_str())
         .ok_or(EngineError::Io(io::ErrorKind::InvalidInput))
@@ -167,7 +140,7 @@ fn name_of(dest: &Path) -> Result<&str, EngineError> {
 
 /// Como `current_sha`, mas para `name` dentro de `folder`: `None` se não existe; `LocalChanges`
 /// se é link ou algo que não é arquivo regular.
-fn sha_in(folder: &Folder, name: &str) -> Result<Option<Hash32>, EngineError> {
+pub(crate) fn sha_in(folder: &Folder, name: &str) -> Result<Option<Hash32>, EngineError> {
     match folder.sha256(name) {
         Ok(sha) => Ok(Some(sha)),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -177,7 +150,7 @@ fn sha_in(folder: &Folder, name: &str) -> Result<Option<Hash32>, EngineError> {
 }
 
 /// `Ok` se `name` não existe em `folder` (nem como link); senão `AlreadyExists`.
-fn absent_in(folder: &Folder, name: &str) -> Result<(), EngineError> {
+pub(crate) fn absent_in(folder: &Folder, name: &str) -> Result<(), EngineError> {
     match folder.stat(name) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
         Ok(_) => Err(EngineError::Io(io::ErrorKind::AlreadyExists)),
@@ -220,14 +193,6 @@ pub(crate) fn plan(items: Vec<Item>) -> Result<(Vec<Planned>, usize), EngineErro
         }
     }
     Ok((planned, unchanged))
-}
-
-pub(crate) fn ensure_absent(path: &Path) -> Result<(), EngineError> {
-    match fs::symlink_metadata(path) {
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-        Ok(_) => Err(EngineError::Io(io::ErrorKind::AlreadyExists)),
-        Err(e) => Err(io_error(e)),
-    }
 }
 
 /// Fase 2: cria as pastas que faltam (uma a uma, no diário) e grava o conteúdo novo ao lado
@@ -360,7 +325,7 @@ pub(crate) fn finish(planned: &[Planned]) {
 
 /// Remove as pastas que a remoção de `dest` esvaziou, de baixo para cima, nunca a raiz. Cada uma
 /// é removida pela pasta-pai aberta sem seguir link, não por caminho.
-fn remove_emptied_folders(root: &Path, dest: &Path) {
+pub(crate) fn remove_emptied_folders(root: &Path, dest: &Path) {
     let Ok(relative) = dest.strip_prefix(root) else {
         return;
     };
