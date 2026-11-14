@@ -62,7 +62,7 @@ mod imp {
     use rustix::io::Errno;
     use std::ffi::OsStr;
     use std::fs::File;
-    use std::io::{self, Write};
+    use std::io::{self, Read, Write};
     use std::os::fd::OwnedFd;
     use std::path::{Component, Path, PathBuf};
 
@@ -221,6 +221,34 @@ mod imp {
             }
             hash_reader(File::from(fd))
         }
+
+        /// Lê um arquivo regular desta pasta com teto de `max` bytes. Abre com `O_NOFOLLOW` e
+        /// `O_NONBLOCK` e confere tipo e tamanho no descritor aberto, não no nome (P-33 item 6);
+        /// a leitura para em `max + 1`, então um arquivo que cresce depois da conferência também
+        /// é recusado. Link, FIFO, pasta ou maior que `max`: `InvalidInput`.
+        pub(crate) fn read_limited(&self, name: &str, max: u64) -> io::Result<Vec<u8>> {
+            let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+            let fd = openat(&self.fd, plain_name(name)?, flags, Mode::empty()).map_err(|e| {
+                if e == Errno::LOOP {
+                    io::ErrorKind::InvalidInput.into()
+                } else {
+                    io::Error::from(e)
+                }
+            })?;
+            let st = fstat(&fd)?;
+            let size = u64::try_from(st.st_size).unwrap_or(u64::MAX);
+            if FileType::from_raw_mode(st.st_mode) != FileType::RegularFile || size > max {
+                return Err(io::ErrorKind::InvalidInput.into());
+            }
+            let mut bytes = Vec::new();
+            File::from(fd)
+                .take(max.saturating_add(1))
+                .read_to_end(&mut bytes)?;
+            if bytes.len() as u64 > max {
+                return Err(io::ErrorKind::InvalidInput.into());
+            }
+            Ok(bytes)
+        }
     }
 }
 
@@ -230,7 +258,7 @@ mod imp {
     use crate::disk::{create_private_dir, write_atomic};
     use crate::manifest::Hash32;
     use std::fs;
-    use std::io;
+    use std::io::{self, Read};
     use std::path::{Path, PathBuf};
 
     /// Fora do Unix: ainda um caminho (sem a garantia contra a troca por link).
@@ -316,6 +344,23 @@ mod imp {
                 return Err(io::ErrorKind::InvalidInput.into());
             }
             hash_reader(fs::File::open(path)?)
+        }
+
+        /// Fora do Unix: confere pelo nome e lê (sem a garantia contra a troca por link).
+        pub(crate) fn read_limited(&self, name: &str, max: u64) -> io::Result<Vec<u8>> {
+            let path = self.path.join(plain_name(name)?);
+            let meta = fs::symlink_metadata(&path)?;
+            if !meta.file_type().is_file() || meta.len() > max {
+                return Err(io::ErrorKind::InvalidInput.into());
+            }
+            let mut bytes = Vec::new();
+            fs::File::open(path)?
+                .take(max.saturating_add(1))
+                .read_to_end(&mut bytes)?;
+            if bytes.len() as u64 > max {
+                return Err(io::ErrorKind::InvalidInput.into());
+            }
+            Ok(bytes)
         }
     }
 }
@@ -510,6 +555,55 @@ mod tests {
         let folder = Folder::open_beneath(tmp.path(), Path::new("")).unwrap();
         let err = folder.sha256("fifo").unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn read_limited_reads_up_to_the_limit_and_refuses_one_byte_more() {
+        let tmp = TempDir::new();
+        fs::write(tmp.path().join("ok"), b"12345").unwrap();
+        fs::write(tmp.path().join("grande"), b"123456").unwrap();
+        let folder = Folder::open_beneath(tmp.path(), Path::new("")).unwrap();
+        assert_eq!(folder.read_limited("ok", 5).unwrap(), b"12345");
+        assert_eq!(
+            folder.read_limited("grande", 5).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            folder.read_limited("nao-existe", 5).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+    }
+
+    #[test]
+    fn read_limited_refuses_a_link_and_never_follows_it() {
+        let tmp = TempDir::new();
+        let outside = TempDir::new();
+        fs::write(outside.path().join("alvo"), b"segredo").unwrap();
+        symlink(outside.path().join("alvo"), tmp.path().join("cop")).unwrap();
+        let folder = Folder::open_beneath(tmp.path(), Path::new("")).unwrap();
+        let err = folder.read_limited("cop", 1024).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    /// Um FIFO no lugar do arquivo não pode travar a leitura.
+    #[test]
+    fn read_limited_of_a_fifo_or_a_folder_is_refused_instead_of_blocking() {
+        use rustix::fs::{mknodat, FileType, Mode, CWD};
+        let tmp = TempDir::new();
+        mknodat(
+            CWD,
+            tmp.path().join("fifo"),
+            FileType::Fifo,
+            Mode::RUSR | Mode::WUSR,
+            0,
+        )
+        .unwrap();
+        fs::create_dir(tmp.path().join("pasta")).unwrap();
+        let folder = Folder::open_beneath(tmp.path(), Path::new("")).unwrap();
+        for name in ["fifo", "pasta"] {
+            let err = folder.read_limited(name, 1024).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{name}");
+        }
     }
 
     #[test]

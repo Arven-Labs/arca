@@ -12,7 +12,7 @@ use crate::apply::{
     absent_in, is_reserved_name, name_of, new_name, old_name, open_parent, remove_emptied_folders,
     sha_in, Kind, Planned,
 };
-use crate::dirfd::Folder;
+use crate::dirfd::{Folder, OpenError};
 use crate::disk::write_atomic;
 use crate::engine::EngineError;
 use crate::manifest::{validate_path, Hash32};
@@ -133,17 +133,22 @@ impl Journal {
     /// `None` se não existe. Link no lugar, grande demais, JSON inválido, versão ou fase
     /// desconhecida, campo a mais ou caminho que sai da raiz: `CorruptJournal`.
     pub(crate) fn load(root: &Path) -> Result<Option<Journal>, EngineError> {
-        let path = Journal::path(root);
-        // `symlink_metadata`: um link no lugar do arquivo não é seguido, vale como corrupção
-        let meta = match fs::symlink_metadata(&path) {
-            Ok(meta) => meta,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(EngineError::Io(e.kind())),
+        // abre o arquivo sem seguir link e confere tipo e tamanho no que foi aberto, na mesma
+        // leitura (P-33 item 6): link, FIFO, pasta ou grande demais vale como corrupção
+        let folder = match Folder::open_beneath(root, Path::new("")) {
+            Ok(folder) => folder,
+            Err(OpenError::NotAFolder) => return Err(EngineError::CorruptJournal),
+            Err(OpenError::Io(e)) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(OpenError::Io(e)) => return Err(io_error(e)),
         };
-        if !meta.is_file() || meta.len() > MAX_JOURNAL_BYTES {
-            return Err(EngineError::CorruptJournal);
-        }
-        let bytes = fs::read(&path).map_err(|e| EngineError::Io(e.kind()))?;
+        let bytes = match folder.read_limited(JOURNAL_NAME, MAX_JOURNAL_BYTES) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) if e.kind() == io::ErrorKind::InvalidInput => {
+                return Err(EngineError::CorruptJournal)
+            }
+            Err(e) => return Err(io_error(e)),
+        };
         let journal: Journal =
             serde_json::from_slice(&bytes).map_err(|_| EngineError::CorruptJournal)?;
         journal.validate()?;
@@ -627,6 +632,25 @@ mod tests {
         assert_eq!(recover_root(&c.root), Err(EngineError::CorruptJournal));
         assert_eq!(tree(&c.root), before);
         assert!(real.exists());
+    }
+
+    /// Um FIFO no nome do diário é corrupção e não trava a leitura (abrir um FIFO sem
+    /// `O_NONBLOCK` esperaria um escritor para sempre).
+    #[cfg(unix)]
+    #[test]
+    fn a_journal_that_is_a_fifo_is_corrupt_instead_of_blocking() {
+        use rustix::fs::{mknodat, FileType, Mode, CWD};
+        let c = prepared();
+        fs::remove_file(Journal::path(&c.root)).unwrap();
+        mknodat(
+            CWD,
+            Journal::path(&c.root),
+            FileType::Fifo,
+            Mode::RUSR | Mode::WUSR,
+            0,
+        )
+        .unwrap();
+        assert_eq!(Journal::load(&c.root), Err(EngineError::CorruptJournal));
     }
 
     // ---------- queda em cada ponto: volta ao estado de origem ----------
