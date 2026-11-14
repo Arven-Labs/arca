@@ -9,9 +9,10 @@
 //! espera.
 
 use crate::apply::{
-    check_components, current_sha, ensure_absent, is_reserved_name, new_name, old_name, Kind,
-    Planned,
+    absent_in, is_reserved_name, name_of, new_name, old_name, open_parent, remove_emptied_folders,
+    sha_in, Kind, Planned,
 };
+use crate::dirfd::Folder;
 use crate::disk::write_atomic;
 use crate::engine::EngineError;
 use crate::manifest::{validate_path, Hash32};
@@ -197,22 +198,18 @@ fn dest_of(root: &Path, entry: &Entry) -> PathBuf {
     dest
 }
 
-/// Depois de uma remoção, apaga as pastas que ficaram vazias, de baixo para cima, sem nunca
-/// apagar a raiz. Melhor esforço (`remove_dir` não apaga pasta com conteúdo).
-fn remove_emptied_dirs(root: &Path, from: &Path) {
-    let mut dir = Some(from);
-    while let Some(d) = dir {
-        if d == root || fs::remove_dir(d).is_err() {
-            break;
-        }
-        dir = d.parent();
-    }
+/// Uma pasta já aberta (sem seguir link) e o caminho dela, só para montar o que vai em `kept`.
+/// Toda conferência e toda ação da recuperação agem em `folder`, nunca num caminho refeito do
+/// zero (P-29 item 1).
+struct Slot<'a> {
+    folder: &'a Folder,
+    dir: &'a Path,
 }
 
-/// Remove `path` se for um arquivo regular (nunca segue link, nunca apaga pasta).
-fn remove_if_regular(path: &Path) {
-    if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_file()) {
-        let _ = fs::remove_file(path);
+/// Remove `name` se for um arquivo regular (nunca segue link, nunca apaga pasta).
+fn remove_if_regular(folder: &Folder, name: &str) {
+    if folder.stat(name).is_ok_and(|e| e.is_file) {
+        let _ = folder.unlink(name);
     }
 }
 
@@ -229,30 +226,39 @@ pub(crate) fn recover_root(root: &Path) -> Result<Option<RootRecovery>, EngineEr
             // original de lado só sai se o destino está mesmo no estado novo.
             for e in &journal.entries {
                 let dest = dest_of(root, e);
-                check_components(root, &dest)?;
-                let parent = dest
+                // sem a pasta (ou a raiz) não há nada dela para terminar; um link no caminho é
+                // `LocalChanges`
+                let Some(folder) = open_parent(root, &dest)? else {
+                    continue;
+                };
+                let dir = dest
                     .parent()
                     .ok_or(EngineError::Io(io::ErrorKind::InvalidInput))?;
-                remove_if_regular(&parent.join(new_name(e.n)));
+                let slot = Slot {
+                    folder: &folder,
+                    dir,
+                };
+                let name = name_of(&dest)?;
+                remove_if_regular(&folder, &new_name(e.n));
                 if e.kind == Kind::Create {
                     continue;
                 }
-                let aside = parent.join(old_name(e.n));
-                if fs::symlink_metadata(&aside).is_err() {
+                let aside = old_name(e.n);
+                if folder.stat(&aside).is_err() {
                     continue;
                 }
-                let in_place = match (e.kind, current_sha(&dest)) {
+                let in_place = match (e.kind, sha_in(&folder, name)) {
                     (Kind::Update, Ok(Some(sha))) => Some(sha) == e.to_sha,
                     (Kind::Remove, Ok(None)) => true,
                     _ => false,
                 };
                 if in_place {
-                    remove_if_regular(&aside);
+                    remove_if_regular(&folder, &aside);
                     if e.kind == Kind::Remove {
-                        remove_emptied_dirs(root, parent);
+                        remove_emptied_folders(root, &dest);
                     }
                 } else {
-                    keep(&aside, &mut recovery.kept);
+                    keep(&slot, &aside, &mut recovery.kept);
                 }
             }
             recovery.completed = journal.entries.len();
@@ -260,22 +266,28 @@ pub(crate) fn recover_root(root: &Path) -> Result<Option<RootRecovery>, EngineEr
         Phase::Open => {
             for e in journal.entries.iter().rev() {
                 let dest = dest_of(root, e);
-                check_components(root, &dest)?;
-                let parent = dest
+                let Some(folder) = open_parent(root, &dest)? else {
+                    continue;
+                };
+                let dir = dest
                     .parent()
                     .ok_or(EngineError::Io(io::ErrorKind::InvalidInput))?;
-                let scratch = parent.join(new_name(e.n));
-                remove_if_regular(&scratch);
+                let slot = Slot {
+                    folder: &folder,
+                    dir,
+                };
+                let name = name_of(&dest)?;
+                let scratch = new_name(e.n);
+                remove_if_regular(&folder, &scratch);
                 match e.kind {
                     Kind::Create => {
                         // só o que nós pusemos: conteúdo diferente é da pessoa
-                        if matches!(current_sha(&dest), Ok(Some(sha)) if Some(sha) == e.to_sha) {
-                            remove_if_ours(&dest, &scratch, e.to_sha, &mut recovery.kept)?;
+                        if matches!(sha_in(&folder, name), Ok(Some(sha)) if Some(sha) == e.to_sha) {
+                            remove_if_ours(&slot, name, &scratch, e.to_sha, &mut recovery.kept)?;
                         }
                     }
                     Kind::Update | Kind::Remove => {
-                        let aside = parent.join(old_name(e.n));
-                        restore_original(e, &dest, &aside, &scratch, &mut recovery)?;
+                        restore_original(e, &slot, name, &mut recovery)?;
                     }
                 }
             }
@@ -286,80 +298,86 @@ pub(crate) fn recover_root(root: &Path) -> Result<Option<RootRecovery>, EngineEr
     Ok(Some(recovery))
 }
 
-/// Devolve `aside` (`.arca-old-<n>`) a `dest` se, e só se, o disco bate com o diário. Nunca
-/// sobrescreve conteúdo que não seja o que a própria arca pôs.
+/// Devolve `.arca-old-<n>` a `name` se, e só se, o disco bate com o diário. Nunca sobrescreve
+/// conteúdo que não seja o que a própria arca pôs.
 fn restore_original(
     entry: &Entry,
-    dest: &Path,
-    aside: &Path,
-    scratch: &Path,
+    slot: &Slot,
+    name: &str,
     recovery: &mut RootRecovery,
 ) -> Result<(), EngineError> {
-    match fs::symlink_metadata(aside) {
+    let folder = slot.folder;
+    let aside = old_name(entry.n);
+    let scratch = new_name(entry.n);
+    match folder.stat(&aside) {
         // o original nem chegou a ser movido
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(io_error(e)),
-        Ok(meta) if !meta.file_type().is_file() => {
-            keep(aside, &mut recovery.kept);
+        Ok(meta) if !meta.is_file => {
+            keep(slot, &aside, &mut recovery.kept);
             return Ok(());
         }
         Ok(_) => {}
     }
-    if !matches!(current_sha(aside), Ok(Some(sha)) if Some(sha) == entry.from_sha) {
-        keep(aside, &mut recovery.kept);
+    if !matches!(sha_in(folder, &aside), Ok(Some(sha)) if Some(sha) == entry.from_sha) {
+        keep(slot, &aside, &mut recovery.kept);
         return Ok(());
     }
-    let free = match current_sha(dest) {
+    let free = match sha_in(folder, name) {
         Ok(None) => true,
         // o novo que a arca pôs: tira de lá conferindo o que saiu, nunca por cima
         Ok(Some(sha)) if entry.kind == Kind::Update && Some(sha) == entry.to_sha => {
-            remove_if_ours(dest, scratch, entry.to_sha, &mut recovery.kept)?
+            remove_if_ours(slot, name, &scratch, entry.to_sha, &mut recovery.kept)?
         }
         // qualquer outro conteúdo (ou link, ou pasta) é da pessoa: o original fica de lado
         _ => false,
     };
     if !free {
-        keep(aside, &mut recovery.kept);
+        keep(slot, &aside, &mut recovery.kept);
         return Ok(());
     }
-    // `hard_link` falha se alguém criou o destino no meio-tempo
-    match fs::hard_link(aside, dest) {
+    // `link` falha se alguém criou o destino no meio-tempo
+    match folder.link(&aside, name) {
         Ok(()) => {
-            let _ = fs::remove_file(aside);
+            let _ = folder.unlink(&aside);
         }
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => keep(aside, &mut recovery.kept),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            keep(slot, &aside, &mut recovery.kept);
+        }
         Err(e) => return Err(io_error(e)),
     }
     Ok(())
 }
 
-/// Tira `dest` do caminho **se for o que a arca pôs** (`expected`). Conferir o hash e depois
+/// Tira `name` do caminho **se for o que a arca pôs** (`expected`). Conferir o hash e depois
 /// remover deixaria uma janela para uma edição concorrente; por isso se move primeiro para
 /// `scratch` (um `rename` atômico), confere o que foi movido e só então apaga. O que não for o
 /// esperado volta, sem sobrescrever (se o destino foi recriado, vai para `kept`).
 fn remove_if_ours(
-    dest: &Path,
-    scratch: &Path,
+    slot: &Slot,
+    name: &str,
+    scratch: &str,
     expected: Option<Hash32>,
     kept: &mut Vec<PathBuf>,
 ) -> Result<bool, EngineError> {
-    ensure_absent(scratch)?;
-    match fs::rename(dest, scratch) {
+    let folder = slot.folder;
+    absent_in(folder, scratch)?;
+    match folder.rename(name, scratch) {
         Ok(()) => {}
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
         Err(e) => return Err(io_error(e)),
     }
-    if matches!(current_sha(scratch), Ok(Some(sha)) if Some(sha) == expected) {
-        let _ = fs::remove_file(scratch);
+    if matches!(sha_in(folder, scratch), Ok(Some(sha)) if Some(sha) == expected) {
+        let _ = folder.unlink(scratch);
         return Ok(true);
     }
-    match fs::hard_link(scratch, dest) {
+    match folder.link(scratch, name) {
         Ok(()) => {
-            let _ = fs::remove_file(scratch);
+            let _ = folder.unlink(scratch);
             Ok(false)
         }
         Err(e) => {
-            keep(scratch, kept);
+            keep(slot, scratch, kept);
             if e.kind() == io::ErrorKind::AlreadyExists {
                 Ok(false)
             } else {
@@ -372,20 +390,19 @@ fn remove_if_ours(
 /// Registra em `kept` um arquivo que a recuperação não tocou. Se for um arquivo regular, ele é
 /// renomeado para `.arca-kept-<16 hex do sha256>` (nome reservado, único pelo conteúdo): o nome
 /// `.arca-old-<n>` colidiria com o próximo `apply`. Sem sucesso, fica onde está.
-fn keep(path: &Path, kept: &mut Vec<PathBuf>) {
+fn keep(slot: &Slot, name: &str, kept: &mut Vec<PathBuf>) {
+    let folder = slot.folder;
     let renamed = (|| {
-        if !fs::symlink_metadata(path).ok()?.file_type().is_file() {
+        if !folder.stat(name).ok()?.is_file {
             return None;
         }
-        let sha = current_sha(path).ok()??;
-        let target = path
-            .parent()?
-            .join(format!(".arca-kept-{}", &sha.to_string()[..16]));
-        fs::hard_link(path, &target).ok()?;
-        fs::remove_file(path).ok()?;
-        Some(target)
+        let sha = folder.sha256(name).ok()?;
+        let target = format!(".arca-kept-{}", &sha.to_string()[..16]);
+        folder.link(name, &target).ok()?;
+        folder.unlink(name).ok()?;
+        Some(slot.dir.join(target))
     })();
-    kept.push(renamed.unwrap_or_else(|| path.to_path_buf()));
+    kept.push(renamed.unwrap_or_else(|| slot.dir.join(name)));
 }
 
 #[cfg(test)]
@@ -754,6 +771,71 @@ mod tests {
         assert_eq!(fs::read_dir(&outside).unwrap().count(), 1);
     }
 
+    /// P-29 item 1 (fatia 3): o mesmo, na fase `open` (a volta). Uma pasta virada link para um
+    /// lugar que tem os nomes que a recuperação procura não pode ser tocada.
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_swapped_for_a_symlink_is_refused_by_the_rollback_too() {
+        let c = prepared();
+        let mut log = Vec::new();
+        commit(&mut log, &c.planned).unwrap();
+        drop(log);
+        let outside = c.root.parent().unwrap().join("fora");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("b.md"), b"B1").unwrap();
+        fs::write(outside.join(".arca-old-1"), b"B0").unwrap();
+        fs::rename(
+            c.root.join("sub"),
+            c.root.parent().unwrap().join("sub-velha"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&outside, c.root.join("sub")).unwrap();
+
+        assert!(recover_root(&c.root).is_err());
+        assert_eq!(fs::read(outside.join("b.md")).unwrap(), b"B1");
+        assert_eq!(fs::read(outside.join(".arca-old-1")).unwrap(), b"B0");
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 2);
+    }
+
+    /// Um FIFO no lugar do destino não trava a recuperação (abrir um FIFO sem `O_NONBLOCK`
+    /// esperaria um escritor para sempre): fica onde está e o original vai para `kept`.
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_in_place_of_the_destination_does_not_block_the_recovery() {
+        use rustix::fs::{mknodat, FileType, Mode, CWD};
+        for phase in [Phase::Open, Phase::Committed] {
+            let c = prepared();
+            let mut log = Vec::new();
+            commit(&mut log, &c.planned).unwrap();
+            drop(log);
+            if phase == Phase::Committed {
+                let mut journal = c.journal.clone();
+                journal.phase = Phase::Committed;
+                journal.save(&c.root).unwrap();
+            }
+            fs::remove_file(c.root.join("a.md")).unwrap();
+            mknodat(
+                CWD,
+                c.root.join("a.md"),
+                FileType::Fifo,
+                Mode::RUSR | Mode::WUSR,
+                0,
+            )
+            .unwrap();
+
+            let r = recover_root(&c.root).unwrap().unwrap();
+            let kind = fs::symlink_metadata(c.root.join("a.md"))
+                .unwrap()
+                .file_type();
+            assert!(
+                !kind.is_file() && !kind.is_dir() && !kind.is_symlink(),
+                "{phase:?}"
+            );
+            assert_eq!(fs::read(kept_at(&c.root, b"A0")).unwrap(), b"A0");
+            assert!(r.kept.contains(&kept_at(&c.root, b"A0")), "{phase:?}");
+        }
+    }
+
     // ---------- auditoria do PR 3c ----------
 
     /// Achado 1: o marcador `committed` foi gravado, mas a volta em memória (erro em outra raiz)
@@ -867,21 +949,27 @@ mod tests {
         let dir = TempDir::new();
         let (dest, tmp) = (dir.path().join("a.md"), dir.path().join(".arca-new-0"));
         let mut kept = Vec::new();
+        let folder = Folder::open_beneath(dir.path(), Path::new("")).unwrap();
+        let slot = Slot {
+            folder: &folder,
+            dir: dir.path(),
+        };
+        let (name, scratch) = ("a.md", ".arca-new-0");
 
         fs::write(&dest, b"nosso").unwrap();
-        assert!(remove_if_ours(&dest, &tmp, Some(sha(b"nosso")), &mut kept).unwrap());
+        assert!(remove_if_ours(&slot, name, scratch, Some(sha(b"nosso")), &mut kept).unwrap());
         assert!(!dest.exists() && !tmp.exists());
 
         // a pessoa salvou por cima entre a conferência e a remoção: o conteúdo é outro
         fs::write(&dest, b"edicao da pessoa").unwrap();
-        assert!(!remove_if_ours(&dest, &tmp, Some(sha(b"nosso")), &mut kept).unwrap());
+        assert!(!remove_if_ours(&slot, name, scratch, Some(sha(b"nosso")), &mut kept).unwrap());
         assert_eq!(fs::read(&dest).unwrap(), b"edicao da pessoa");
         assert!(!tmp.exists() && kept.is_empty());
 
         // e se o destino foi recriado enquanto o arquivo estava de lado, nada é sobrescrito
         fs::write(&dest, b"edicao da pessoa").unwrap();
         fs::write(&tmp, b"x").unwrap(); // tmp ocupado: não dá para mover para lá
-        assert!(remove_if_ours(&dest, &tmp, Some(sha(b"nosso")), &mut kept).is_err());
+        assert!(remove_if_ours(&slot, name, scratch, Some(sha(b"nosso")), &mut kept).is_err());
         assert_eq!(fs::read(&dest).unwrap(), b"edicao da pessoa");
         assert_eq!(fs::read(&tmp).unwrap(), b"x");
     }
