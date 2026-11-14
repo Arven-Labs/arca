@@ -10,7 +10,7 @@ use crate::disk::{create_private_dir, write_atomic};
 use crate::envelope::Header;
 use crate::error::Error;
 use crate::heads::{tips, Head};
-use crate::journal::{recover_root, Journal, Phase};
+use crate::journal::{recover_all, ApplyGroup, Journal, Phase};
 use crate::losers::{self, ClearReport, LoserCopy};
 use crate::manifest::{validate_device, validate_path, Class, FileEntry, Hash32, Manifest};
 use crate::merge::{common_ancestor, merge_files, reachable, Conflict, Side};
@@ -121,6 +121,12 @@ pub enum EngineError {
     /// exemplo `sudo`) cai aqui: a pessoa apaga o diário à mão depois de conferir a pasta.
     #[error("the apply journal is corrupt")]
     CorruptJournal,
+    /// O `apply` interrompido tinha mais pastas do que as de `Engine::recover`, e nenhuma das
+    /// que aparecem tem o marcador `committed`: a que falta pode tê-lo, então voltar só as
+    /// visíveis deixaria o conjunto meio voltado. Nada foi tocado; ligue as classes que faltam
+    /// (as pastas do `apply` interrompido) e chame `recover` de novo.
+    #[error("the interrupted apply has journals in folders that were not given to recover")]
+    IncompleteApply,
     /// A restauração só escreve em pasta inexistente ou vazia.
     #[error("restore target is not empty")]
     TargetNotEmpty,
@@ -859,8 +865,11 @@ impl<S: BlobStore> Engine<S> {
         // 2. diário em disco (P-27): se o processo morrer daqui em diante, `recover` sabe voltar
         let journal_roots = distinct_roots(&planned);
         let (p, r) = (planned.clone(), journal_roots.clone());
+        // o mesmo id em todos os diários: a recuperação decide por `apply`, não por raiz (P-33 2)
+        let group = ApplyGroup::new(journal_roots.len())?;
+        let g = group.clone();
         // raiz que ainda não existe é criada aqui (o diário mora nela) e sai de novo se falhar
-        let created = run(move || open_journals(&r, &p)).await?;
+        let created = run(move || open_journals(&r, &p, &g)).await?;
         let journals = Journals {
             roots: journal_roots,
             created,
@@ -886,7 +895,7 @@ impl<S: BlobStore> Engine<S> {
         let (all, marked) = (planned.clone(), journals.roots.clone());
         let (log, result) = with_log(log, move |log| {
             commit(log, &all)?;
-            mark_committed(&marked, &all)
+            mark_committed(&marked, &all, &group)
         })
         .await;
         if let Err(e) = result {
@@ -914,15 +923,12 @@ impl<S: BlobStore> Engine<S> {
             .map(|(_, root)| root.to_path_buf())
             .collect();
         run(move || {
-            let mut total = Recovered::default();
-            for dir in dirs {
-                if let Some(done) = recover_root(&dir)? {
-                    total.rolled_back += done.rolled_back;
-                    total.completed += done.completed;
-                    total.kept.extend(done.kept);
-                }
-            }
-            Ok(total)
+            let done = recover_all(&dirs)?;
+            Ok(Recovered {
+                rolled_back: done.rolled_back,
+                completed: done.completed,
+                kept: done.kept,
+            })
         })
         .await
     }
@@ -1356,7 +1362,11 @@ struct Journals {
 
 /// Grava o diário `open` de cada raiz (criando a raiz, privada, se ela ainda não existe) e
 /// devolve as raízes criadas. Se algum falhar, nenhum diário fica e as raízes criadas saem.
-fn open_journals(roots: &[PathBuf], planned: &[Planned]) -> Result<Vec<PathBuf>, EngineError> {
+fn open_journals(
+    roots: &[PathBuf],
+    planned: &[Planned],
+    group: &ApplyGroup,
+) -> Result<Vec<PathBuf>, EngineError> {
     let mut created = Vec::new();
     let mut made: Vec<&PathBuf> = Vec::new();
     for root in roots {
@@ -1371,7 +1381,7 @@ fn open_journals(roots: &[PathBuf], planned: &[Planned]) -> Result<Vec<PathBuf>,
                 create_private_dir(root).map_err(io_error)?;
             }
             // sem sobrescrever: um diário que já existe é de outro `apply` ou de uma queda
-            Journal::open(root, planned).create(root)?;
+            Journal::open(root, planned).in_apply(group).create(root)?;
             made.push(root);
             Ok(())
         })();
@@ -1389,9 +1399,13 @@ fn open_journals(roots: &[PathBuf], planned: &[Planned]) -> Result<Vec<PathBuf>,
 
 /// Depois do `commit`: todos os arquivos já foram trocados, então a recuperação passa a
 /// terminar em vez de desfazer.
-fn mark_committed(roots: &[PathBuf], planned: &[Planned]) -> Result<(), EngineError> {
+fn mark_committed(
+    roots: &[PathBuf],
+    planned: &[Planned],
+    group: &ApplyGroup,
+) -> Result<(), EngineError> {
     for root in roots {
-        let mut journal = Journal::open(root, planned);
+        let mut journal = Journal::open(root, planned).in_apply(group);
         journal.phase = Phase::Committed;
         journal.save(root)?;
     }
@@ -4023,6 +4037,54 @@ mod tests {
         no_leftovers(&tree(&h.target));
     }
 
+    /// P-33 item 2: os diários de todas as raízes de um `apply` levam o mesmo id e o número de
+    /// raízes, tanto ao abrir quanto ao marcar `committed` (que reescreve o diário).
+    #[tokio::test]
+    async fn the_journals_of_all_roots_of_an_apply_share_one_id_and_the_root_count() {
+        let h = hist().await;
+        let config = h.rig.tmp.path().join("config");
+        copy_dir(&h.target, &config);
+        let roots = vec![h.target.clone(), config.clone()];
+        let items: Vec<Item> = roots
+            .iter()
+            .map(|root| {
+                let entry = |data: &[u8]| FileEntry {
+                    path: "a.md".to_string(),
+                    class: Class::Vault,
+                    blob: Hash32([0u8; 32]),
+                    size: data.len() as u64,
+                    sha256: sha(data),
+                };
+                Item {
+                    kind: Kind::Update,
+                    root: root.clone(),
+                    dest: root.join("a.md"),
+                    from: Some(entry(b"1")),
+                    to: Some(entry(b"2")),
+                }
+            })
+            .collect();
+        let (planned, _) = plan(items).unwrap();
+        let group = ApplyGroup::new(roots.len()).unwrap();
+        open_journals(&roots, &planned, &group).unwrap();
+        let ids = |phase| {
+            let journals: Vec<_> = roots
+                .iter()
+                .map(|r| Journal::load(r).unwrap().unwrap())
+                .collect();
+            assert!(journals.iter().all(|j| j.phase == phase));
+            assert!(journals.iter().all(|j| j.peers == Some(2)));
+            assert_eq!(journals[0].apply_id, journals[1].apply_id);
+            journals[0].apply_id.clone().unwrap()
+        };
+        let opened = ids(Phase::Open);
+        mark_committed(&roots, &planned, &group).unwrap();
+        assert_eq!(ids(Phase::Committed), opened);
+        assert_eq!(opened.len(), 32);
+        // um `apply` novo tem outro id
+        assert_ne!(ApplyGroup::new(2).unwrap(), group);
+    }
+
     /// Achado 9: raiz aninhada que o próprio `apply` criou (`p1/p2/raiz`) sai inteira se falhar.
     #[tokio::test]
     async fn a_failed_apply_removes_every_folder_it_created_for_a_nested_root() {
@@ -4186,6 +4248,31 @@ mod tests {
                 .join(format!(".arca-kept-{}", &sha(b"1").to_string()[..16]))]
         );
         assert_eq!(fs::read(h.target.join("a.md")).unwrap(), b"da pessoa");
+    }
+
+    /// P-33 item 2: um diário corrompido em qualquer raiz recusa a recuperação **antes** de tocar
+    /// em qualquer raiz. Hoje a primeira raiz (vault) já foi recuperada quando a segunda falha, e
+    /// o conjunto fica meio voltado.
+    #[tokio::test]
+    async fn a_corrupt_journal_in_a_later_root_stops_the_recovery_before_touching_any_root() {
+        let h = hist().await;
+        let config = h.rig.tmp.path().join("config");
+        copy_dir(&h.target, &config);
+        interrupt_apply(&h.target);
+        interrupt_apply(&config);
+        fs::write(crate::journal::Journal::path(&config), b"lixo").unwrap();
+        let (before_vault, before_config) = (tree(&h.target), tree(&config));
+        let roots = Roots {
+            vault: Some(h.target.clone()),
+            config: Some(config.clone()),
+            ..Roots::default()
+        };
+        assert_eq!(
+            h.rig.engine("pc").recover(&roots).await,
+            Err(EngineError::CorruptJournal)
+        );
+        assert_eq!(tree(&h.target), before_vault);
+        assert_eq!(tree(&config), before_config);
     }
 
     /// Uma pasta somente leitura faz o commit falhar no meio: tudo volta como estava.

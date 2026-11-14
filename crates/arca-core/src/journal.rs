@@ -54,6 +54,30 @@ pub(crate) struct Journal {
     pub version: u8,
     pub phase: Phase,
     pub entries: Vec<Entry>,
+    /// Id do `apply` que gravou este diário e quantas raízes ele tem (P-33 item 2): a recuperação
+    /// decide por `apply`, não por raiz. Os dois presentes ou os dois ausentes; um diário sem eles
+    /// (gravado antes disto) vale como um `apply` de uma raiz só.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apply_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peers: Option<usize>,
+}
+
+/// O `apply` que reúne os diários de várias raízes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ApplyGroup {
+    id: String,
+    peers: usize,
+}
+
+impl ApplyGroup {
+    /// Id novo (16 bytes aleatórios em hex) para um `apply` de `peers` raízes.
+    pub(crate) fn new(peers: usize) -> Result<ApplyGroup, EngineError> {
+        let mut random = [0u8; 16];
+        getrandom::fill(&mut random).map_err(|_| EngineError::Io(io::ErrorKind::Other))?;
+        let id = random.iter().map(|b| format!("{b:02x}")).collect();
+        Ok(ApplyGroup { id, peers })
+    }
 }
 
 /// O que a recuperação de uma raiz fez.
@@ -89,7 +113,16 @@ impl Journal {
             version: JOURNAL_VERSION,
             phase: Phase::Open,
             entries,
+            apply_id: None,
+            peers: None,
         }
+    }
+
+    /// Marca o diário como parte de um `apply` de várias raízes.
+    pub(crate) fn in_apply(mut self, group: &ApplyGroup) -> Journal {
+        self.apply_id = Some(group.id.clone());
+        self.peers = Some(group.peers);
+        self
     }
 
     pub(crate) fn path(root: &Path) -> PathBuf {
@@ -168,6 +201,18 @@ impl Journal {
         if self.version != JOURNAL_VERSION {
             return Err(EngineError::CorruptJournal);
         }
+        let group_fits = match (&self.apply_id, self.peers) {
+            (None, None) => true,
+            (Some(id), Some(peers)) => {
+                id.len() == 32
+                    && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+                    && peers >= 1
+            }
+            _ => false,
+        };
+        if !group_fits {
+            return Err(EngineError::CorruptJournal);
+        }
         let mut seen = HashSet::new();
         let mut paths = HashSet::new();
         for e in &self.entries {
@@ -225,13 +270,86 @@ fn remove_if_regular(folder: &Folder, name: &str) {
     }
 }
 
-/// Recupera uma raiz. `None` se não há diário.
+/// Recupera as raízes de `roots` (P-33 item 2). Lê **todos** os diários antes de tocar em
+/// qualquer raiz (um ilegível em qualquer uma recusa tudo) e decide por `apply`, não por raiz:
+/// o marcador `committed` só é gravado depois de **todos** os arquivos de **todas** as raízes
+/// estarem trocados, então se alguma raiz do `apply` o tem, todas terminam; senão, todas voltam.
+/// Se faltam raízes do `apply` entre as de `roots` e nenhuma tem o marcador, a que falta pode
+/// tê-lo: `IncompleteApply`, sem tocar em nada. Os diários só saem depois de **todas** as raízes
+/// recuperadas, para uma falha no meio poder ser refeita com a mesma decisão.
+pub(crate) fn recover_all(roots: &[PathBuf]) -> Result<RootRecovery, EngineError> {
+    let mut loaded = Vec::new();
+    for root in roots {
+        if let Some(journal) = Journal::load(root)? {
+            loaded.push((root, journal));
+        }
+    }
+    let phases = decide_phases(&loaded)?;
+    let mut total = RootRecovery::default();
+    for ((root, journal), phase) in loaded.iter().zip(phases) {
+        let done = recover_with(root, journal, phase)?;
+        total.rolled_back += done.rolled_back;
+        total.completed += done.completed;
+        total.kept.extend(done.kept);
+    }
+    for (root, _) in &loaded {
+        Journal::remove(root);
+    }
+    Ok(total)
+}
+
+/// A fase com que cada diário de `loaded` é recuperado, na mesma ordem.
+fn decide_phases(loaded: &[(&PathBuf, Journal)]) -> Result<Vec<Phase>, EngineError> {
+    let mut phases: Vec<Phase> = loaded.iter().map(|(_, j)| j.phase).collect();
+    let mut seen: Vec<&str> = Vec::new();
+    for (_, journal) in loaded {
+        let Some(id) = journal.apply_id.as_deref() else {
+            continue; // sem id: um `apply` de uma raiz só, decide pelo próprio marcador
+        };
+        if seen.contains(&id) {
+            continue;
+        }
+        seen.push(id);
+        let group: Vec<usize> = (0..loaded.len())
+            .filter(|&i| loaded[i].1.apply_id.as_deref() == Some(id))
+            .collect();
+        let peers = journal.peers.unwrap_or(1);
+        // o mesmo `apply` não pode ter números de raízes diferentes nem mais diários que raízes
+        if group.iter().any(|&i| loaded[i].1.peers != journal.peers) || group.len() > peers {
+            return Err(EngineError::CorruptJournal);
+        }
+        let committed = group.iter().any(|&i| loaded[i].1.phase == Phase::Committed);
+        if !committed && group.len() < peers {
+            return Err(EngineError::IncompleteApply);
+        }
+        let phase = if committed {
+            Phase::Committed
+        } else {
+            Phase::Open
+        };
+        for &i in &group {
+            phases[i] = phase;
+        }
+    }
+    Ok(phases)
+}
+
+/// Recupera uma raiz sozinha, decidindo pelo próprio marcador. `None` se não há diário. Atalho
+/// dos testes de uma raiz só; o motor usa `recover_all`.
+#[cfg(test)]
 pub(crate) fn recover_root(root: &Path) -> Result<Option<RootRecovery>, EngineError> {
     let Some(journal) = Journal::load(root)? else {
         return Ok(None);
     };
+    let recovery = recover_with(root, &journal, journal.phase)?;
+    Journal::remove(root);
+    Ok(Some(recovery))
+}
+
+/// Recupera uma raiz como se o diário estivesse em `phase`. Não apaga o diário.
+fn recover_with(root: &Path, journal: &Journal, phase: Phase) -> Result<RootRecovery, EngineError> {
     let mut recovery = RootRecovery::default();
-    match journal.phase {
+    match phase {
         Phase::Committed => {
             // todos os arquivos foram trocados: falta o que o `finish` faria. Mas o marcador pode
             // ter sobrevivido a uma volta em memória interrompida (erro em outra raiz), então o
@@ -306,8 +424,7 @@ pub(crate) fn recover_root(root: &Path) -> Result<Option<RootRecovery>, EngineEr
             recovery.rolled_back = journal.entries.len();
         }
     }
-    Journal::remove(root);
-    Ok(Some(recovery))
+    Ok(recovery)
 }
 
 /// Devolve `.arca-old-<n>` a `name` se, e só se, o disco bate com o diário. Nunca sobrescreve
@@ -941,6 +1058,8 @@ mod tests {
             version: 1,
             phase: Phase::Open,
             entries: (0..8000).map(|i| entry(i, path(i))).collect(),
+            apply_id: None,
+            peers: None,
         };
         big.save(dir.path()).unwrap();
         assert_eq!(Journal::load(dir.path()), Ok(Some(big)));
@@ -949,6 +1068,8 @@ mod tests {
             version: 1,
             phase: Phase::Open,
             entries: (0..120_000).map(|i| entry(i, path(i))).collect(),
+            apply_id: None,
+            peers: None,
         };
         let other = TempDir::new();
         assert!(huge.save(other.path()).is_err());
@@ -1042,6 +1163,8 @@ mod tests {
             version: 1,
             phase: Phase::Open,
             entries: vec![],
+            apply_id: None,
+            peers: None,
         };
         assert_eq!(mine.create(&c.root), Err(EngineError::Interrupted));
         assert_eq!(fs::read(Journal::path(&c.root)).unwrap(), theirs);
@@ -1066,5 +1189,198 @@ mod tests {
         assert_eq!(after, original());
         assert_eq!(recover_root(&c.root), Ok(None));
         assert_eq!(tree(&c.root), after);
+    }
+
+    // ---------- um `apply` de várias raízes (P-33 item 2) ----------
+
+    struct Pair {
+        _dir: TempDir,
+        a: PathBuf,
+        b: PathBuf,
+    }
+
+    /// Duas raízes, um `apply` que atualiza `x.md` em `a` e `y.md` em `b`, parado depois do
+    /// `commit` e antes de qualquer marcador `committed`: os dois diários `open`, mesmo id.
+    fn pair() -> Pair {
+        let dir = TempDir::new();
+        let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+        for (root, rel, data) in [(&a, "x.md", b"X0"), (&b, "y.md", b"Y0")] {
+            fs::create_dir_all(root).unwrap();
+            fs::write(root.join(rel), data).unwrap();
+        }
+        let item = |root: &PathBuf, rel: &str, from: &[u8], to: &[u8]| Item {
+            kind: Kind::Update,
+            root: root.clone(),
+            dest: root.join(rel),
+            from: Some(entry(rel, from)),
+            to: Some(entry(rel, to)),
+        };
+        let (planned, _) = plan(vec![
+            item(&a, "x.md", b"X0", b"X1"),
+            item(&b, "y.md", b"Y0", b"Y1"),
+        ])
+        .unwrap();
+        let group = ApplyGroup::new(2).unwrap();
+        for root in [&a, &b] {
+            Journal::open(root, &planned)
+                .in_apply(&group)
+                .save(root)
+                .unwrap();
+        }
+        let mut log = Vec::new();
+        for (p, new) in planned.iter().zip([&b"X1"[..], b"Y1"]) {
+            stage(&mut log, p, new).unwrap();
+        }
+        commit(&mut log, &planned).unwrap();
+        drop(log);
+        Pair { _dir: dir, a, b }
+    }
+
+    fn mark_committed_in(root: &Path) {
+        let mut journal = Journal::load(root).unwrap().unwrap();
+        journal.phase = Phase::Committed;
+        journal.save(root).unwrap();
+    }
+
+    fn contents(p: &Pair) -> (Vec<u8>, Vec<u8>) {
+        (
+            fs::read(p.a.join("x.md")).unwrap(),
+            fs::read(p.b.join("y.md")).unwrap(),
+        )
+    }
+
+    #[test]
+    fn two_open_journals_of_the_same_apply_both_go_back() {
+        let p = pair();
+        let done = recover_all(&[p.a.clone(), p.b.clone()]).unwrap();
+        assert_eq!(done.rolled_back, 2);
+        assert_eq!(contents(&p), (b"X0".to_vec(), b"Y0".to_vec()));
+        assert!(!Journal::exists(&p.a) && !Journal::exists(&p.b));
+    }
+
+    /// O problema do item 2: uma queda entre os dois marcadores. Quem tem o marcador prova que
+    /// todos os arquivos de todas as raízes já foram trocados, então a outra termina também.
+    #[test]
+    fn a_committed_journal_in_one_root_makes_the_whole_apply_go_forward() {
+        for committed_first in [true, false] {
+            let p = pair();
+            mark_committed_in(if committed_first { &p.a } else { &p.b });
+            let done = recover_all(&[p.a.clone(), p.b.clone()]).unwrap();
+            assert_eq!((done.completed, done.rolled_back), (2, 0));
+            assert_eq!(contents(&p), (b"X1".to_vec(), b"Y1".to_vec()));
+            assert!(!p.a.join(".arca-old-0").exists() && !p.b.join(".arca-old-1").exists());
+            assert!(!Journal::exists(&p.a) && !Journal::exists(&p.b));
+        }
+    }
+
+    /// Falta uma raiz do `apply` e as que aparecem estão `open`: a que falta pode ter o
+    /// marcador, então nada é tocado (e o diário fica para quando a raiz aparecer).
+    #[test]
+    fn a_missing_root_with_only_open_journals_refuses_and_touches_nothing() {
+        let p = pair();
+        let before = (tree(&p.a), tree(&p.b));
+        assert_eq!(
+            recover_all(std::slice::from_ref(&p.b)),
+            Err(EngineError::IncompleteApply)
+        );
+        assert_eq!((tree(&p.a), tree(&p.b)), before);
+        assert!(Journal::exists(&p.a) && Journal::exists(&p.b));
+        // com as duas, a recuperação segue normalmente
+        assert!(recover_all(&[p.a.clone(), p.b.clone()]).is_ok());
+        assert_eq!(contents(&p), (b"X0".to_vec(), b"Y0".to_vec()));
+    }
+
+    /// Com o marcador à vista, uma raiz ausente não impede terminar a que aparece.
+    #[test]
+    fn a_missing_root_is_fine_when_a_visible_journal_is_committed() {
+        let p = pair();
+        mark_committed_in(&p.b);
+        let done = recover_all(std::slice::from_ref(&p.b)).unwrap();
+        assert_eq!((done.completed, done.rolled_back), (1, 0));
+        assert_eq!(fs::read(p.b.join("y.md")).unwrap(), b"Y1");
+        assert!(!Journal::exists(&p.b) && Journal::exists(&p.a));
+    }
+
+    /// Um diário ilegível em qualquer raiz recusa tudo antes de tocar em qualquer uma.
+    #[test]
+    fn an_unreadable_journal_in_the_second_root_leaves_the_first_untouched() {
+        let p = pair();
+        fs::write(Journal::path(&p.b), b"lixo").unwrap();
+        let before = (tree(&p.a), tree(&p.b));
+        assert_eq!(
+            recover_all(&[p.a.clone(), p.b.clone()]),
+            Err(EngineError::CorruptJournal)
+        );
+        assert_eq!((tree(&p.a), tree(&p.b)), before);
+    }
+
+    #[test]
+    fn journals_that_disagree_about_the_apply_are_corrupt_and_nothing_is_touched() {
+        // mais diários do que raízes declaradas
+        let p = pair();
+        for root in [&p.a, &p.b] {
+            let mut journal = Journal::load(root).unwrap().unwrap();
+            journal.peers = Some(1);
+            journal.save(root).unwrap();
+        }
+        let before = (tree(&p.a), tree(&p.b));
+        assert_eq!(
+            recover_all(&[p.a.clone(), p.b.clone()]),
+            Err(EngineError::CorruptJournal)
+        );
+        assert_eq!((tree(&p.a), tree(&p.b)), before);
+        // números de raízes diferentes para o mesmo id
+        let p = pair();
+        let mut journal = Journal::load(&p.a).unwrap().unwrap();
+        journal.peers = Some(3);
+        journal.save(&p.a).unwrap();
+        assert_eq!(
+            recover_all(&[p.a.clone(), p.b.clone()]),
+            Err(EngineError::CorruptJournal)
+        );
+    }
+
+    /// Um diário sem `apply_id` (gravado antes disto) vale como um `apply` de uma raiz só.
+    #[test]
+    fn a_journal_without_an_apply_id_is_recovered_on_its_own_marker() {
+        let c = prepared();
+        let mut log = Vec::new();
+        commit(&mut log, &c.planned).unwrap();
+        drop(log);
+        let raw = fs::read_to_string(Journal::path(&c.root)).unwrap();
+        assert!(!raw.contains("apply_id") && !raw.contains("peers"), "{raw}");
+        let done = recover_all(std::slice::from_ref(&c.root)).unwrap();
+        assert_eq!(done.rolled_back, 4);
+        assert_eq!(tree(&c.root), original());
+    }
+
+    #[test]
+    fn a_malformed_apply_id_or_a_half_group_is_corrupt() {
+        let good = "0123456789abcdef0123456789abcdef";
+        for (id, peers) in [
+            (Some("curto"), Some(2)),
+            (Some("0123456789ABCDEF0123456789ABCDEF"), Some(2)),
+            (Some("zzzz456789abcdef0123456789abcdef"), Some(2)),
+            (Some(good), Some(0)),
+            (Some(good), None),
+            (None, Some(2)),
+        ] {
+            let c = prepared();
+            let mut journal = c.journal.clone();
+            journal.apply_id = id.map(str::to_string);
+            journal.peers = peers;
+            journal.save(&c.root).unwrap();
+            assert_eq!(
+                Journal::load(&c.root),
+                Err(EngineError::CorruptJournal),
+                "{id:?} {peers:?}"
+            );
+        }
+        let c = prepared();
+        let mut journal = c.journal.clone();
+        journal.apply_id = Some(good.to_string());
+        journal.peers = Some(2);
+        journal.save(&c.root).unwrap();
+        assert!(Journal::load(&c.root).unwrap().is_some());
     }
 }
