@@ -2,6 +2,14 @@
 
 Mais recente no topo.
 
+### 2026-11-14 — Sessão 82 (P-33 (6): leitura do diário por fd)
+
+- **Pedido**: "p33 6". Plan mode; decisão sua: escopo **só a leitura** (o `Journal::remove` que ignora erro e o `abandon` com `Io(Other)` falham do lado seguro e ficam como estão). Toca parsing de dado externo e recuperação (AGENTS §4), confirmado ao aprovar o plano.
+- **Feito ([arca#106](https://github.com/Arven-Labs/arca/pull/106))**: `Folder::read_limited(name, max)` em `dirfd.rs` (Unix: `openat` com `O_NOFOLLOW|O_NONBLOCK`, `fstat` no fd aberto, leitura limitada a `max + 1`; fora do Unix: por caminho). `Journal::load` abre a raiz uma vez e lê por ele; link, FIFO, pasta ou grande demais é `CorruptJournal`, ausente é `None`, como antes.
+- **Testes (CI)**: **sem vermelho antes** (desvio do plano): são de caracterização (o código antigo também recusava link, FIFO e tamanho; a janela não é testável). Verde de primeira: run 43641589997, 4 checks, 484 testes. Quebra de propósito (arca#107, fechado, branch apagada): sem `O_NOFOLLOW` no `read_limited` derrubou 2 testes (run 43641914474), `read_limited_refuses_a_link_and_never_follows_it` e `a_journal_that_is_a_symlink_is_corrupt_and_not_followed`. Os testes do FIFO e do limite não dependem do `O_NOFOLLOW`.
+- **Não verificado**: a corrida em si; macOS e Windows (CI só Linux); nada rodado localmente além de `cargo fmt`.
+- **Fica**: P-33 (1) a (5), (7), (8); `create`/`save`/`exists` do diário por caminho; P-09, P-22, P-25, P-26, P-29 (2) a (7), P-30 (2) a (6), P-31 a P-36. Warden: o `rev` do `arca-core` não foi atualizado para esta mudança (só interna à recuperação).
+
 ### 2026-11-14 — Sessão 81 (P-29 (1) fatia 3: recuperação do `journal.rs` relativa a fd)
 
 - **Pedido**: "fatia 3" (a recuperação do diário, depois do arca#99 e do arca#101). Plan mode, sem decisões novas (`rustix`, só Unix, já valiam). Toca troca de arquivos do usuário e segredos (AGENTS §4), confirmado ao aprovar o plano.
