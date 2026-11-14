@@ -5,6 +5,7 @@
 mod apply;
 pub mod backend;
 pub mod crypto;
+mod dirfd;
 pub mod disk;
 pub mod engine;
 pub mod envelope;
