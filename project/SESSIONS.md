@@ -2,6 +2,14 @@
 
 Mais recente no topo.
 
+### 2026-11-14 — Sessão 81 (P-29 (1) fatia 3: recuperação do `journal.rs` relativa a fd)
+
+- **Pedido**: "fatia 3" (a recuperação do diário, depois do arca#99 e do arca#101). Plan mode, sem decisões novas (`rustix`, só Unix, já valiam). Toca troca de arquivos do usuário e segredos (AGENTS §4), confirmado ao aprovar o plano.
+- **Feito ([arca#104](https://github.com/Arven-Labs/arca/pull/104))**: `recover_root`, `restore_original`, `remove_if_ours` e `keep` abrem a pasta-pai uma vez (`open_parent`, sem seguir link) e conferem e agem no mesmo `Folder` (`Slot` = pasta + caminho, só para montar o `kept`). `apply.rs` só expôs helpers (`open_parent`, `name_of`, `sha_in`, `absent_in`, `remove_emptied_folders`) e perdeu `check_components` e `ensure_absent`, sem uso. Pasta que não existe: a entrada é pulada, como antes.
+- **Testes (CI)**: **sem vermelho antes** (desvio do plano): os testes novos (link no caminho na fase `open`; FIFO no destino em `open` e `committed`) são de caracterização, o código antigo também os passaria (a janela da corrida não é testável). Primeiro run falhou só na compilação (clippy: um teste antigo chamava `remove_if_ours` com a assinatura velha); corrigido. Verde: run 43635129026, 4 checks, 480 testes. Quebra de propósito (arca#105, fechado, branch apagada): sem `O_NOFOLLOW` em `open_subfolder` derrubou 9 testes (run 43635447824), entre eles `a_folder_swapped_for_a_symlink_after_the_crash_is_refused` e o novo da fase `open`. O teste do FIFO não depende disso (passa também sem a quebra).
+- **Não verificado**: a corrida em si; macOS e Windows (CI só Linux; fora do Unix o `Folder` é caminho); nada rodado localmente além de `cargo fmt`.
+- **Fica**: `Journal::load` por caminho (P-33 6); `rev` do `arca-core` no Warden (como na Warden#151) depois do merge, se o dono quiser; P-09, P-22, P-25, P-26, P-29 (2) a (7), P-30 (2) a (6), P-31 a P-36.
+
 ### 2026-11-14 — Sessão 80 (P-29 (1): `apply` relativo a fd)
 
 - **Pedido**: "pode seguir" depois do merge do arca#99; entendi como a fatia 2 (o `apply`). Plan mode, sem decisões novas: `rustix` só Unix e uma fatia por PR já valiam. Toca troca de arquivos do usuário e segredos (AGENTS §4), confirmado ao aprovar o plano.
