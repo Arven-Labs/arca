@@ -10,7 +10,8 @@ Mais recente no topo.
 - **Medido de passagem**: entre o `rev` que o Warden usa (`a8e2677`) e a `main` não havia mudança em `crates/`, só docs; o bump traz só esta correção.
 - **Não verificado**: Windows e macOS; nada rodado localmente além de `cargo fmt --check`.
 - **Feito depois do merge ([Warden#143](https://github.com/Arven-Labs/warden/pull/143), mesclado em `692997f3`)**: `rev` do `arca-core` de `a8e2677` para `abc803e` nos 3 `Cargo.toml` e no `source` do lock (editado à mão: entre os dois só mudou `engine.rs`). CI verde (Rust clippy e testes, Android, Mobile, hub real, guard). P-37 movido para Resolvidas.
-- **Fica**: decidir se a arca devolve o caminho em `LocalChanges`; ideias de 2026-11-13 do Warden (agent-desktop e OpenBot a confirmar); P-09, P-22, P-25, P-26, P-29 a P-36.
+- **Decisão do dono (plan mode)**: a arca **não** devolve o caminho em `LocalChanges`. A regra "erros nunca carregam caminho nem nome de arquivo" (`engine.rs`, teste `engine_errors_never_leak_paths_or_file_names`) fica: erros vão para logs, e o nome de uma nota ou de um login já é conteúdo da pessoa. Poucos logins, nenhuma reclamação, e o Warden já diz o que fazer. Descartados: `LocalChanges { path }` (quebra a regra) e, por ora, uma consulta separada `Engine::local_changes` que devolveria os caminhos como dado (é o caminho certo se a mensagem atrapalhar; custa API nova, mudança no Warden e outra troca do `rev`).
+- **Fica**: ideias de 2026-11-13 do Warden (agent-desktop e OpenBot a confirmar); P-09, P-22, P-25, P-26, P-29 a P-36.
 
 ### 2026-11-13 — Sessão 76 (P-37 item 1: aceitar os logins não remove logins do grupo)
 
