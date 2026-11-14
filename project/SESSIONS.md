@@ -2,6 +2,14 @@
 
 Mais recente no topo.
 
+### 2026-11-14 — Sessão 79 (P-34 (2): limpeza dos perdedores relativa a fd)
+
+- **Pedido**: "vamos com o 1" (TOCTOU de symlink, adiado na Sessão 78); plan mode, com duas decisões suas: dependência **`rustix`, só Unix** (`cap-std` descartado: reescreve a interface em `Dir`, ganho só no Windows; `libc`/`openat2` direto está fora por `unsafe_code = "forbid"`) e fatia **só P-34 (2)** (o `apply`, P-29 (1), e a recuperação do `journal` ficam para PRs seguintes). Toca segredos (AGENTS §4) e dependência nova, aprovados ao aprovar o plano.
+- **Feito ([arca#99](https://github.com/Arven-Labs/arca/pull/99))**: `dirfd.rs` (`Folder`): em Unix abre a pasta sem seguir link (`openat` com `O_NOFOLLOW`, componente por componente) e `rename`/`unlink`/`link`/`stat`/`rmdir` são `renameat`/`unlinkat`/`linkat`/`statat` relativos ao fd; fora do Unix ainda guarda um caminho. `clear` abre a pasta uma vez e `remove_in` e `give_back` agem nela; a limpeza das subpastas vazias também (acréscimo ao plano: sobrava um `remove_dir` por caminho). `sha256` abre com `O_NONBLOCK` e confere o tipo no fd. Dependência: `rustix =1.1.6` (`default-features = false`, `fs`+`std`), +3 pacotes no lock (`rustix`, `errno`, `linux-raw-sys`).
+- **Testes (CI)**: escritos antes, por caminho; o da troca da pasta por link falhou (run 43619583363: `sub.real/cop` continuou lá) e os outros 6 passaram. Com `rustix`: 4 checks verdes (run 43620113835, 470 testes). Quebra de propósito (arca#100, fechado, branch apagada): sem `O_NOFOLLOW` na descida derrubou 2 testes, `open_beneath_refuses_a_link_in_the_middle...` e `a_forged_list_removes_nothing_outside...` (run 43620415585).
+- **Não verificado**: a **corrida em si** (o teste da troca prova que a pasta aberta não segue o caminho novo, não a janela de microssegundos); macOS e Windows (o CI é só Linux; fora do Unix o `Folder` é caminho e a janela continua); `ELOOP` vs `ENOTDIR` para link em outras plataformas (tratei os dois como `NotAFolder`); nada rodado localmente além de `cargo fmt` e `cargo metadata`.
+- **Fica**: **P-29 (1)** no `apply` (`plan`/`stage`/`commit`/`finish`/`place`), a recuperação do `journal` e `write_loser`/`check_conflicts_dir` (P-30), cada um em PR próprio, reaproveitando o `Folder`; P-09, P-22, P-25, P-26, P-29 (2) a (7), P-30 (2) a (6), P-31 a P-36.
+
 ### 2026-11-13 — Sessão 78 (estratégia: formato próprio; P-30 (1) com `hard_link`)
 
 - **Pedido**: "por onde continuamos no arca?"; das três opções (TOCTOU, Fase 2 pelo Warden, estratégia), a ordem escolhida foi estratégia e depois TOCTOU.
