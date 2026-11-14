@@ -82,7 +82,7 @@ mod imp {
                 let Component::Normal(name) = part else {
                     return Err(OpenError::NotAFolder);
                 };
-                let next = match openat(&fd, name, dir | OFlags::NOFOLLOW, Mode::empty()) {
+                let next = match openat(&fd, name, dir, Mode::empty()) {
                     Ok(next) => next,
                     // `ELOOP` (link) ou `ENOTDIR` (não é pasta; algumas plataformas o dão para link)
                     Err(e) if e == Errno::LOOP || e == Errno::NOTDIR => {
