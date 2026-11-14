@@ -941,7 +941,6 @@ impl<S: BlobStore> Engine<S> {
         let losers: Vec<(&Conflict, &FileEntry)> = conflicts
             .iter()
             .filter(|c| matches!(c.class, Class::Config | Class::Secret))
-            .filter(|c| roots.is_enabled(c.class))
             .filter_map(|c| c.loser.as_ref().map(|loser| (c, loser)))
             .collect();
         if losers.is_empty() {
@@ -959,6 +958,11 @@ impl<S: BlobStore> Engine<S> {
         let conflicts_dir = dir.to_path_buf();
         let (checked_dir, checked_roots) = (conflicts_dir.clone(), live_roots.clone());
         run(move || check_conflicts_dir(&checked_dir, &checked_roots)).await?;
+        // QUEBRA DE PROPÓSITO (PR descartável): filtro depois da checagem da pasta
+        let losers: Vec<(&Conflict, &FileEntry)> = losers
+            .into_iter()
+            .filter(|(c, _)| roots.is_enabled(c.class))
+            .collect();
 
         // busca e confere tudo antes de gravar qualquer coisa
         let mut to_write: Vec<(PathBuf, Zeroizing<Vec<u8>>)> = Vec::new();
