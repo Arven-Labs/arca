@@ -1001,8 +1001,12 @@ impl<S: BlobStore> Engine<S> {
             }
             // passo 2: grava
             for (dest, plain) in pending {
-                write_loser(dest, plain)?;
-                saved.saved += 1;
+                // `false`: o destino apareceu depois do passo 1 e conta como já salvo
+                if write_loser(dest, plain)? {
+                    saved.saved += 1;
+                } else {
+                    saved.already += 1;
+                }
             }
             Ok(saved)
         })
@@ -1239,12 +1243,39 @@ fn needs_write(dir: &Path, dest: &Path) -> Result<bool, EngineError> {
 }
 
 /// Grava um perdedor (`needs_write` já decidiu): pastas `0700`, arquivo `0600`, atômico.
-fn write_loser(dest: &Path, plain: &[u8]) -> Result<(), EngineError> {
+/// Nunca sobrescreve (P-30 (1)): o temporário entra no lugar por `hard_link`, que falha se o
+/// destino apareceu depois do `needs_write`. Devolve `false` nesse caso, com o destino intocado.
+fn write_loser(dest: &Path, plain: &[u8]) -> Result<bool, EngineError> {
     let parent = dest
         .parent()
         .ok_or(EngineError::Io(io::ErrorKind::InvalidInput))?;
     create_private_dir(parent).map_err(io_error)?;
-    write_atomic(dest, plain).map_err(io_error)
+    let mut random = [0u8; 8];
+    getrandom::fill(&mut random).map_err(|_| EngineError::Io(io::ErrorKind::Other))?;
+    let suffix: String = random.iter().map(|b| format!("{b:02x}")).collect();
+    let tmp = parent.join(format!(".tmp-{suffix}"));
+    write_atomic(&tmp, plain).map_err(io_error)?;
+
+    let placed = match fs::hard_link(&tmp, dest) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+        // sistema de arquivos sem hard link: confere e renomeia, como o `place` do `apply`
+        Err(e) if e.kind() == io::ErrorKind::Unsupported => match fs::symlink_metadata(dest) {
+            Ok(_) => Ok(false),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                fs::rename(&tmp, dest).map(|()| true).map_err(io_error)
+            }
+            Err(e) => Err(io_error(e)),
+        },
+        Err(e) => Err(io_error(e)),
+    };
+    let _ = fs::remove_file(&tmp);
+    let placed = placed?;
+    #[cfg(unix)]
+    fs::File::open(parent)
+        .and_then(|d| d.sync_all())
+        .map_err(io_error)?;
+    Ok(placed)
 }
 
 /// Com estado: alguma das pontas tem de continuar a história aceita, senão `Rollback`.
