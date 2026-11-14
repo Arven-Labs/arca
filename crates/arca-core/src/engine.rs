@@ -1256,7 +1256,8 @@ fn write_loser(dest: &Path, plain: &[u8]) -> Result<bool, EngineError> {
     let tmp = parent.join(format!(".tmp-{suffix}"));
     write_atomic(&tmp, plain).map_err(io_error)?;
 
-    let placed = match fs::hard_link(&tmp, dest) {
+    // QUEBRA DE PROPÓSITO (PR descartável): rename no lugar de hard_link
+    let placed = match fs::rename(&tmp, dest) {
         Ok(()) => Ok(true),
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(false),
         // sistema de arquivos sem hard link: confere e renomeia, como o `place` do `apply`
