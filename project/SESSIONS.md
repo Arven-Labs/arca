@@ -2,6 +2,15 @@
 
 Mais recente no topo.
 
+### 2026-11-13 — Sessão 77 (P-37 item 2: perdedor de classe sem raiz não é gravado)
+
+- **Pedido**: "vamos no P-37 item 2"; plano aprovado em plan mode, com duas decisões suas: o filtro vale para **qualquer classe sem raiz** (mesmo critério do `apply`) e o pulo **não é contado** (`SavedLosers` não muda). Toca segredos (AGENTS §4), confirmado ao aprovar o plano.
+- **Feito ([arca#92](https://github.com/Arven-Labs/arca/pull/92))**: `save_conflict_losers` filtra por `roots.is_enabled(class)` antes de decifrar o perdedor e de checar a pasta; docs da função e de `merge_with_losers`. Um dispositivo sem aceite dos logins não grava mais segredo em texto claro em `arca-conflicts/secret/`. Nada se perde: quem perdeu tem a raiz e grava a própria cópia no `apply`.
+- **Testes (CI)**: 4 novos, escritos antes; falharam todos pelo motivo certo (run 43535404336: `saved` 1 e 2 em vez de 0 e 1; o de ordem com `UnsafeConflictsDir`) e passam com a correção (run 43536188364, 4 checks verdes). O bug, antes só lido no código, ficou medido numa fusão real. Quebra de propósito (arca#93, fechado, branch apagada): filtro depois de `check_conflicts_dir` derrubou só o teste de ordem (run 43536767297).
+- **Medido de passagem**: entre o `rev` que o Warden usa (`a8e2677`) e a `main` não havia mudança em `crates/`, só docs; o bump traz só esta correção.
+- **Não verificado**: Windows e macOS; nada rodado localmente além de `cargo fmt --check`.
+- **Fica**: **Warden trocar o `rev` do `arca-core`** (3 `Cargo.toml` e o lock) depois do merge deste PR; decidir se a arca devolve o caminho em `LocalChanges`; ideias de 2026-11-13 do Warden (agent-desktop e OpenBot a confirmar); P-09, P-22, P-25, P-26, P-29 a P-36.
+
 ### 2026-11-13 — Sessão 76 (P-37 item 1: aceitar os logins não remove logins do grupo)
 
 - **Pedido**: "o que você me recomenda?" levou ao P-37; plano aprovado em plan mode, com duas decisões suas: login local divergente **recusa** o aceite, e o escopo é **só o item 1**. Toca consentimento sobre segredos (AGENTS §4), confirmado ao aprovar o plano. Nenhum código da arca mudou; o código está no [Warden#141](https://github.com/Arven-Labs/warden/pull/141) (mesclado em `1abb3f3f`), este PR só registra.
