@@ -130,8 +130,9 @@ impl Journal {
         }
     }
 
-    /// `None` se não existe. Link no lugar, grande demais, JSON inválido, versão ou fase
-    /// desconhecida, campo a mais ou caminho que sai da raiz: `CorruptJournal`.
+    /// `None` se não existe. Link no lugar, grande demais, de outro dono ou legível por grupo ou
+    /// outros (Unix), JSON inválido, versão ou fase desconhecida, campo a mais ou caminho que sai
+    /// da raiz: `CorruptJournal`.
     pub(crate) fn load(root: &Path) -> Result<Option<Journal>, EngineError> {
         // abre o arquivo sem seguir link e confere tipo e tamanho no que foi aberto, na mesma
         // leitura (P-33 item 6): link, FIFO, pasta ou grande demais vale como corrupção
@@ -141,16 +142,22 @@ impl Journal {
             Err(OpenError::Io(e)) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(OpenError::Io(e)) => return Err(io_error(e)),
         };
-        let bytes = match folder.read_limited(JOURNAL_NAME, MAX_JOURNAL_BYTES) {
-            Ok(bytes) => bytes,
+        let read = match folder.read_limited(JOURNAL_NAME, MAX_JOURNAL_BYTES) {
+            Ok(read) => read,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) if e.kind() == io::ErrorKind::InvalidInput => {
                 return Err(EngineError::CorruptJournal)
             }
             Err(e) => return Err(io_error(e)),
         };
+        // P-33 item 1: o diário não é autenticado; só vale se for deste usuário e privado (a arca
+        // sempre grava `0600`). Quem escreve na pasta sem ser o dono só cria arquivo de outro
+        // dono, e esse é recusado aqui, antes de o conteúdo valer qualquer coisa
+        if !read.private {
+            return Err(EngineError::CorruptJournal);
+        }
         let journal: Journal =
-            serde_json::from_slice(&bytes).map_err(|_| EngineError::CorruptJournal)?;
+            serde_json::from_slice(&read.bytes).map_err(|_| EngineError::CorruptJournal)?;
         journal.validate()?;
         Ok(Some(journal))
     }

@@ -29,6 +29,16 @@ pub(crate) struct Entry {
     pub len: u64,
 }
 
+/// O que `Folder::read_limited` leu.
+#[derive(Debug)]
+pub(crate) struct FileRead {
+    pub bytes: Vec<u8>,
+    /// O arquivo é do usuário que roda o processo e grupo e outros não têm nenhum acesso (`0o077`
+    /// zerado), conferido no mesmo descritor da leitura (P-33 item 1). Fora do Unix não há como
+    /// conferir e vale `true`.
+    pub private: bool,
+}
+
 /// `sha256` do que `reader` entrega, lido em blocos.
 fn hash_reader(mut reader: impl Read) -> io::Result<Hash32> {
     let mut hasher = Sha256::new();
@@ -53,13 +63,14 @@ fn plain_name(name: &str) -> io::Result<&str> {
 
 #[cfg(unix)]
 mod imp {
-    use super::{hash_reader, plain_name, Entry, OpenError};
+    use super::{hash_reader, plain_name, Entry, FileRead, OpenError};
     use crate::manifest::Hash32;
     use rustix::fs::{
         fstat, fsync, linkat, mkdirat, openat, renameat, statat, unlinkat, AtFlags, FileType, Mode,
         OFlags, CWD,
     };
     use rustix::io::Errno;
+    use rustix::process::geteuid;
     use std::ffi::OsStr;
     use std::fs::File;
     use std::io::{self, Read, Write};
@@ -225,8 +236,9 @@ mod imp {
         /// Lê um arquivo regular desta pasta com teto de `max` bytes. Abre com `O_NOFOLLOW` e
         /// `O_NONBLOCK` e confere tipo e tamanho no descritor aberto, não no nome (P-33 item 6);
         /// a leitura para em `max + 1`, então um arquivo que cresce depois da conferência também
-        /// é recusado. Link, FIFO, pasta ou maior que `max`: `InvalidInput`.
-        pub(crate) fn read_limited(&self, name: &str, max: u64) -> io::Result<Vec<u8>> {
+        /// é recusado. Link, FIFO, pasta ou maior que `max`: `InvalidInput`. Também diz se o
+        /// arquivo é privado do dono (`FileRead::private`).
+        pub(crate) fn read_limited(&self, name: &str, max: u64) -> io::Result<FileRead> {
             let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
             let fd = openat(&self.fd, plain_name(name)?, flags, Mode::empty()).map_err(|e| {
                 if e == Errno::LOOP {
@@ -247,14 +259,25 @@ mod imp {
             if bytes.len() as u64 > max {
                 return Err(io::ErrorKind::InvalidInput.into());
             }
-            Ok(bytes)
+            let private = is_private(
+                st.st_uid,
+                geteuid().as_raw(),
+                Mode::from_raw_mode(st.st_mode),
+            );
+            Ok(FileRead { bytes, private })
         }
+    }
+
+    /// O arquivo é de `euid` e grupo e outros não têm nenhum acesso. Quem não é o dono só cria
+    /// arquivo com outro dono, então isso diz que quem gravou foi este usuário.
+    pub(super) fn is_private(owner: u32, euid: u32, mode: Mode) -> bool {
+        owner == euid && !mode.intersects(Mode::RWXG | Mode::RWXO)
     }
 }
 
 #[cfg(not(unix))]
 mod imp {
-    use super::{hash_reader, plain_name, Entry, OpenError};
+    use super::{hash_reader, plain_name, Entry, FileRead, OpenError};
     use crate::disk::{create_private_dir, write_atomic};
     use crate::manifest::Hash32;
     use std::fs;
@@ -347,7 +370,7 @@ mod imp {
         }
 
         /// Fora do Unix: confere pelo nome e lê (sem a garantia contra a troca por link).
-        pub(crate) fn read_limited(&self, name: &str, max: u64) -> io::Result<Vec<u8>> {
+        pub(crate) fn read_limited(&self, name: &str, max: u64) -> io::Result<FileRead> {
             let path = self.path.join(plain_name(name)?);
             let meta = fs::symlink_metadata(&path)?;
             if !meta.file_type().is_file() || meta.len() > max {
@@ -360,7 +383,10 @@ mod imp {
             if bytes.len() as u64 > max {
                 return Err(io::ErrorKind::InvalidInput.into());
             }
-            Ok(bytes)
+            Ok(FileRead {
+                bytes,
+                private: true,
+            })
         }
     }
 }
@@ -563,7 +589,7 @@ mod tests {
         fs::write(tmp.path().join("ok"), b"12345").unwrap();
         fs::write(tmp.path().join("grande"), b"123456").unwrap();
         let folder = Folder::open_beneath(tmp.path(), Path::new("")).unwrap();
-        assert_eq!(folder.read_limited("ok", 5).unwrap(), b"12345");
+        assert_eq!(folder.read_limited("ok", 5).unwrap().bytes, b"12345");
         assert_eq!(
             folder.read_limited("grande", 5).unwrap_err().kind(),
             io::ErrorKind::InvalidInput
@@ -572,6 +598,37 @@ mod tests {
             folder.read_limited("nao-existe", 5).unwrap_err().kind(),
             io::ErrorKind::NotFound
         );
+    }
+
+    /// P-33 item 1: dono e modo vêm do descritor lido. O dono só se testa pela função pura (criar
+    /// arquivo de outro usuário pede privilégio).
+    #[test]
+    fn is_private_needs_our_owner_and_no_access_for_group_or_others() {
+        use super::imp::is_private;
+        use rustix::fs::Mode;
+        let (me, other) = (1000, 1001);
+        assert!(is_private(me, me, Mode::RUSR | Mode::WUSR));
+        assert!(is_private(me, me, Mode::RUSR));
+        assert!(!is_private(other, me, Mode::RUSR | Mode::WUSR));
+        for loose in [Mode::RGRP, Mode::WGRP, Mode::ROTH, Mode::WOTH, Mode::XOTH] {
+            assert!(!is_private(me, me, Mode::RUSR | Mode::WUSR | loose));
+        }
+    }
+
+    #[test]
+    fn read_limited_reports_whether_the_file_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new();
+        fs::write(tmp.path().join("a"), b"x").unwrap();
+        let folder = Folder::open_beneath(tmp.path(), Path::new("")).unwrap();
+        for (mode, private) in [(0o600, true), (0o400, true), (0o644, false), (0o660, false)] {
+            fs::set_permissions(tmp.path().join("a"), fs::Permissions::from_mode(mode)).unwrap();
+            assert_eq!(
+                folder.read_limited("a", 8).unwrap().private,
+                private,
+                "{mode:o}"
+            );
+        }
     }
 
     #[test]
