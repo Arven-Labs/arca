@@ -8,7 +8,8 @@
 //! 3. `commit`: move o original para o lado (`.arca-old-<n>`), relê-o para provar que era o
 //!    esperado e põe o novo no lugar. Qualquer falha desfaz o diário (`Undo`) ao contrário.
 
-use crate::disk::{create_private_dir, write_atomic};
+use crate::dirfd::{Folder, OpenError};
+use crate::disk::create_private_dir;
 use crate::engine::EngineError;
 use crate::manifest::{FileEntry, Hash32};
 use serde::{Deserialize, Serialize};
@@ -46,11 +47,22 @@ pub(crate) struct Planned {
     pub to: Option<FileEntry>,
 }
 
-/// O que desfazer, em ordem de criação; o desfazer percorre ao contrário.
+/// O que desfazer, em ordem de criação; o desfazer percorre ao contrário. Cada passo leva a
+/// `root` da classe: o desfazer reabre a pasta-pai descendo dela, sem seguir link (P-29 item 1).
 pub(crate) enum Undo {
-    RemoveFile(PathBuf),
-    RemoveDir(PathBuf),
-    RenameBack { aside: PathBuf, orig: PathBuf },
+    RemoveFile {
+        root: PathBuf,
+        path: PathBuf,
+    },
+    RemoveDir {
+        root: PathBuf,
+        path: PathBuf,
+    },
+    RenameBack {
+        root: PathBuf,
+        aside: PathBuf,
+        orig: PathBuf,
+    },
 }
 
 fn io_error(e: io::Error) -> EngineError {
@@ -123,14 +135,66 @@ pub(crate) fn check_components(root: &Path, dest: &Path) -> Result<(), EngineErr
     Ok(())
 }
 
+/// Abre a pasta-pai de `dest` descendo de `root` sem seguir link (P-29 item 1): quem confere e
+/// quem age usam o mesmo `Folder`, então uma troca por link entre os dois não muda onde se age.
+/// `None` se a raiz ou uma pasta do caminho não existe (nada abaixo existe); `LocalChanges` se
+/// um componente é link ou não é pasta.
+fn open_parent(root: &Path, dest: &Path) -> Result<Option<Folder>, EngineError> {
+    let relative = dest
+        .strip_prefix(root)
+        .map_err(|_| EngineError::Io(io::ErrorKind::InvalidInput))?;
+    let parent = relative
+        .parent()
+        .ok_or(EngineError::Io(io::ErrorKind::InvalidInput))?;
+    match Folder::open_beneath(root, parent) {
+        Ok(folder) => Ok(Some(folder)),
+        Err(OpenError::NotAFolder) => Err(EngineError::LocalChanges),
+        Err(OpenError::Io(e)) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        // a raiz existe mas não é pasta
+        Err(OpenError::Io(e)) if e.kind() == io::ErrorKind::NotADirectory => {
+            Err(EngineError::LocalChanges)
+        }
+        Err(OpenError::Io(e)) => Err(io_error(e)),
+    }
+}
+
+/// O nome do arquivo de `dest` (vem de um `path` do manifest já validado, que é texto UTF-8).
+fn name_of(dest: &Path) -> Result<&str, EngineError> {
+    dest.file_name()
+        .and_then(|n| n.to_str())
+        .ok_or(EngineError::Io(io::ErrorKind::InvalidInput))
+}
+
+/// Como `current_sha`, mas para `name` dentro de `folder`: `None` se não existe; `LocalChanges`
+/// se é link ou algo que não é arquivo regular.
+fn sha_in(folder: &Folder, name: &str) -> Result<Option<Hash32>, EngineError> {
+    match folder.sha256(name) {
+        Ok(sha) => Ok(Some(sha)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) if e.kind() == io::ErrorKind::InvalidInput => Err(EngineError::LocalChanges),
+        Err(e) => Err(io_error(e)),
+    }
+}
+
+/// `Ok` se `name` não existe em `folder` (nem como link); senão `AlreadyExists`.
+fn absent_in(folder: &Folder, name: &str) -> Result<(), EngineError> {
+    match folder.stat(name) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Ok(_) => Err(EngineError::Io(io::ErrorKind::AlreadyExists)),
+        Err(e) => Err(io_error(e)),
+    }
+}
+
 /// Fase 1: confere o disco contra o estado de origem, sem escrever. Devolve o que executar e
 /// quantas entradas já estavam no estado de destino (idempotência).
 pub(crate) fn plan(items: Vec<Item>) -> Result<(Vec<Planned>, usize), EngineError> {
     let mut planned = Vec::new();
     let mut unchanged = 0;
     for item in items {
-        check_components(&item.root, &item.dest)?;
-        let current = current_sha(&item.dest)?;
+        let current = match open_parent(&item.root, &item.dest)? {
+            Some(folder) => sha_in(&folder, name_of(&item.dest)?)?,
+            None => None,
+        };
         let from_sha = item.from.as_ref().map(|f| f.sha256);
         let to_sha = item.to.as_ref().map(|t| t.sha256);
         let run = match (item.kind, current) {
@@ -174,10 +238,16 @@ pub(crate) fn stage(
     plain: &[u8],
 ) -> Result<(), EngineError> {
     // o caminho era seguro no `plan`, mas depois vieram o download e a decifragem dos blobs
-    check_components(&planned.root, &planned.dest)?;
-    let parent = parent_of(&planned.dest)?;
+    let relative = planned
+        .dest
+        .strip_prefix(&planned.root)
+        .map_err(|_| EngineError::Io(io::ErrorKind::InvalidInput))?;
+    let parent_relative = relative
+        .parent()
+        .ok_or(EngineError::Io(io::ErrorKind::InvalidInput))?;
+    // a raiz que falta (e as de cima dela) é escolha de quem chama: criada por caminho, no diário
     let mut missing = Vec::new();
-    let mut dir = Some(parent);
+    let mut dir = Some(planned.root.as_path());
     while let Some(d) = dir {
         if fs::symlink_metadata(d).is_ok() {
             break;
@@ -187,27 +257,51 @@ pub(crate) fn stage(
     }
     for d in missing.into_iter().rev() {
         create_private_dir(&d).map_err(io_error)?;
-        log.push(Undo::RemoveDir(d));
+        log.push(Undo::RemoveDir {
+            root: planned.root.clone(),
+            path: d,
+        });
     }
-    let tmp = parent.join(new_name(planned.n));
-    ensure_absent(&tmp)?;
-    write_atomic(&tmp, plain).map_err(io_error)?;
-    log.push(Undo::RemoveFile(tmp));
+    // as pastas de dentro da raiz são criadas descendo sem seguir link; cada uma entra no diário
+    // mesmo que uma seguinte falhe
+    let mut created = Vec::new();
+    let folder = Folder::create_beneath(&planned.root, parent_relative, &mut created);
+    for path in created {
+        log.push(Undo::RemoveDir {
+            root: planned.root.clone(),
+            path,
+        });
+    }
+    let folder = match folder {
+        Ok(folder) => folder,
+        Err(OpenError::NotAFolder) => return Err(EngineError::LocalChanges),
+        Err(OpenError::Io(e)) if e.kind() == io::ErrorKind::NotADirectory => {
+            return Err(EngineError::LocalChanges)
+        }
+        Err(OpenError::Io(e)) => return Err(io_error(e)),
+    };
+    let tmp = new_name(planned.n);
+    absent_in(&folder, &tmp)?;
+    folder.write_atomic(&tmp, plain).map_err(io_error)?;
+    log.push(Undo::RemoveFile {
+        root: planned.root.clone(),
+        path: parent_of(&planned.dest)?.join(tmp),
+    });
     Ok(())
 }
 
-/// Põe `tmp` em `dest` sem sobrescrever: `hard_link` falha se `dest` apareceu no meio-tempo.
-fn place(tmp: &Path, dest: &Path) -> Result<(), EngineError> {
-    match fs::hard_link(tmp, dest) {
+/// Põe `tmp` em `name` sem sobrescrever: `link` falha se `name` apareceu no meio-tempo.
+fn place(folder: &Folder, tmp: &str, name: &str) -> Result<(), EngineError> {
+    match folder.link(tmp, name) {
         Ok(()) => {
-            let _ = fs::remove_file(tmp);
+            let _ = folder.unlink(tmp);
             Ok(())
         }
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(EngineError::LocalChanges),
         // sistema de arquivos sem hard link: confere e renomeia
         Err(e) if e.kind() == io::ErrorKind::Unsupported => {
-            ensure_absent(dest).map_err(|_| EngineError::LocalChanges)?;
-            fs::rename(tmp, dest).map_err(io_error)
+            absent_in(folder, name).map_err(|_| EngineError::LocalChanges)?;
+            folder.rename(tmp, name).map_err(io_error)
         }
         Err(e) => Err(io_error(e)),
     }
@@ -217,24 +311,32 @@ fn place(tmp: &Path, dest: &Path) -> Result<(), EngineError> {
 /// para provar que era o esperado; o novo entra no lugar. Em caso de erro quem chama desfaz.
 pub(crate) fn commit(log: &mut Vec<Undo>, planned: &[Planned]) -> Result<(), EngineError> {
     for p in planned {
-        check_components(&p.root, &p.dest)?;
         let parent = parent_of(&p.dest)?;
+        let name = name_of(&p.dest)?;
+        // a pasta é aberta uma vez por arquivo, sem seguir link, e conferir, mover e pôr no lugar
+        // agem nela (P-29 item 1)
+        let folder =
+            open_parent(&p.root, &p.dest)?.ok_or(EngineError::Io(io::ErrorKind::NotFound))?;
         if matches!(p.kind, Kind::Update | Kind::Remove) {
-            let aside = parent.join(old_name(p.n));
-            ensure_absent(&aside)?;
-            fs::rename(&p.dest, &aside).map_err(io_error)?;
+            let aside = old_name(p.n);
+            absent_in(&folder, &aside)?;
+            folder.rename(name, &aside).map_err(io_error)?;
             log.push(Undo::RenameBack {
-                aside: aside.clone(),
+                root: p.root.clone(),
+                aside: parent.join(&aside),
                 orig: p.dest.clone(),
             });
             // segunda conferência: uma edição entre o `plan` e agora é detectada aqui
-            if current_sha(&aside)? != p.from_sha {
+            if sha_in(&folder, &aside)? != p.from_sha {
                 return Err(EngineError::LocalChanges);
             }
         }
         if matches!(p.kind, Kind::Create | Kind::Update) {
-            place(&parent.join(new_name(p.n)), &p.dest)?;
-            log.push(Undo::RemoveFile(p.dest.clone()));
+            place(&folder, &new_name(p.n), name)?;
+            log.push(Undo::RemoveFile {
+                root: p.root.clone(),
+                path: p.dest.clone(),
+            });
         }
     }
     Ok(())
@@ -244,21 +346,37 @@ pub(crate) fn commit(log: &mut Vec<Undo>, planned: &[Planned]) -> Result<(), Eng
 /// esvaziaram (nunca a raiz). Melhor esforço: o commit já valeu.
 pub(crate) fn finish(planned: &[Planned]) {
     for p in planned {
-        let Some(parent) = p.dest.parent() else {
+        let Ok(Some(folder)) = open_parent(&p.root, &p.dest) else {
             continue;
         };
         if matches!(p.kind, Kind::Update | Kind::Remove) {
-            let _ = fs::remove_file(parent.join(old_name(p.n)));
+            let _ = folder.unlink(&old_name(p.n));
         }
         if p.kind == Kind::Remove {
-            let mut dir = Some(parent);
-            while let Some(d) = dir {
-                if d == p.root || fs::remove_dir(d).is_err() {
-                    break;
-                }
-                dir = d.parent();
-            }
+            remove_emptied_folders(&p.root, &p.dest);
         }
+    }
+}
+
+/// Remove as pastas que a remoção de `dest` esvaziou, de baixo para cima, nunca a raiz. Cada uma
+/// é removida pela pasta-pai aberta sem seguir link, não por caminho.
+fn remove_emptied_folders(root: &Path, dest: &Path) {
+    let Ok(relative) = dest.strip_prefix(root) else {
+        return;
+    };
+    let mut folder = relative.parent();
+    while let Some(rel) = folder {
+        let (Some(parent), Some(name)) = (rel.parent(), rel.file_name().and_then(|n| n.to_str()))
+        else {
+            break; // chegou na raiz
+        };
+        let removed = Folder::open_beneath(root, parent)
+            .ok()
+            .is_some_and(|parent_folder| parent_folder.rmdir(name).is_ok());
+        if !removed {
+            break;
+        }
+        folder = Some(parent);
     }
 }
 
@@ -294,23 +412,41 @@ pub(crate) fn undo_all(log: Vec<Undo>) -> Vec<PathBuf> {
     let mut kept = Vec::new();
     for step in log.into_iter().rev() {
         match step {
-            Undo::RemoveFile(path) => {
-                let _ = fs::remove_file(path);
+            Undo::RemoveFile { root, path } => {
+                if let (Ok(Some(folder)), Ok(name)) = (open_parent(&root, &path), name_of(&path)) {
+                    let _ = folder.unlink(name);
+                }
             }
-            Undo::RemoveDir(path) => {
-                let _ = fs::remove_dir(path);
+            Undo::RemoveDir { root, path } => {
+                // uma pasta de dentro da raiz sai pela pasta-pai aberta sem seguir link; a raiz
+                // (e as de cima, que foram criadas por caminho) saem por caminho
+                match (open_parent(&root, &path), name_of(&path)) {
+                    (Ok(Some(folder)), Ok(name)) if path != root => {
+                        let _ = folder.rmdir(name);
+                    }
+                    _ => {
+                        let _ = fs::remove_dir(&path);
+                    }
+                }
             }
-            Undo::RenameBack { aside, orig } => {
-                // `hard_link` falha se `orig` existe; `rename` o sobrescreveria
-                let restored = match fs::hard_link(&aside, &orig) {
-                    Ok(()) => {
-                        let _ = fs::remove_file(&aside);
-                        true
+            Undo::RenameBack { root, aside, orig } => {
+                // `link` falha se `orig` existe; `rename` o sobrescreveria. Se a pasta não abre
+                // sem link, o original fica de lado e é devolvido em `kept`.
+                let restored = match (open_parent(&root, &orig), name_of(&aside), name_of(&orig)) {
+                    (Ok(Some(folder)), Ok(aside_name), Ok(orig_name)) => {
+                        match folder.link(aside_name, orig_name) {
+                            Ok(()) => {
+                                let _ = folder.unlink(aside_name);
+                                true
+                            }
+                            Err(e) if e.kind() == io::ErrorKind::Unsupported => {
+                                absent_in(&folder, orig_name).is_ok()
+                                    && folder.rename(aside_name, orig_name).is_ok()
+                            }
+                            Err(_) => false,
+                        }
                     }
-                    Err(e) if e.kind() == io::ErrorKind::Unsupported => {
-                        ensure_absent(&orig).is_ok() && fs::rename(&aside, &orig).is_ok()
-                    }
-                    Err(_) => false,
+                    _ => false,
                 };
                 if !restored {
                     kept.push(aside);
@@ -398,6 +534,7 @@ mod tests {
         fs::write(root.join(".arca-old-0"), b"original").unwrap();
         fs::write(root.join("a.md"), b"da pessoa").unwrap();
         let kept = undo_all(vec![Undo::RenameBack {
+            root: root.to_path_buf(),
             aside: root.join(".arca-old-0"),
             orig: root.join("a.md"),
         }]);
@@ -412,12 +549,93 @@ mod tests {
         let root = dir.path();
         fs::write(root.join(".arca-old-0"), b"original").unwrap();
         let kept = undo_all(vec![Undo::RenameBack {
+            root: root.to_path_buf(),
             aside: root.join(".arca-old-0"),
             orig: root.join("a.md"),
         }]);
         assert!(kept.is_empty());
         assert_eq!(fs::read(root.join("a.md")).unwrap(), b"original");
         assert_eq!(fs::read_dir(root).unwrap().count(), 1);
+    }
+
+    // ---------- P-29 (1): o desfazer e o `plan` não seguem link trocado ----------
+
+    /// A pasta do original foi trocada por um link depois de o `commit` pôr o original de lado:
+    /// o desfazer não pode "devolvê-lo" para dentro da pasta de fora. O original fica de lado,
+    /// na pasta de verdade, e vai para `kept`.
+    #[cfg(unix)]
+    #[test]
+    fn undo_does_not_restore_through_a_folder_swapped_for_a_symlink() {
+        let dir = TempDir::new();
+        let root = dir.path().join("raiz");
+        let outside = dir.path().join("fora");
+        fs::create_dir_all(root.join("sub")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(root.join("sub/.arca-old-0"), b"original").unwrap();
+        fs::write(outside.join(".arca-old-0"), b"da pessoa").unwrap();
+        let log = vec![Undo::RenameBack {
+            root: root.clone(),
+            aside: root.join("sub/.arca-old-0"),
+            orig: root.join("sub/a.md"),
+        }];
+
+        fs::rename(root.join("sub"), dir.path().join("sub-de-verdade")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("sub")).unwrap();
+        let kept = undo_all(log);
+
+        assert_eq!(kept, [root.join("sub/.arca-old-0")]);
+        assert!(!outside.join("a.md").exists());
+        assert_eq!(fs::read(outside.join(".arca-old-0")).unwrap(), b"da pessoa");
+        assert_eq!(
+            fs::read(dir.path().join("sub-de-verdade/.arca-old-0")).unwrap(),
+            b"original"
+        );
+    }
+
+    /// Um FIFO onde o arquivo deveria estar não trava o `plan`: abrir um FIFO sem `O_NONBLOCK`
+    /// esperaria um escritor para sempre.
+    #[cfg(unix)]
+    #[test]
+    fn plan_refuses_a_fifo_where_the_file_should_be_instead_of_blocking() {
+        use rustix::fs::{mknodat, FileType, Mode, CWD};
+        let dir = TempDir::new();
+        let root = dir.path();
+        mknodat(
+            CWD,
+            root.join("a.md"),
+            FileType::Fifo,
+            Mode::RUSR | Mode::WUSR,
+            0,
+        )
+        .unwrap();
+        let item = Item {
+            kind: Kind::Update,
+            root: root.to_path_buf(),
+            dest: root.join("a.md"),
+            from: None,
+            to: None,
+        };
+        assert!(matches!(plan(vec![item]), Err(EngineError::LocalChanges)));
+    }
+
+    /// Criar e remover dentro de subpastas: as pastas que a remoção esvazia saem, a raiz não.
+    #[test]
+    fn finish_removes_the_folders_a_removal_emptied_but_never_the_root() {
+        let dir = TempDir::new();
+        let root = dir.path().join("raiz");
+        fs::create_dir_all(root.join("a/b")).unwrap();
+        fs::write(root.join("a/b/c.md"), b"x").unwrap();
+        fs::write(root.join("a/fica.md"), b"y").unwrap();
+        let p = planned(Kind::Remove, &root, "a/b/c.md", Some(b"x"));
+        let mut log = Vec::new();
+        commit(&mut log, std::slice::from_ref(&p)).unwrap();
+        finish(std::slice::from_ref(&p));
+        assert!(!root.join("a/b").exists(), "a pasta esvaziada sai");
+        assert!(
+            root.join("a/fica.md").exists(),
+            "a que ainda tem arquivo fica"
+        );
+        assert!(root.exists());
     }
 
     // ---------- auditoria: symlink trocado depois do `plan` (I-5) ----------
