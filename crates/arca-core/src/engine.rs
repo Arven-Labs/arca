@@ -5194,6 +5194,132 @@ mod tests {
         assert!(!dir.exists());
     }
 
+    // ---- P-37 (2): classe sem raiz não tem cópia do perdedor ----
+
+    /// Um dispositivo que não liga `secret` (sem aceite dos logins) não grava o segredo em
+    /// texto claro, nem cria `dir`.
+    #[tokio::test]
+    async fn a_secret_loser_is_not_saved_without_a_secret_root() {
+        let rig = Rig::new();
+        let roots = roots_of(Class::Config, &rig.dir("cfg-vivo"));
+        let dir = rig.tmp.path().join("conflitos");
+        let loser = stored_loser(&rig, Class::Secret, "oauth/slack.json", b"{token-b}").await;
+        let saved = rig
+            .engine("pc")
+            .save_conflict_losers(
+                &[conflict(
+                    Class::Secret,
+                    "oauth/slack.json",
+                    "pb",
+                    Some(loser),
+                )],
+                &dir,
+                &roots,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            saved,
+            SavedLosers {
+                saved: 0,
+                already: 0
+            }
+        );
+        assert!(!dir.exists());
+    }
+
+    /// No mesmo lote, o perdedor da classe ligada é gravado e o da classe sem raiz não.
+    #[tokio::test]
+    async fn only_the_loser_of_a_class_with_a_root_is_saved() {
+        let rig = Rig::new();
+        let roots = roots_of(Class::Config, &rig.dir("cfg-vivo"));
+        let dir = rig.tmp.path().join("conflitos");
+        let a = stored_loser(&rig, Class::Config, "settings.toml", b"perdedor A").await;
+        let b = stored_loser(&rig, Class::Secret, "oauth/slack.json", b"{token-b}").await;
+        let saved = rig
+            .engine("pc")
+            .save_conflict_losers(
+                &[
+                    conflict(Class::Config, "settings.toml", "pa", Some(a)),
+                    conflict(Class::Secret, "oauth/slack.json", "pb", Some(b)),
+                ],
+                &dir,
+                &roots,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            saved,
+            SavedLosers {
+                saved: 1,
+                already: 0
+            }
+        );
+        let name_a = format!(
+            "config/settings.toml.conflito-pa-{}",
+            short_hex(b"perdedor A")
+        );
+        assert_eq!(fs::read(dir.join(name_a)).unwrap(), b"perdedor A");
+        assert!(!dir.join("secret").exists());
+    }
+
+    /// Quem funde um conflito `secret` sem raiz `secret` funde, mas não guarda o perdedor.
+    #[tokio::test]
+    async fn merging_a_secret_conflict_without_a_secret_root_saves_no_copy() {
+        let d = diverge_in(
+            Class::Secret,
+            &[("oauth/slack.json", b"base")],
+            vec![
+                ("pa", 10, vec![("oauth/slack.json", b"from-a")]),
+                ("pb", 20, vec![("oauth/slack.json", b"from-b")]),
+            ],
+        )
+        .await;
+        let roots = roots_of(Class::Config, &d.rig.dir("cfg-vivo"));
+        let dir = d.rig.tmp.path().join("conflitos");
+        let eng = d.rig.engine("pc");
+        let (outcome, saved) = eng.merge_with_losers(30, &dir, &roots).await.unwrap();
+        assert!(matches!(
+            outcome,
+            MergeOutcome::Merged { tips_after: 1, .. }
+        ));
+        assert_eq!(
+            saved,
+            SavedLosers {
+                saved: 0,
+                already: 0
+            }
+        );
+        assert!(!dir.exists());
+    }
+
+    /// Sem nada a gravar, `dir` nem é conferido: o filtro de raiz vem antes de tudo (antes de
+    /// decifrar o perdedor e de checar a pasta).
+    #[tokio::test]
+    async fn without_a_root_the_loser_is_dropped_before_the_conflicts_dir_is_checked() {
+        let rig = Rig::new();
+        let roots = roots_of(Class::Config, &rig.dir("cfg-vivo"));
+        let inside_a_live_root = rig.tmp.path().join("cfg-vivo/conflitos");
+        let loser = stored_loser(&rig, Class::Secret, "x.json", b"segredo").await;
+        let saved = rig
+            .engine("pc")
+            .save_conflict_losers(
+                &[conflict(Class::Secret, "x.json", "pa", Some(loser))],
+                &inside_a_live_root,
+                &roots,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            saved,
+            SavedLosers {
+                saved: 0,
+                already: 0
+            }
+        );
+        assert!(!inside_a_live_root.exists());
+    }
+
     #[tokio::test]
     async fn plain_merge_still_works_without_a_conflicts_dir() {
         let (d, _, _) = config_conflict().await;
