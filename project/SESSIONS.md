@@ -2,6 +2,17 @@
 
 Mais recente no topo.
 
+### 2026-11-13 — Sessão 78 (estratégia: formato próprio; P-30 (1) com `hard_link`)
+
+- **Pedido**: "por onde continuamos no arca?"; das três opções (TOCTOU, Fase 2 pelo Warden, estratégia), a ordem escolhida foi estratégia e depois TOCTOU.
+- **Estratégia ([arca#96](https://github.com/Arven-Labs/arca/pull/96), mesclado em `256eeaf`)**: decisão do dono sobre a pesquisa de reuso do workspace: **formato próprio**, não delegado a restic/Kopia (sem fusão entre máquinas, CLI em Go inviável no Android, sem classes com consentimento). Atualização no ADR 0003. A outra pergunta da pesquisa (crate S3) já estava decidida no ADR 0008 (`object_store`, P-15). A pesquisa do workspace foi marcada como decidida (workspace#42).
+- **TOCTOU (plan mode)**: decisão do dono: **só a fatia barata**. P-29 (1) e P-34 (2) (pasta trocada por link) ficam adiados: só um processo do mesmo usuário explora a janela, e ele já lê os logins e apaga as notas direto.
+- **Feito ([arca#97](https://github.com/Arven-Labs/arca/pull/97))**: P-30 (1). `write_loser` grava o temporário (`.tmp-<hex>`, 0600) e o põe no lugar por `hard_link`, que falha se o destino apareceu depois do `needs_write`: o destino fica intocado e conta como `already`. FS sem hard link: confere e renomeia, como o `place`.
+- **Testes (CI)**: 2 novos; o do destino que apareceu falhou antes (run 43545251317: o arquivo virou o perdedor) e passa com a correção (run 43545674567, 4 checks verdes); o do destino livre passa nos dois. Quebra de propósito (`rename` no lugar, arca#98 fechado, branch apagada) derrubou só o primeiro (run 43546034895).
+- **Não verificado**: o caminho sem hard link (CI em ext4); Windows e macOS; nada rodado localmente além de `cargo fmt --check`.
+- **Anotado para depois**: `write_loser` e `apply::place` repetem o mesmo padrão (temporário + `hard_link` + fallback); unificar sem pressa, sem misturar com correção.
+- **Fica**: o Warden trocar o `rev` do `arca-core` depois do merge; as ideias do Warden de 2026-11-13 já foram identificadas (agent-desktop da vercel-labs e CopilotKit/OpenBot, Warden#144 e #145) e seguem lá; P-09, P-22, P-25, P-26, P-29 (exceto o que foi adiado), P-30 (2) a (6), P-31 a P-36.
+
 ### 2026-11-13 — Sessão 77 (P-37 item 2: perdedor de classe sem raiz não é gravado)
 
 - **Pedido**: "vamos no P-37 item 2"; plano aprovado em plan mode, com duas decisões suas: o filtro vale para **qualquer classe sem raiz** (mesmo critério do `apply`) e o pulo **não é contado** (`SavedLosers` não muda). Toca segredos (AGENTS §4), confirmado ao aprovar o plano.
