@@ -1280,7 +1280,7 @@ mod tests {
         let p = pair();
         let before = (tree(&p.a), tree(&p.b));
         assert_eq!(
-            recover_all(&[p.b.clone()]),
+            recover_all(std::slice::from_ref(&p.b)),
             Err(EngineError::IncompleteApply)
         );
         assert_eq!((tree(&p.a), tree(&p.b)), before);
@@ -1295,7 +1295,7 @@ mod tests {
     fn a_missing_root_is_fine_when_a_visible_journal_is_committed() {
         let p = pair();
         mark_committed_in(&p.b);
-        let done = recover_all(&[p.b.clone()]).unwrap();
+        let done = recover_all(std::slice::from_ref(&p.b)).unwrap();
         assert_eq!((done.completed, done.rolled_back), (1, 0));
         assert_eq!(fs::read(p.b.join("y.md")).unwrap(), b"Y1");
         assert!(!Journal::exists(&p.b) && Journal::exists(&p.a));
@@ -1349,7 +1349,7 @@ mod tests {
         drop(log);
         let raw = fs::read_to_string(Journal::path(&c.root)).unwrap();
         assert!(!raw.contains("apply_id") && !raw.contains("peers"), "{raw}");
-        let done = recover_all(&[c.root.clone()]).unwrap();
+        let done = recover_all(std::slice::from_ref(&c.root)).unwrap();
         assert_eq!(done.rolled_back, 4);
         assert_eq!(tree(&c.root), original());
     }
