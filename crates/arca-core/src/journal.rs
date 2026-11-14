@@ -634,6 +634,34 @@ mod tests {
         assert!(real.exists());
     }
 
+    /// P-33 item 1: a arca sempre grava o diário `0600`. Um diário que grupo ou outros podem ler
+    /// ou alterar não foi gravado por ela (ou foi mexido): não vale, e nada é tocado.
+    #[cfg(unix)]
+    #[test]
+    fn a_journal_that_others_can_touch_is_refused_and_nothing_is_changed() {
+        use std::os::unix::fs::PermissionsExt;
+        for mode in [0o644, 0o660, 0o602, 0o666] {
+            let c = prepared();
+            fs::set_permissions(Journal::path(&c.root), fs::Permissions::from_mode(mode)).unwrap();
+            let before = tree(&c.root);
+            assert_eq!(
+                Journal::load(&c.root),
+                Err(EngineError::CorruptJournal),
+                "{mode:o}"
+            );
+            assert_eq!(
+                recover_root(&c.root),
+                Err(EngineError::CorruptJournal),
+                "{mode:o}"
+            );
+            assert_eq!(
+                tree(&c.root),
+                before,
+                "{mode:o}: recover não pode tocar em nada"
+            );
+        }
+    }
+
     /// Um FIFO no nome do diário é corrupção e não trava a leitura (abrir um FIFO sem
     /// `O_NONBLOCK` esperaria um escritor para sempre).
     #[cfg(unix)]
