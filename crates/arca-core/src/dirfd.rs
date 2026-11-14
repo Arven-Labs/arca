@@ -227,7 +227,7 @@ mod imp {
         /// a leitura para em `max + 1`, então um arquivo que cresce depois da conferência também
         /// é recusado. Link, FIFO, pasta ou maior que `max`: `InvalidInput`.
         pub(crate) fn read_limited(&self, name: &str, max: u64) -> io::Result<Vec<u8>> {
-            let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+            let flags = OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC;
             let fd = openat(&self.fd, plain_name(name)?, flags, Mode::empty()).map_err(|e| {
                 if e == Errno::LOOP {
                     io::ErrorKind::InvalidInput.into()
