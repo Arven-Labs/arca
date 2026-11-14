@@ -115,7 +115,10 @@ pub enum EngineError {
     #[error("an interrupted apply left a journal; run recover first")]
     Interrupted,
     /// O diário de `apply` existe mas não é válido (ilegível, grande demais, versão desconhecida,
-    /// caminho que sai da raiz, link no lugar). A recuperação não tocou em nada.
+    /// caminho que sai da raiz, link no lugar, de outro dono ou legível por grupo ou outros em
+    /// Unix: a arca sempre grava o diário `0600`, então um diário assim não foi gravado por ela).
+    /// A recuperação não tocou em nada. Um `apply` interrompido que rodou como outro usuário (por
+    /// exemplo `sudo`) cai aqui: a pessoa apaga o diário à mão depois de conferir a pasta.
     #[error("the apply journal is corrupt")]
     CorruptJournal,
     /// A restauração só escreve em pasta inexistente ou vazia.

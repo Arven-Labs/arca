@@ -130,8 +130,9 @@ impl Journal {
         }
     }
 
-    /// `None` se não existe. Link no lugar, grande demais, JSON inválido, versão ou fase
-    /// desconhecida, campo a mais ou caminho que sai da raiz: `CorruptJournal`.
+    /// `None` se não existe. Link no lugar, grande demais, de outro dono ou legível por grupo ou
+    /// outros (Unix), JSON inválido, versão ou fase desconhecida, campo a mais ou caminho que sai
+    /// da raiz: `CorruptJournal`.
     pub(crate) fn load(root: &Path) -> Result<Option<Journal>, EngineError> {
         // abre o arquivo sem seguir link e confere tipo e tamanho no que foi aberto, na mesma
         // leitura (P-33 item 6): link, FIFO, pasta ou grande demais vale como corrupção
@@ -141,16 +142,22 @@ impl Journal {
             Err(OpenError::Io(e)) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(OpenError::Io(e)) => return Err(io_error(e)),
         };
-        let bytes = match folder.read_limited(JOURNAL_NAME, MAX_JOURNAL_BYTES) {
-            Ok(bytes) => bytes,
+        let read = match folder.read_limited(JOURNAL_NAME, MAX_JOURNAL_BYTES) {
+            Ok(read) => read,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) if e.kind() == io::ErrorKind::InvalidInput => {
                 return Err(EngineError::CorruptJournal)
             }
             Err(e) => return Err(io_error(e)),
         };
+        // P-33 item 1: o diário não é autenticado; só vale se for deste usuário e privado (a arca
+        // sempre grava `0600`). Quem escreve na pasta sem ser o dono só cria arquivo de outro
+        // dono, e esse é recusado aqui, antes de o conteúdo valer qualquer coisa
+        if !read.private {
+            return Err(EngineError::CorruptJournal);
+        }
         let journal: Journal =
-            serde_json::from_slice(&bytes).map_err(|_| EngineError::CorruptJournal)?;
+            serde_json::from_slice(&read.bytes).map_err(|_| EngineError::CorruptJournal)?;
         journal.validate()?;
         Ok(Some(journal))
     }
@@ -632,6 +639,34 @@ mod tests {
         assert_eq!(recover_root(&c.root), Err(EngineError::CorruptJournal));
         assert_eq!(tree(&c.root), before);
         assert!(real.exists());
+    }
+
+    /// P-33 item 1: a arca sempre grava o diário `0600`. Um diário que grupo ou outros podem ler
+    /// ou alterar não foi gravado por ela (ou foi mexido): não vale, e nada é tocado.
+    #[cfg(unix)]
+    #[test]
+    fn a_journal_that_others_can_touch_is_refused_and_nothing_is_changed() {
+        use std::os::unix::fs::PermissionsExt;
+        for mode in [0o644, 0o660, 0o602, 0o666] {
+            let c = prepared();
+            fs::set_permissions(Journal::path(&c.root), fs::Permissions::from_mode(mode)).unwrap();
+            let before = tree(&c.root);
+            assert_eq!(
+                Journal::load(&c.root),
+                Err(EngineError::CorruptJournal),
+                "{mode:o}"
+            );
+            assert_eq!(
+                recover_root(&c.root),
+                Err(EngineError::CorruptJournal),
+                "{mode:o}"
+            );
+            assert_eq!(
+                tree(&c.root),
+                before,
+                "{mode:o}: recover não pode tocar em nada"
+            );
+        }
     }
 
     /// Um FIFO no nome do diário é corrupção e não trava a leitura (abrir um FIFO sem

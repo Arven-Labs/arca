@@ -2,6 +2,14 @@
 
 Mais recente no topo.
 
+### 2026-11-14 — Sessão 83 (P-33 (1): diário só vale se for do próprio usuário)
+
+- **Pedido**: "p33 1". Plan mode; recomendei dono + modo no `load` em vez de MAC e você aprovou o plano (inclui o falso positivo do `sudo`). Toca recuperação de arquivos do usuário e parsing de dado externo (AGENTS §4).
+- **Feito ([arca#108](https://github.com/Arven-Labs/arca/pull/108))**: `Folder::read_limited` devolve `FileRead { bytes, private }`; `private` = dono é o `geteuid` e `mode & 0o077 == 0`, lidos do `fstat` do mesmo fd (`is_private`, função pura). `Journal::load` recusa o que não for privado com `CorruptJournal`. `rustix` ganhou a feature `process`; `Cargo.lock` não mudou. Doc de `CorruptJournal` atualizado.
+- **Testes (CI)**: **vermelho antes**: só o teste de comportamento (diário `0644`, `0660`, `0602`, `0666`) no primeiro commit, run 43647647301, 1 falhou (diário aceito) e 484 passaram. Verde com a implementação: run 43648021955, 4 checks. Quebra de propósito (arca#109, fechado, branch apagada): dono invertido em `is_private` derrubou vários testes (run 43648239372; listei 8, entre eles `is_private_needs_our_owner...`, `read_limited_reports_whether_the_file_is_private` e os de recuperação). **Não fiz a quebra do modo** (`&` por `|`), prevista no plano; o teste do `0644` que ficou vermelho antes cobre o modo.
+- **Não verificado**: diário de outro usuário de verdade (CI sem privilégio; só a função pura); macOS e Windows (CI só Linux); nada rodado localmente além de `cargo fmt`.
+- **Fica**: P-33 (2) a (5), (7), (8); P-09, P-22, P-25, P-26, P-29 (2) a (7), P-30 (2) a (6), P-31 a P-36. Warden: o `rev` do `arca-core` não foi atualizado para as duas últimas mudanças (leitura por fd e dono do diário).
+
 ### 2026-11-14 — Sessão 82 (P-33 (6): leitura do diário por fd)
 
 - **Pedido**: "p33 6". Plan mode; decisão sua: escopo **só a leitura** (o `Journal::remove` que ignora erro e o `abandon` com `Io(Other)` falham do lado seguro e ficam como estão). Toca parsing de dado externo e recuperação (AGENTS §4), confirmado ao aprovar o plano.
