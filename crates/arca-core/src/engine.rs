@@ -1001,8 +1001,12 @@ impl<S: BlobStore> Engine<S> {
             }
             // passo 2: grava
             for (dest, plain) in pending {
-                write_loser(dest, plain)?;
-                saved.saved += 1;
+                // `false`: o destino apareceu depois do passo 1 e conta como já salvo
+                if write_loser(dest, plain)? {
+                    saved.saved += 1;
+                } else {
+                    saved.already += 1;
+                }
             }
             Ok(saved)
         })
@@ -1239,12 +1243,39 @@ fn needs_write(dir: &Path, dest: &Path) -> Result<bool, EngineError> {
 }
 
 /// Grava um perdedor (`needs_write` já decidiu): pastas `0700`, arquivo `0600`, atômico.
-fn write_loser(dest: &Path, plain: &[u8]) -> Result<(), EngineError> {
+/// Nunca sobrescreve (P-30 (1)): o temporário entra no lugar por `hard_link`, que falha se o
+/// destino apareceu depois do `needs_write`. Devolve `false` nesse caso, com o destino intocado.
+fn write_loser(dest: &Path, plain: &[u8]) -> Result<bool, EngineError> {
     let parent = dest
         .parent()
         .ok_or(EngineError::Io(io::ErrorKind::InvalidInput))?;
     create_private_dir(parent).map_err(io_error)?;
-    write_atomic(dest, plain).map_err(io_error)
+    let mut random = [0u8; 8];
+    getrandom::fill(&mut random).map_err(|_| EngineError::Io(io::ErrorKind::Other))?;
+    let suffix: String = random.iter().map(|b| format!("{b:02x}")).collect();
+    let tmp = parent.join(format!(".tmp-{suffix}"));
+    write_atomic(&tmp, plain).map_err(io_error)?;
+
+    let placed = match fs::hard_link(&tmp, dest) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+        // sistema de arquivos sem hard link: confere e renomeia, como o `place` do `apply`
+        Err(e) if e.kind() == io::ErrorKind::Unsupported => match fs::symlink_metadata(dest) {
+            Ok(_) => Ok(false),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                fs::rename(&tmp, dest).map(|()| true).map_err(io_error)
+            }
+            Err(e) => Err(io_error(e)),
+        },
+        Err(e) => Err(io_error(e)),
+    };
+    let _ = fs::remove_file(&tmp);
+    let placed = placed?;
+    #[cfg(unix)]
+    fs::File::open(parent)
+        .and_then(|d| d.sync_all())
+        .map_err(io_error)?;
+    Ok(placed)
 }
 
 /// Com estado: alguma das pontas tem de continuar a história aceita, senão `Rollback`.
@@ -5324,6 +5355,54 @@ mod tests {
             }
         );
         assert!(!inside_a_live_root.exists());
+    }
+
+    // ---- P-30 (1): o perdedor nunca sobrescreve o que apareceu no destino ----
+
+    /// Quantos temporários `.tmp-*` sobraram em `dir`.
+    fn leftover_temps(dir: &Path) -> usize {
+        fs::read_dir(dir)
+            .unwrap()
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".tmp-")
+            })
+            .count()
+    }
+
+    /// Um arquivo criado no destino depois do `needs_write` (a cópia que a pessoa editou, ou
+    /// outro processo) fica como está: gravar o perdedor não o substitui.
+    #[test]
+    fn a_loser_never_overwrites_a_file_that_appeared_after_the_check() {
+        let tmp = TempDir::new();
+        let dest = tmp
+            .path()
+            .join("conflitos/secret/oauth/slack.json.conflito-pb-0011223344556677");
+        fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        fs::write(&dest, b"da pessoa").unwrap();
+
+        let _ = write_loser(&dest, b"perdedor");
+
+        assert_eq!(fs::read(&dest).unwrap(), b"da pessoa");
+        assert_eq!(leftover_temps(dest.parent().unwrap()), 0);
+    }
+
+    /// Destino livre: o perdedor é gravado e nenhum temporário sobra.
+    #[test]
+    fn a_loser_is_written_when_the_destination_is_free() {
+        let tmp = TempDir::new();
+        let dest = tmp
+            .path()
+            .join("conflitos/secret/oauth/slack.json.conflito-pb-0011223344556677");
+
+        write_loser(&dest, b"perdedor").unwrap();
+
+        assert_eq!(fs::read(&dest).unwrap(), b"perdedor");
+        assert_eq!(leftover_temps(dest.parent().unwrap()), 0);
     }
 
     #[tokio::test]
