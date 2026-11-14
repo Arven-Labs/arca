@@ -949,21 +949,27 @@ mod tests {
         let dir = TempDir::new();
         let (dest, tmp) = (dir.path().join("a.md"), dir.path().join(".arca-new-0"));
         let mut kept = Vec::new();
+        let folder = Folder::open_beneath(dir.path(), Path::new("")).unwrap();
+        let slot = Slot {
+            folder: &folder,
+            dir: dir.path(),
+        };
+        let (name, scratch) = ("a.md", ".arca-new-0");
 
         fs::write(&dest, b"nosso").unwrap();
-        assert!(remove_if_ours(&dest, &tmp, Some(sha(b"nosso")), &mut kept).unwrap());
+        assert!(remove_if_ours(&slot, name, scratch, Some(sha(b"nosso")), &mut kept).unwrap());
         assert!(!dest.exists() && !tmp.exists());
 
         // a pessoa salvou por cima entre a conferência e a remoção: o conteúdo é outro
         fs::write(&dest, b"edicao da pessoa").unwrap();
-        assert!(!remove_if_ours(&dest, &tmp, Some(sha(b"nosso")), &mut kept).unwrap());
+        assert!(!remove_if_ours(&slot, name, scratch, Some(sha(b"nosso")), &mut kept).unwrap());
         assert_eq!(fs::read(&dest).unwrap(), b"edicao da pessoa");
         assert!(!tmp.exists() && kept.is_empty());
 
         // e se o destino foi recriado enquanto o arquivo estava de lado, nada é sobrescrito
         fs::write(&dest, b"edicao da pessoa").unwrap();
         fs::write(&tmp, b"x").unwrap(); // tmp ocupado: não dá para mover para lá
-        assert!(remove_if_ours(&dest, &tmp, Some(sha(b"nosso")), &mut kept).is_err());
+        assert!(remove_if_ours(&slot, name, scratch, Some(sha(b"nosso")), &mut kept).is_err());
         assert_eq!(fs::read(&dest).unwrap(), b"edicao da pessoa");
         assert_eq!(fs::read(&tmp).unwrap(), b"x");
     }
