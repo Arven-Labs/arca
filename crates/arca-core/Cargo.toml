@@ -28,6 +28,11 @@ bip39 = { version = "=3.0.0", default-features = false, features = ["std", "zero
 # desliga a leitura das variáveis de ambiente.
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls"], optional = true }
 
+# Operações relativas a uma pasta aberta (`dirfd.rs`, P-34 item 2): `openat` com `O_NOFOLLOW`, sem
+# `unsafe` do nosso lado. Só Unix; fora dele o `Folder` ainda guarda um caminho.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "=1.1.6", default-features = false, features = ["fs", "std"] }
+
 [features]
 # O `HubStore` (`Backend::Hub`). Ligada por padrão; `default-features = false` tira a rede do núcleo.
 default = ["hub"]

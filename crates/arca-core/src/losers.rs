@@ -7,7 +7,8 @@
 //! um arquivo regular, dentro de `dir/config` ou `dir/secret`, com nome no padrão e conteúdo que
 //! ainda tem o hash do nome. Uma cópia que a pessoa editou nunca é apagada.
 
-use crate::apply::{current_sha, ensure_absent};
+use crate::apply::current_sha;
+use crate::dirfd::{Folder, OpenError};
 use crate::engine::EngineError;
 use crate::manifest::{validate_device, validate_path, Class};
 use crate::scan::MAX_FILE_BYTES;
@@ -89,20 +90,6 @@ fn parse_name(name: &str) -> Option<(&str, &str, [u8; 8])> {
         return None;
     }
     Some((base, device, prefix))
-}
-
-/// Pastas de verdade, sem link, entre a pasta de conflitos e o arquivo (inclusive a da classe).
-/// `Ok(false)` se algum componente é link ou não é pasta; `Ok(true)` com tudo em ordem;
-/// `Err(NotFound)` se faltar uma pasta.
-fn real_folders(dir: &Path, relative_parent: &Path) -> io::Result<bool> {
-    let mut walk = dir.to_path_buf();
-    for part in relative_parent.components() {
-        walk.push(part);
-        if !fs::symlink_metadata(&walk)?.file_type().is_dir() {
-            return Ok(false);
-        }
-    }
-    Ok(true)
 }
 
 fn collect(
@@ -223,11 +210,11 @@ pub(crate) fn clear(dir: &Path, copies: &[LoserCopy]) -> Result<ClearReport, Eng
             skip(&mut report, Skip::NotACopy);
             continue;
         };
-        let Some((base, _, prefix)) = file
-            .file_name()
-            .and_then(|n| n.to_str())
-            .and_then(parse_name)
-        else {
+        let Some(name) = file.file_name().and_then(|n| n.to_str()) else {
+            skip(&mut report, Skip::NotACopy);
+            continue;
+        };
+        let Some((base, _, prefix)) = parse_name(name) else {
             skip(&mut report, Skip::NotACopy);
             continue;
         };
@@ -238,23 +225,25 @@ pub(crate) fn clear(dir: &Path, copies: &[LoserCopy]) -> Result<ClearReport, Eng
         }
         // um erro de E/S num item não aborta o lote: os já apagados continuam no relatório
         let parent_relative = relative.parent().unwrap_or(Path::new(""));
-        match real_folders(dir, parent_relative) {
-            Ok(true) => {}
-            Ok(false) => {
+        // P-34 (2): a pasta é aberta uma vez, sem seguir link, e tudo o que vem depois (conferir,
+        // mover, apagar, devolver) age nela e não num caminho que o sistema resolveria de novo
+        let folder = match Folder::open_beneath(dir, parent_relative) {
+            Ok(folder) => folder,
+            Err(OpenError::NotAFolder) => {
                 skip(&mut report, Skip::NotACopy);
                 continue;
             }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            Err(OpenError::Io(e)) if e.kind() == io::ErrorKind::NotFound => {
                 skip(&mut report, Skip::Gone);
                 continue;
             }
-            Err(e) => {
+            Err(OpenError::Io(e)) => {
                 skip(&mut report, Skip::Failed(e.kind()));
                 continue;
             }
-        }
-        match fs::symlink_metadata(file) {
-            Ok(meta) if meta.file_type().is_file() => {}
+        };
+        match folder.stat(name) {
+            Ok(entry) if entry.is_file => {}
             Ok(_) => {
                 skip(&mut report, Skip::NotACopy);
                 continue;
@@ -268,7 +257,8 @@ pub(crate) fn clear(dir: &Path, copies: &[LoserCopy]) -> Result<ClearReport, Eng
                 continue;
             }
         }
-        match remove_if_unchanged(file, prefix, &mut report.kept) {
+        let parent = file.parent().unwrap_or(dir);
+        match remove_in(&folder, name, parent, prefix, &mut report.kept) {
             Ok(None) => {
                 report.removed += 1;
                 if let Some(parent) = file.parent() {
@@ -283,10 +273,17 @@ pub(crate) fn clear(dir: &Path, copies: &[LoserCopy]) -> Result<ClearReport, Eng
     // subpastas esvaziadas, de baixo para cima; nunca `dir` nem a pasta da classe
     for (class_dir, mut folder) in tidy {
         while folder != class_dir && folder.starts_with(&class_dir) {
-            if fs::remove_dir(&folder).is_err() {
+            // abre a pasta-pai sem seguir link e remove o nome dentro dela, não por caminho
+            let (Some(parent), Some(name)) = (
+                folder.parent().and_then(|p| p.strip_prefix(dir).ok()),
+                folder.file_name().and_then(|n| n.to_str()),
+            ) else {
                 break;
-            }
-            if !folder.pop() {
+            };
+            let removed = Folder::open_beneath(dir, parent)
+                .ok()
+                .is_some_and(|parent_folder| parent_folder.rmdir(name).is_ok());
+            if !removed || !folder.pop() {
                 break;
             }
         }
@@ -294,22 +291,25 @@ pub(crate) fn clear(dir: &Path, copies: &[LoserCopy]) -> Result<ClearReport, Eng
     Ok(report)
 }
 
-/// Apaga `file` se, e só se, o que está lá agora tem `sha_prefix` como início do `sha256`.
-/// Move para um nome de trabalho, confere o que moveu e só então apaga; o que não bate volta
-/// sem sobrescrever nada. `Ok(None)` = apagado. O que ficou num arquivo de trabalho (não pôde
-/// ser devolvido nem apagado) vai para `kept`.
-pub(crate) fn remove_if_unchanged(
-    file: &Path,
+/// Apaga `name` (dentro de `folder`) se, e só se, o que está lá agora tem `sha_prefix` como início
+/// do `sha256`. Move para um nome de trabalho, confere o que moveu e só então apaga; o que não
+/// bate volta sem sobrescrever nada. `Ok(None)` = apagado. O que ficou num arquivo de trabalho
+/// (não pôde ser devolvido nem apagado) vai para `kept`, com o caminho `parent/<nome>` (só para
+/// avisar a pessoa: nenhuma operação usa esse caminho).
+///
+/// Tudo age em `folder`, aberta sem seguir link (P-34 item 2): trocar o caminho da pasta por um
+/// link no meio da operação não muda onde ela age.
+pub(crate) fn remove_in(
+    folder: &Folder,
+    name: &str,
+    parent: &Path,
     sha_prefix: [u8; 8],
     kept: &mut Vec<PathBuf>,
 ) -> Result<Option<Skip>, EngineError> {
-    let parent = file
-        .parent()
-        .ok_or(EngineError::Io(io::ErrorKind::InvalidInput))?;
     // a arca nunca grava uma cópia acima do teto: maior que isso não é cópia nossa, e movê-la
     // e hasheá-la só alargaria a janela contra uma edição da pessoa
-    match fs::symlink_metadata(file) {
-        Ok(meta) if meta.len() > MAX_FILE_BYTES => return Ok(Some(Skip::Edited)),
+    match folder.stat(name) {
+        Ok(entry) if entry.len > MAX_FILE_BYTES => return Ok(Some(Skip::Edited)),
         Ok(_) => {}
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Some(Skip::Gone)),
         Err(e) => return Err(io_error(e)),
@@ -318,39 +318,49 @@ pub(crate) fn remove_if_unchanged(
     getrandom::fill(&mut random).map_err(|_| EngineError::Io(io::ErrorKind::Other))?;
     let hex: String = random.iter().map(|b| format!("{b:02x}")).collect();
     // nome de trabalho reservado (`.tmp-<16 hex>`): nem o snapshot nem o `list` o enxergam
-    let scratch = parent.join(format!(".tmp-{hex}"));
-    ensure_absent(&scratch)?;
-    match fs::rename(file, &scratch) {
+    let scratch = format!(".tmp-{hex}");
+    match folder.stat(&scratch) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Ok(_) => return Err(EngineError::Io(io::ErrorKind::AlreadyExists)),
+        Err(e) => return Err(io_error(e)),
+    }
+    match folder.rename(name, &scratch) {
         Ok(()) => {}
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Some(Skip::Gone)),
         Err(e) => return Err(io_error(e)),
     }
-    if matches!(current_sha(&scratch), Ok(Some(sha)) if sha.0[..8] == sha_prefix) {
-        return match fs::remove_file(&scratch) {
+    if matches!(folder.sha256(&scratch), Ok(sha) if sha.0[..8] == sha_prefix) {
+        return match folder.unlink(&scratch) {
             Ok(()) => Ok(None),
             // não apagou: o segredo continua em disco, e quem chamou precisa saber onde
             Err(e) => {
-                kept.push(scratch);
+                kept.push(parent.join(&scratch));
                 Ok(Some(Skip::Failed(e.kind())))
             }
         };
     }
-    Ok(Some(give_back(&scratch, file, kept)))
+    Ok(Some(give_back(folder, &scratch, name, parent, kept)))
 }
 
-/// Devolve `scratch` a `file` sem sobrescrever. Se o nome foi recriado no meio-tempo (um editor
+/// Devolve `scratch` a `name` sem sobrescrever. Se o nome foi recriado no meio-tempo (um editor
 /// que salva por rename) ou o sistema de arquivos não tem hard link, o conteúdo **fica em
 /// `scratch`** e o caminho vai para `kept`: nada se perde e nada fica sem aviso.
-fn give_back(scratch: &Path, file: &Path, kept: &mut Vec<PathBuf>) -> Skip {
-    match fs::hard_link(scratch, file) {
+fn give_back(
+    folder: &Folder,
+    scratch: &str,
+    name: &str,
+    parent: &Path,
+    kept: &mut Vec<PathBuf>,
+) -> Skip {
+    match folder.link(scratch, name) {
         Ok(()) => {
-            if fs::remove_file(scratch).is_err() {
-                kept.push(scratch.to_path_buf());
+            if folder.unlink(scratch).is_err() {
+                kept.push(parent.join(scratch));
             }
             Skip::Edited
         }
         Err(e) => {
-            kept.push(scratch.to_path_buf());
+            kept.push(parent.join(scratch));
             Skip::Failed(e.kind())
         }
     }
@@ -620,6 +630,18 @@ mod tests {
 
     // ---------- mover e conferir ----------
 
+    /// `remove_in` na pasta de `file`, aberta como o `clear` a abre.
+    fn remove_if_unchanged(
+        file: &Path,
+        sha_prefix: [u8; 8],
+        kept: &mut Vec<PathBuf>,
+    ) -> Result<Option<Skip>, EngineError> {
+        let parent = file.parent().unwrap();
+        let name = file.file_name().unwrap().to_str().unwrap();
+        let folder = Folder::open_beneath(parent, Path::new("")).unwrap();
+        remove_in(&folder, name, parent, sha_prefix, kept)
+    }
+
     #[test]
     fn remove_if_unchanged_removes_what_matches_and_puts_back_what_does_not() {
         let tmp = TempDir::new();
@@ -712,8 +734,15 @@ mod tests {
         fs::write(&scratch, b"edicao da pessoa").unwrap();
         fs::write(&file, b"salvamento novo do editor").unwrap(); // o nome foi recriado
         let mut kept = Vec::new();
+        let folder = Folder::open_beneath(tmp.path(), Path::new("")).unwrap();
         assert_eq!(
-            give_back(&scratch, &file, &mut kept),
+            give_back(
+                &folder,
+                ".tmp-aaaaaaaaaaaaaaaa",
+                "c.conflito-pa-0011223344556677",
+                tmp.path(),
+                &mut kept
+            ),
             Skip::Failed(io::ErrorKind::AlreadyExists)
         );
         assert_eq!(kept, vec![scratch.clone()]);
