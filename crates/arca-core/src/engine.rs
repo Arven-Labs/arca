@@ -3811,6 +3811,7 @@ mod tests {
         write(&dir, ".arca-old-0", b"original");
         write(&dir, "a.md", b"da pessoa");
         let log = vec![Undo::RenameBack {
+            root: dir.clone(),
             aside: dir.join(".arca-old-0"),
             orig: dir.join("a.md"),
         }];

@@ -2,6 +2,14 @@
 
 Mais recente no topo.
 
+### 2026-11-14 — Sessão 80 (P-29 (1): `apply` relativo a fd)
+
+- **Pedido**: "pode seguir" depois do merge do arca#99; entendi como a fatia 2 (o `apply`). Plan mode, sem decisões novas: `rustix` só Unix e uma fatia por PR já valiam. Toca troca de arquivos do usuário e segredos (AGENTS §4), confirmado ao aprovar o plano.
+- **Feito ([arca#101](https://github.com/Arven-Labs/arca/pull/101))**: `plan`, `stage`, `commit`, `place`, `finish` e `undo_all` abrem a pasta-pai com `Folder::open_beneath` (sem seguir link) e conferem e agem no mesmo fd. `Folder` ganhou `create_beneath` (cria o que falta com `mkdirat` 0700, registrando cada pasta criada na hora) e `write_atomic` (temporário `O_EXCL|O_NOFOLLOW` 0600, `fsync`, `renameat`). `Undo` leva a `root`. Assinaturas de `plan/stage/commit/finish`, `Item` e `Planned` não mudaram; `check_components`, `current_sha` e `ensure_absent` ficam para o `journal.rs`. Efeito colateral: um FIFO no lugar do arquivo vira `LocalChanges` em vez de travar o `plan` (parte do P-29 (3)).
+- **Testes (CI)**: **sem vermelho antes** (desvio do plano): o teste do `undo_all` precisa do campo `root` e o do FIFO travaria o CI, então os testes novos nasceram junto da implementação. Verde no primeiro run (run 43622204340, 4 checks, 478 testes). A prova de que testam algo é a quebra de propósito (arca#102, fechado, branch apagada): sem `O_NOFOLLOW` em `open_subfolder` derrubou 7 testes (run 43622490805), 3 deles novos (`create_beneath_refuses_a_link...`, `undo_does_not_restore_through...`, `open_beneath_refuses_a_link...` mais os de `stage`/`commit`/engine/losers que já existiam).
+- **Não verificado**: a corrida em si (os testes provam agir no fd, não a janela); macOS e Windows (CI só Linux; fora do Unix o `Folder` é caminho); `EEXIST` no `mkdirat` (outro processo criando a mesma pasta) sem teste; nada rodado localmente além de `cargo fmt`.
+- **Fica**: a recuperação do `journal.rs` (fatia 3, ainda usa `check_components`, `current_sha`, `ensure_absent` por caminho), `write_loser`/`check_conflicts_dir` (P-30), e o Warden trocar o `rev` do `arca-core` (a correção de perdedores do #99 e esta ainda não estão lá); P-09, P-22, P-25, P-26, P-29 (2) a (7), P-30 (2) a (6), P-31 a P-36.
+
 ### 2026-11-14 — Sessão 79 (P-34 (2): limpeza dos perdedores relativa a fd)
 
 - **Pedido**: "vamos com o 1" (TOCTOU de symlink, adiado na Sessão 78); plan mode, com duas decisões suas: dependência **`rustix`, só Unix** (`cap-std` descartado: reescreve a interface em `Dir`, ganho só no Windows; `libc`/`openat2` direto está fora por `unsafe_code = "forbid"`) e fatia **só P-34 (2)** (o `apply`, P-29 (1), e a recuperação do `journal` ficam para PRs seguintes). Toca segredos (AGENTS §4) e dependência nova, aprovados ao aprovar o plano.
