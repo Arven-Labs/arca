@@ -2,6 +2,14 @@
 
 Mais recente no topo.
 
+### 2026-11-14 — Sessão 84 (P-33 (2): a recuperação decide por `apply`, não por raiz)
+
+- **Pedido**: "vamos de 2". Plan mode; decisão sua: raiz ausente de `recover(&Roots)` com todos os diários `open` **recusa** (`IncompleteApply`, nada tocado). Toca recuperação de arquivos do usuário (AGENTS §4), confirmado ao aprovar o plano.
+- **Feito ([arca#110](https://github.com/Arven-Labs/arca/pull/110))**: `Journal` ganhou `apply_id` (32 hex) e `peers`, opcionais; `ApplyGroup` gera o id uma vez por `apply` e `open_journals` e `mark_committed` o gravam em todas as raízes. `recover_all` (nova, usada por `Engine::recover`) carrega todos os diários, decide a fase por grupo (`decide_phases`) e só então recupera cada raiz (`recover_with`, que não apaga o diário); os diários saem no fim. `recover_root` virou atalho `#[cfg(test)]`. Nova variante `EngineError::IncompleteApply`. Um achado de projeto durante a escrita: apagar o diário de cada raiz logo depois de recuperá-la deixaria, numa falha no meio, a raiz seguinte sozinha e `open` (recusada como incompleta); por isso os diários saem só no fim.
+- **Testes (CI)**: **vermelho antes só para um**: o primeiro commit foi `a_corrupt_journal_in_a_later_root_stops_the_recovery...` (run 43652879707: 1 falhou, 487 passaram). Os de `apply_id` (A `committed` e B `open` terminam juntos, raiz ausente, formato) precisam do campo novo e nasceram com a implementação (desvio do plano, dito aqui). Verde: run 43653650466, 497 testes, 4 checks (o primeiro run da implementação falhou só no clippy, `clone` em slice nos testes, corrigido). Quebra de propósito (arca#111, fechado, branch apagada): `any` por `all` em `decide_phases` derrubou `a_committed_journal_in_one_root_makes_the_whole_apply_go_forward` (run 43653880970; 496 passaram, 1 falhou).
+- **Não verificado**: queda de energia real entre os dois marcadores (o teste monta o estado em disco, não derruba o processo); uma falha de I/O no meio da recuperação de várias raízes (a repetição é idempotente por desenho, mas sem teste); macOS e Windows; nada rodado localmente além de `cargo fmt`.
+- **Fica**: P-33 (3) a (5), (7), (8); P-09, P-22, P-25, P-26, P-29 (2) a (7), P-30 (2) a (6), P-31 a P-36. Warden: o `rev` do `arca-core` não foi atualizado para as três últimas mudanças (leitura por fd, dono do diário, `apply_id`); o Warden não faz `match` exaustivo em `EngineError`, conferido por busca.
+
 ### 2026-11-14 — Sessão 83 (P-33 (1): diário só vale se for do próprio usuário)
 
 - **Pedido**: "p33 1". Plan mode; recomendei dono + modo no `load` em vez de MAC e você aprovou o plano (inclui o falso positivo do `sudo`). Toca recuperação de arquivos do usuário e parsing de dado externo (AGENTS §4).
