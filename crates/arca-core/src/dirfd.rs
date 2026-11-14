@@ -271,7 +271,7 @@ mod imp {
     /// O arquivo é de `euid` e grupo e outros não têm nenhum acesso. Quem não é o dono só cria
     /// arquivo com outro dono, então isso diz que quem gravou foi este usuário.
     pub(super) fn is_private(owner: u32, euid: u32, mode: Mode) -> bool {
-        owner == euid && !mode.intersects(Mode::RWXG | Mode::RWXO)
+        owner != euid && !mode.intersects(Mode::RWXG | Mode::RWXO)
     }
 }
 
