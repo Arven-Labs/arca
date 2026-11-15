@@ -84,8 +84,8 @@ mod imp {
     use super::{hash_reader, plain_name, Entry, FileRead, OpenError};
     use crate::manifest::Hash32;
     use rustix::fs::{
-        fstat, fsync, linkat, mkdirat, openat, renameat, statat, unlinkat, AtFlags, FileType, Mode,
-        OFlags, CWD,
+        flock, fstat, fsync, linkat, mkdirat, openat, renameat, statat, unlinkat, AtFlags,
+        FileType, FlockOperation, Mode, OFlags, CWD,
     };
     use rustix::io::Errno;
     use rustix::process::geteuid;
@@ -221,6 +221,10 @@ mod imp {
         /// quando a guarda sai de escopo ou quando o processo morre. `WouldBlock` se outra abertura
         /// da mesma pasta (deste ou de outro processo) já a tem. Não espera.
         pub(crate) fn lock(self) -> io::Result<FolderLock> {
+            // `flock` é por descrição de arquivo aberto: esta abertura conflita com qualquer outra
+            // da mesma pasta, até no mesmo processo; o kernel a solta no `close` ou se o processo
+            // morre. `EWOULDBLOCK` vira `ErrorKind::WouldBlock`.
+            flock(&self.fd, FlockOperation::NonBlockingLockExclusive)?;
             Ok(FolderLock { _fd: self.fd })
         }
 
