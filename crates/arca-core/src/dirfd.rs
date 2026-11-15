@@ -106,6 +106,20 @@ mod imp {
         _fd: OwnedFd,
     }
 
+    impl FolderLock {
+        /// Trava o arquivo `path` (criado `0600` se faltar; um link no lugar é recusado, sem
+        /// segui-lo) e devolve a guarda (P-31 item 4). Vale enquanto a guarda existir ou até o
+        /// processo morrer. `WouldBlock` se outra abertura do mesmo arquivo já o tem. Não espera.
+        pub(crate) fn on_file(path: &Path) -> io::Result<FolderLock> {
+            let flags = OFlags::RDWR
+                .union(OFlags::CREATE)
+                .union(OFlags::NOFOLLOW)
+                .union(OFlags::CLOEXEC);
+            let fd = openat(CWD, path, flags, Mode::RUSR | Mode::WUSR)?;
+            Ok(FolderLock { _fd: fd })
+        }
+    }
+
     const DIR: OFlags = OFlags::RDONLY
         .union(OFlags::DIRECTORY)
         .union(OFlags::CLOEXEC);
@@ -347,6 +361,12 @@ mod imp {
     /// Fora do Unix não há trava de pasta: a guarda existe, mas não impede nada.
     #[derive(Debug)]
     pub(crate) struct FolderLock;
+
+    impl FolderLock {
+        pub(crate) fn on_file(_path: &Path) -> io::Result<FolderLock> {
+            Ok(FolderLock)
+        }
+    }
 
     impl Folder {
         pub(crate) fn lock(self) -> io::Result<FolderLock> {
