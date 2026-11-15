@@ -25,10 +25,12 @@ use std::path::{Path, PathBuf};
 /// Nome do diário dentro da raiz. Reservado: não entra no snapshot nem pode ser destino.
 pub(crate) const JOURNAL_NAME: &str = ".arca-apply-journal";
 const JOURNAL_VERSION: u8 = 1;
-/// Um diário tem uns 250 bytes por arquivo trocado: 16 MiB cobrem dezenas de milhares de
-/// arquivos num só `apply`. O mesmo teto vale ao gravar e ao ler, para nunca gravar o que a
-/// recuperação não consegue ler.
-pub(crate) const MAX_JOURNAL_BYTES: u64 = 16 << 20;
+/// Um diário tem uns 230 bytes por arquivo trocado (caminho típico): o manifest aceita até
+/// `MAX_FILES` arquivos e 64 MiB (`MAX_MANIFEST_JSON_BYTES`), e uma entrada do diário (caminho e
+/// dois hashes) pesa quase o mesmo que a do manifest, então o diário tem o mesmo teto: se o
+/// manifest coube, o `apply` dele também cabe (P-33 item 8). O mesmo teto vale ao gravar e ao ler,
+/// para nunca gravar o que a recuperação não consegue ler.
+pub(crate) const MAX_JOURNAL_BYTES: u64 = crate::manifest::MAX_MANIFEST_JSON_BYTES as u64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -145,7 +147,7 @@ impl Journal {
         let json = serde_json::to_vec(self).map_err(|_| EngineError::CorruptJournal)?;
         if json.len() as u64 > MAX_JOURNAL_BYTES {
             // antes de qualquer `stage`: o `apply` falha sem tocar em nada
-            return Err(EngineError::Io(io::ErrorKind::InvalidInput));
+            return Err(EngineError::JournalTooLarge);
         }
         Ok(json)
     }
