@@ -12,6 +12,7 @@ use crate::envelope::Header;
 use crate::error::Error;
 use crate::heads::{tips, Head};
 use crate::journal::{recover_all, ApplyGroup, Journal, Phase};
+use crate::kept::{self, KeptOriginal};
 use crate::losers::{self, ClearReport, LoserCopy};
 use crate::manifest::{validate_device, validate_path, Class, FileEntry, Hash32, Manifest};
 use crate::merge::{common_ancestor, merge_files, reachable, Conflict, Side};
@@ -1055,6 +1056,27 @@ impl<S: BlobStore> Engine<S> {
         .await
     }
 
+    /// Os originais que a recuperação de um `apply` interrompido não pôde devolver
+    /// (`.arca-kept-<hex>`) nas pastas ligadas de `roots` (P-33 item 5), em ordem estável. Um
+    /// arquivo que a pessoa editou vem com `edited: true`.
+    pub async fn list_kept(&self, roots: &Roots) -> Result<Vec<KeptOriginal>, EngineError> {
+        let enabled = enabled_roots(roots);
+        run(move || kept::list(&enabled)).await
+    }
+
+    /// Apaga os itens de `items` que ainda são o que a recuperação guardou (P-33 item 5).
+    /// Revalida cada item no disco: fora das raízes ligadas, link, nome fora do padrão ou arquivo
+    /// que a pessoa editou nunca são apagados (ficam em `skipped`). Idempotente. Apagar não
+    /// sobrescreve o conteúdo (P-34).
+    pub async fn clear_kept(
+        &self,
+        roots: &Roots,
+        items: &[KeptOriginal],
+    ) -> Result<ClearReport, EngineError> {
+        let (enabled, items) = (enabled_roots(roots), items.to_vec());
+        run(move || kept::clear(&enabled, &items)).await
+    }
+
     /// Restaura o manifest `id` nas pastas de `roots`, que têm de não existir ou estar vazias.
     pub async fn restore(&self, id: &ObjectId, roots: &Roots) -> Result<Restored, EngineError> {
         let manifest = self.read_manifest(id).await?;
@@ -1324,6 +1346,14 @@ where
 }
 
 /// As pastas das classes ligadas.
+fn enabled_roots(roots: &Roots) -> Vec<(Class, PathBuf)> {
+    roots
+        .enabled()
+        .into_iter()
+        .map(|(class, root)| (class, root.to_path_buf()))
+        .collect()
+}
+
 fn live_dirs(roots: &Roots) -> Vec<PathBuf> {
     roots
         .enabled()
@@ -4253,6 +4283,35 @@ mod tests {
                 .join(format!(".arca-kept-{}", &sha(b"1").to_string()[..16]))]
         );
         assert_eq!(fs::read(h.target.join("a.md")).unwrap(), b"da pessoa");
+    }
+
+    /// P-33 item 5, ponta a ponta: o que a recuperação deixou em `.arca-kept-*` aparece em
+    /// `list_kept` (mesmo depois de reiniciar) e `clear_kept` o apaga; a segunda vez não há nada.
+    #[tokio::test]
+    async fn what_recover_kept_can_be_listed_and_cleared() {
+        let h = hist().await;
+        interrupt_apply(&h.target);
+        fs::write(h.target.join("a.md"), b"da pessoa").unwrap();
+        let eng = h.rig.engine("pc");
+        let roots = vault_only(&h.target);
+        let recovered = eng.recover(&roots).await.unwrap();
+        assert_eq!(recovered.kept.len(), 1);
+
+        let listed = eng.list_kept(&roots).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].file, recovered.kept[0]);
+        assert_eq!(listed[0].class, Class::Vault);
+        assert!(!listed[0].edited);
+
+        let report = eng.clear_kept(&roots, &listed).await.unwrap();
+        assert_eq!(report.removed, 1);
+        assert!(!recovered.kept[0].exists());
+        // o arquivo da pessoa não foi tocado
+        assert_eq!(fs::read(h.target.join("a.md")).unwrap(), b"da pessoa");
+        assert_eq!(eng.list_kept(&roots).await.unwrap(), vec![]);
+        // idempotente: apagar de novo o que já foi é `Gone`, sem erro
+        let again = eng.clear_kept(&roots, &listed).await.unwrap();
+        assert_eq!(again.removed, 0);
     }
 
     /// P-33 item 2: um diário corrompido em qualquer raiz recusa a recuperação **antes** de tocar

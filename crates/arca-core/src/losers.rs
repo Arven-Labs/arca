@@ -57,7 +57,7 @@ pub struct ClearReport {
 }
 
 /// Profundidade máxima de subpastas percorrida (o `path` do manifest tem teto de tamanho).
-const MAX_DEPTH: usize = 64;
+pub(crate) const MAX_DEPTH: usize = 64;
 
 /// As duas pastas de classe onde `save_conflict_losers` grava.
 const CLASS_DIRS: [(&str, Class); 2] = [("config", Class::Config), ("secret", Class::Secret)];

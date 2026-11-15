@@ -16,6 +16,7 @@ pub mod hub;
 #[cfg(all(feature = "hub", test))]
 mod hub_testserver;
 mod journal;
+pub mod kept;
 pub mod losers;
 pub mod manifest;
 pub mod merge;
