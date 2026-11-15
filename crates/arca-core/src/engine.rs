@@ -585,7 +585,6 @@ impl<S: BlobStore> Engine<S> {
             saved: 0,
             already: 0,
         };
-        let _state_lock = self.lock_state().await?;
         let state = self.load_state().await?;
         let Loaded {
             readable, rejected, ..
