@@ -116,6 +116,8 @@ mod imp {
                 .union(OFlags::NOFOLLOW)
                 .union(OFlags::CLOEXEC);
             let fd = openat(CWD, path, flags, Mode::RUSR | Mode::WUSR)?;
+            // mesma regra do `Folder::lock`: por descrição de arquivo aberto, solta no `close`
+            flock(&fd, FlockOperation::NonBlockingLockExclusive)?;
             Ok(FolderLock { _fd: fd })
         }
     }
