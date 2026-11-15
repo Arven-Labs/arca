@@ -7,10 +7,94 @@
 //! arquivo regular, sob uma raiz ligada, com nome no padrão e conteúdo que ainda tem o hash do
 //! nome. Um arquivo que a pessoa editou nunca é apagado.
 
+use crate::apply::current_sha;
+use crate::dirfd::{Folder, OpenError};
 use crate::engine::EngineError;
-use crate::losers::ClearReport;
+use crate::losers::{remove_in, ClearReport, Skip, MAX_DEPTH};
 use crate::manifest::Class;
-use std::path::PathBuf;
+use crate::scan::MAX_FILE_BYTES;
+use std::fs;
+use std::io;
+use std::path::{Component, Path, PathBuf};
+
+fn io_error(e: io::Error) -> EngineError {
+    EngineError::Io(e.kind())
+}
+
+/// `.arca-kept-<16 hex minúsculos>` -> os 8 bytes do hash do nome (o mesmo critério de
+/// `is_reserved_name`).
+fn parse_name(name: &str) -> Option<[u8; 8]> {
+    let hex = name.strip_prefix(".arca-kept-")?;
+    if hex.len() != 16 {
+        return None;
+    }
+    let digit = |c: u8| match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        _ => None,
+    };
+    let mut prefix = [0u8; 8];
+    for (byte, pair) in prefix.iter_mut().zip(hex.as_bytes().chunks(2)) {
+        *byte = (digit(pair[0])? << 4) | digit(pair[1])?;
+    }
+    Some(prefix)
+}
+
+fn collect(
+    class: Class,
+    current: &Path,
+    depth: usize,
+    out: &mut Vec<KeptOriginal>,
+) -> Result<(), EngineError> {
+    // mais fundo que o teto de um `path` do manifest não é nosso (e uma árvore profunda de
+    // propósito estouraria a pilha)
+    if depth > MAX_DEPTH {
+        return Ok(());
+    }
+    let entries = match fs::read_dir(current) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(io_error(e)),
+    };
+    for entry in entries {
+        let entry = entry.map_err(io_error)?;
+        let path = entry.path();
+        // `DirEntry::file_type` não segue link: link e o que não é arquivo nem pasta são ignorados
+        let kind = entry.file_type().map_err(io_error)?;
+        if kind.is_dir() {
+            collect(class, &path, depth + 1, out)?;
+            continue;
+        }
+        if !kind.is_file() {
+            continue;
+        }
+        let Some(prefix) = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(parse_name)
+        else {
+            continue;
+        };
+        // acima do teto da arca não é um original dela: não se lê (seria só custo)
+        let edited = match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.len() > MAX_FILE_BYTES => true,
+            // some entre o `read_dir` e a leitura: não está mais lá
+            Ok(_) => match current_sha(&path)? {
+                Some(sha) => sha.0[..8] != prefix,
+                None => continue,
+            },
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(io_error(e)),
+        };
+        out.push(KeptOriginal {
+            class,
+            file: path,
+            sha_prefix: prefix,
+            edited,
+        });
+    }
+    Ok(())
+}
 
 /// Um original guardado que existe em disco.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,16 +109,88 @@ pub struct KeptOriginal {
 }
 
 /// Os originais guardados sob as raízes ligadas, em ordem estável (por caminho).
-pub(crate) fn list(_roots: &[(Class, PathBuf)]) -> Result<Vec<KeptOriginal>, EngineError> {
-    todo!()
+pub(crate) fn list(roots: &[(Class, PathBuf)]) -> Result<Vec<KeptOriginal>, EngineError> {
+    let mut out = Vec::new();
+    for (class, root) in roots {
+        collect(*class, root, 0, &mut out)?;
+    }
+    out.sort_by(|a, b| a.file.cmp(&b.file));
+    Ok(out)
 }
 
-/// Apaga os itens de `items` que ainda são o que a recuperação guardou.
+/// Apaga os itens de `items` que ainda são o que a recuperação guardou. Nada do que o chamador
+/// mandou vale (`class`, `sha_prefix`, `edited`): a raiz, o nome e o hash vêm do caminho e do
+/// disco.
 pub(crate) fn clear(
-    _roots: &[(Class, PathBuf)],
-    _items: &[KeptOriginal],
+    roots: &[(Class, PathBuf)],
+    items: &[KeptOriginal],
 ) -> Result<ClearReport, EngineError> {
-    todo!()
+    let mut report = ClearReport::default();
+    for item in items {
+        let file = &item.file;
+        let skip = |report: &mut ClearReport, why| report.skipped.push((file.clone(), why));
+        // sob alguma raiz ligada, só com componentes normais (sem `..`)
+        let found = roots.iter().find_map(|(_, root)| {
+            let relative = file.strip_prefix(root).ok()?;
+            let normal = relative
+                .components()
+                .all(|c| matches!(c, Component::Normal(_)));
+            (normal && relative.components().count() >= 1).then_some((root, relative))
+        });
+        let Some((root, relative)) = found else {
+            skip(&mut report, Skip::NotACopy);
+            continue;
+        };
+        let Some(name) = file.file_name().and_then(|n| n.to_str()) else {
+            skip(&mut report, Skip::NotACopy);
+            continue;
+        };
+        let Some(prefix) = parse_name(name) else {
+            skip(&mut report, Skip::NotACopy);
+            continue;
+        };
+        // a pasta é aberta uma vez, sem seguir link, e tudo o que vem depois age nela
+        let parent_relative = relative.parent().unwrap_or(Path::new(""));
+        let folder = match Folder::open_beneath(root, parent_relative) {
+            Ok(folder) => folder,
+            Err(OpenError::NotAFolder) => {
+                skip(&mut report, Skip::NotACopy);
+                continue;
+            }
+            Err(OpenError::Io(e)) if e.kind() == io::ErrorKind::NotFound => {
+                skip(&mut report, Skip::Gone);
+                continue;
+            }
+            Err(OpenError::Io(e)) => {
+                skip(&mut report, Skip::Failed(e.kind()));
+                continue;
+            }
+        };
+        match folder.stat(name) {
+            Ok(entry) if entry.is_file => {}
+            Ok(_) => {
+                skip(&mut report, Skip::NotACopy);
+                continue;
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                skip(&mut report, Skip::Gone);
+                continue;
+            }
+            Err(e) => {
+                skip(&mut report, Skip::Failed(e.kind()));
+                continue;
+            }
+        }
+        let parent = file.parent().unwrap_or(root);
+        // mover, conferir o hash do que moveu e só então apagar; o que não bate volta
+        match remove_in(&folder, name, parent, prefix, &mut report.kept) {
+            Ok(None) => report.removed += 1,
+            Ok(Some(why)) => skip(&mut report, why),
+            Err(EngineError::Io(kind)) => skip(&mut report, Skip::Failed(kind)),
+            Err(_) => skip(&mut report, Skip::Failed(io::ErrorKind::Other)),
+        }
+    }
+    Ok(report)
 }
 
 #[cfg(test)]
