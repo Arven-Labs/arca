@@ -2688,6 +2688,11 @@ mod tests {
         );
         assert_eq!(rig.count(ObjectKind::Manifest).await, 0);
         assert_eq!(saved(&path), None);
+        // o `Busy` também vem do estado, não só de `apply`/`recover`: a mensagem não pode dizer
+        // que a culpa é de um deles (um consumidor mostra este texto à pessoa)
+        let message = EngineError::Busy.to_string();
+        assert!(message.contains("device state"), "{message}");
+        assert!(!message.contains(path.to_str().unwrap()), "{message}");
         // solta a trava: a mesma chamada passa
         drop(held);
         created(eng.snapshot(&vault_only(&vault), 1).await.unwrap());
