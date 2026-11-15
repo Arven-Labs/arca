@@ -2,6 +2,14 @@
 
 Mais recente no topo.
 
+### 2026-11-15 — Sessão 90 (P-31 (3): `StateNotSaved`)
+
+- **Pedido**: "p31 3". Plan mode. Achado ao ler o código: o dano do item é menor do que o `PENDING.md` registrava (refazer é seguro nos três casos; no `merge_with_losers` os perdedores já estão em disco antes do manifest), então sobra só o erro ambíguo. Decisão sua: erro próprio, em vez de devolver o resultado junto ou aceitar. Toca proteção contra rollback (AGENTS §4), confirmado ao aprovar o plano.
+- **Feito ([arca#124](https://github.com/Arven-Labs/arca/pull/124))**: `EngineError::StateNotSaved`; `remember_after` (mapeia qualquer erro de `remember` para ela) no `snapshot` que cria manifest, no `merge` e no `apply`. O `Unchanged` continua com `remember` simples (`Io`). SPEC-TECNICA atualizada.
+- **Testes (CI)**: **vermelho antes**: commit só com a variante e os testes (run 43722377739: os 3 de `StateNotSaved` falharam, o de `Unchanged` passou, 527 passaram). Verde com o mapeamento: run 43722668659, 4 checks, 530 testes. Quebras de propósito (arca#125 e #126, fechados, branches apagadas): `apply` com `remember` simples derrubou `an_apply_that_took_effect_says_so_...` (run 43722933685); o `Unchanged` com `remember_after` derrubou `an_unchanged_snapshot_that_cannot_save_the_state_is_a_plain_io_error` (run 43722941092).
+- **Não verificado**: disco cheio de verdade (os testes usam a pasta do estado sem permissão de escrita, que não vale como root); macOS e Windows; o `merge_with_losers` com `StateNotSaved` (os perdedores em disco vêm de leitura de código, não de teste); nada rodado localmente além de `cargo fmt`.
+- **Fica**: P-31 (4) e (5) (e (1), (2), (6), (7) como limites); P-29 (2) a (7), P-30 (2) a (6); P-09, P-22, P-25, P-26, P-32 a P-36. Warden: o `rev` do `arca-core` fica defasado de novo (`StateNotSaved`).
+
 ### 2026-11-15 — Sessão 89 (P-33 (8): o teto do diário acompanha o do manifest)
 
 - **Pedido**: "p33 8". Decisão sua: alinhar ao manifest (64 MiB), em vez de só o erro claro ou um formato compacto. Toca limite e leitura do diário de recuperação (AGENTS §4).
