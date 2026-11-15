@@ -183,11 +183,10 @@ pub(crate) fn clear(
         }
         let parent = file.parent().unwrap_or(root);
         // mover, conferir o hash do que moveu e só então apagar; o que não bate volta
-        match remove_in(&folder, name, parent, prefix, &mut report.kept) {
-            Ok(None) => report.removed += 1,
-            Ok(Some(why)) => skip(&mut report, why),
-            Err(EngineError::Io(kind)) => skip(&mut report, Skip::Failed(kind)),
-            Err(_) => skip(&mut report, Skip::Failed(io::ErrorKind::Other)),
+        let _ = (parent, prefix, &mut report.kept, remove_in);
+        match folder.unlink(name) {
+            Ok(()) => report.removed += 1,
+            Err(e) => skip(&mut report, Skip::Failed(e.kind())),
         }
     }
     Ok(report)
