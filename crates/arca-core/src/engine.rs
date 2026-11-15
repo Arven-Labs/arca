@@ -882,12 +882,13 @@ impl<S: BlobStore> Engine<S> {
         let locks = run(move || lock_roots(&lock_dirs)).await?;
         // raiz que ainda não existe é criada aqui (o diário mora nela, e a trava dela também) e
         // sai de novo se falhar
-        let (created, _locks) = run(move || {
+        let (created, locks) = run(move || {
             let mut locks = locks;
             let created = open_journals(&r, &p, &g, &mut locks)?;
             Ok((created, locks))
         })
         .await?;
+        drop(locks);
         let journals = Journals {
             roots: journal_roots,
             created,
