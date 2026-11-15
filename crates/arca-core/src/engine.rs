@@ -134,6 +134,10 @@ pub enum EngineError {
     /// (P-33 item 7). Nada foi lido nem escrito; tente de novo depois.
     #[error("another apply or recover is using one of the folders; try again later")]
     Busy,
+    /// O diário deste `apply` passaria de `MAX_JOURNAL_BYTES` (P-33 item 8): arquivos demais, ou
+    /// caminhos muito longos. Nada foi tocado e nenhum diário foi gravado.
+    #[error("the apply touches too many files to journal; nothing was changed")]
+    JournalTooLarge,
     /// A restauração só escreve em pasta inexistente ou vazia.
     #[error("restore target is not empty")]
     TargetNotEmpty,

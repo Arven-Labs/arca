@@ -288,6 +288,9 @@ pub(crate) fn stage(
 /// componente que existe como pasta; link ou arquivo no caminho não entra (o `stage` recusa).
 pub(crate) fn missing_dirs(root: &Path, planned: &[Planned]) -> Vec<String> {
     let mut found: Vec<String> = Vec::new();
+    // um `Vec::contains` por pasta era quadrático numa restauração de dezenas de milhares de
+    // arquivos (P-33 item 8)
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for p in planned.iter().filter(|p| p.root == root) {
         if !matches!(p.kind, Kind::Create | Kind::Update) {
             continue;
@@ -303,7 +306,7 @@ pub(crate) fn missing_dirs(root: &Path, planned: &[Planned]) -> Vec<String> {
                 Err(OpenError::Io(e)) if e.kind() == io::ErrorKind::NotFound => {
                     let text: Vec<_> = walk.iter().map(|c| c.to_string_lossy()).collect();
                     let text = text.join("/");
-                    if !found.contains(&text) {
+                    if seen.insert(text.clone()) {
                         found.push(text);
                     }
                 }
