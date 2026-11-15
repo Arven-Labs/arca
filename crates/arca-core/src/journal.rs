@@ -1113,17 +1113,47 @@ mod tests {
         big.save(dir.path()).unwrap();
         assert_eq!(Journal::load(dir.path()), Ok(Some(big)));
 
+        // acima do teto mesmo (P-33 item 8): 20 mil arquivos com o caminho mais longo que o
+        // manifest aceita (~4 KiB) passam de 64 MiB
+        let long = |i: usize| format!("{}/{i}.md", vec!["x".repeat(250); 15].join("/"));
         let huge = Journal {
             version: 1,
             phase: Phase::Open,
-            entries: (0..120_000).map(|i| entry(i, path(i))).collect(),
+            entries: (0..20_000).map(|i| entry(i, long(i))).collect(),
             apply_id: None,
             peers: None,
             dirs: vec![],
         };
         let other = TempDir::new();
-        assert!(huge.save(other.path()).is_err());
+        assert_eq!(huge.save(other.path()), Err(EngineError::JournalTooLarge));
+        assert_eq!(huge.create(other.path()), Err(EngineError::JournalTooLarge));
         assert!(!Journal::exists(other.path()));
+    }
+
+    /// P-33 item 8: o manifest aceita até `MAX_FILES` arquivos, então o diário de um `apply` com
+    /// todos eles (caminho típico) tem de caber. Com 16 MiB (uns 60 mil arquivos) não cabia.
+    #[test]
+    fn a_journal_for_a_manifest_at_the_file_limit_fits_and_loads_back() {
+        let dir = TempDir::new();
+        let journal = Journal {
+            version: 1,
+            phase: Phase::Open,
+            entries: (0..crate::manifest::MAX_FILES)
+                .map(|i| Entry {
+                    n: i,
+                    kind: Kind::Update,
+                    path: format!("notas/projeto-{:04}/arquivo-{i:07}.md", i % 1000),
+                    from_sha: Some(sha(b"a")),
+                    to_sha: Some(sha(b"b")),
+                })
+                .collect(),
+            apply_id: None,
+            peers: None,
+            dirs: vec![],
+        };
+        journal.save(dir.path()).unwrap();
+        assert!(fs::metadata(Journal::path(dir.path())).unwrap().len() > 16 << 20);
+        assert_eq!(Journal::load(dir.path()), Ok(Some(journal)));
     }
 
     /// Achado 6: o mesmo caminho repetido faria a recuperação hashear o mesmo arquivo N vezes.
