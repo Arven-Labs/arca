@@ -134,7 +134,7 @@ pub enum EngineError {
     /// dispositivo: um `apply` ou `recover` na pasta (P-33 item 7), ou um `snapshot`, `merge` ou
     /// `apply` com o mesmo arquivo de estado (P-31 item 4). Nada foi lido nem escrito; tente de
     /// novo depois.
-    #[error("another operation is using the folders or the device state; try again later")]
+    #[error("another apply or recover is using one of the folders; try again later")]
     Busy,
     /// O diário deste `apply` passaria de `MAX_JOURNAL_BYTES` (P-33 item 8): arquivos demais, ou
     /// caminhos muito longos. Nada foi tocado e nenhum diário foi gravado.
