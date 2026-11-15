@@ -157,7 +157,9 @@ impl Journal {
         let linked = fs::hard_link(&staging, Journal::path(root));
         let _ = fs::remove_file(&staging);
         match linked {
-            Ok(()) => Ok(()),
+            // o nome do diário precisa ser durável antes de o `apply` mexer em qualquer arquivo
+            // (P-33 item 3); o `fsync` do `write_atomic` cobriu o temporário, não este link
+            Ok(()) => sync_root(root),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(EngineError::Interrupted),
             Err(e) => Err(io_error(e)),
         }
@@ -247,6 +249,15 @@ impl Journal {
 
 fn io_error(e: io::Error) -> EngineError {
     EngineError::Io(e.kind())
+}
+
+/// `fsync` da pasta da raiz.
+fn sync_root(root: &Path) -> Result<(), EngineError> {
+    match Folder::open_beneath(root, Path::new("")) {
+        Ok(folder) => folder.sync().map_err(io_error),
+        Err(OpenError::NotAFolder) => Err(EngineError::Io(io::ErrorKind::NotADirectory)),
+        Err(OpenError::Io(e)) => Err(io_error(e)),
+    }
 }
 
 fn dest_of(root: &Path, entry: &Entry) -> PathBuf {
@@ -1174,6 +1185,27 @@ mod tests {
         assert_eq!(Journal::load(free.path()), Ok(Some(mine)));
         // sem sobras do arquivo de trabalho
         assert_eq!(fs::read_dir(free.path()).unwrap().count(), 1);
+    }
+
+    /// P-33 item 3: o nome do diário precisa estar no disco antes de o `apply` mexer em qualquer
+    /// arquivo, então `create` sincroniza a pasta da raiz (e só quando criou de fato).
+    #[test]
+    fn creating_a_journal_syncs_the_root_folder_only_when_it_created_it() {
+        let journal = Journal {
+            version: 1,
+            phase: Phase::Open,
+            entries: vec![],
+            apply_id: None,
+            peers: None,
+        };
+        let free = TempDir::new();
+        let before = crate::dirfd::probe::syncs();
+        journal.create(free.path()).unwrap();
+        assert_eq!(crate::dirfd::probe::syncs() - before, 1);
+
+        let before = crate::dirfd::probe::syncs();
+        assert_eq!(journal.create(free.path()), Err(EngineError::Interrupted));
+        assert_eq!(crate::dirfd::probe::syncs(), before);
     }
 
     // ---------- idempotência ----------
