@@ -2,6 +2,15 @@
 
 Mais recente no topo.
 
+### 2026-11-15 — Sessão 86 (P-33 (4): a recuperação remove as pastas que o `apply` criou)
+
+- **Pedido**: "p33 4". Plan mode; decisão sua: registrar no diário (campo `dirs`), em vez de aceitar o limite. Toca recuperação de arquivos do usuário e parsing de dado externo (AGENTS §4).
+- **Feito ([arca#114](https://github.com/Arven-Labs/arca/pull/114))**: `Journal.dirs` (opcional, validado como os caminhos das entradas, sem duplicata nem nome reservado); `missing_dirs` (`apply.rs`) lista as pastas ausentes na hora do diário, sem seguir link; `open_journals` as grava; `recover_with` em fase `open` as remove depois das entradas, só com `rmdir`.
+- **Testes (CI)**: **sem vermelho antes** (desvio do plano): os 8 testes novos dependem do campo e nasceram com o código. Verde: run 43705517974, 4 checks, 508 testes. Quebra de propósito (arca#115, fechado, branch apagada): `missing_dirs` listando também as pastas que já existem derrubou `missing_dirs_lists_only_what_does_not_exist_parent_first` (run 43705769198, 507 passaram, 1 falhou). **Não fiz** a quebra `rmdir` → remoção recursiva prevista no plano; o teste da pasta com arquivo da pessoa não foi provado contra ela.
+- **Deslize de processo**: editei 4 literais de teste com `sed -i` no Bash, contra a regra do `CLAUDE.md`; o `sed` duplicou um campo, corrigi com `Edit` antes de qualquer commit.
+- **Não verificado**: queda real; macOS e Windows; nada rodado localmente além de `cargo fmt`.
+- **Fica**: P-33 (5), (7), (8); P-09, P-22, P-25, P-26, P-29 (2) a (7), P-30 (2) a (6), P-31 a P-36. Warden: o `rev` do `arca-core` segue defasado (agora também pelo `dirs` e pelo `fsync`).
+
 ### 2026-11-15 — Sessão 85 (P-33 (3): `fsync` das pastas no `apply`)
 
 - **Pedido**: "p33 3". Plan mode; plano aprovado (inclui ignorar só `EINVAL` no `fsync` de pasta). Toca troca e recuperação de arquivos do usuário (AGENTS §4).
