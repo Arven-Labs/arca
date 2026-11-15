@@ -271,8 +271,7 @@ pub(crate) fn missing_dirs(root: &Path, planned: &[Planned]) -> Vec<String> {
         for part in parent.components() {
             walk.push(part);
             match Folder::open_beneath(root, &walk) {
-                Ok(_) => {}
-                Err(OpenError::Io(e)) if e.kind() == io::ErrorKind::NotFound => {
+                Ok(_) | Err(OpenError::Io(_)) => {
                     let text: Vec<_> = walk.iter().map(|c| c.to_string_lossy()).collect();
                     let text = text.join("/");
                     if !found.contains(&text) {
