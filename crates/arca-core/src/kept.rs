@@ -255,9 +255,10 @@ mod tests {
         let listed = list(&roots(&vault, &secret)).unwrap();
         assert_eq!(
             listed,
+            // por caminho: `secret/...` vem antes de `vault/...`, qualquer que seja a ordem das raízes
             vec![
-                item(Class::Vault, &in_sub, b"nota-velha"),
                 item(Class::Secret, &in_secret, b"token-velho"),
+                item(Class::Vault, &in_sub, b"nota-velha"),
             ]
         );
     }

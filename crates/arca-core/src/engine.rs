@@ -4285,6 +4285,35 @@ mod tests {
         assert_eq!(fs::read(h.target.join("a.md")).unwrap(), b"da pessoa");
     }
 
+    /// P-33 item 5, ponta a ponta: o que a recuperação deixou em `.arca-kept-*` aparece em
+    /// `list_kept` (mesmo depois de reiniciar) e `clear_kept` o apaga; a segunda vez não há nada.
+    #[tokio::test]
+    async fn what_recover_kept_can_be_listed_and_cleared() {
+        let h = hist().await;
+        interrupt_apply(&h.target);
+        fs::write(h.target.join("a.md"), b"da pessoa").unwrap();
+        let eng = h.rig.engine("pc");
+        let roots = vault_only(&h.target);
+        let recovered = eng.recover(&roots).await.unwrap();
+        assert_eq!(recovered.kept.len(), 1);
+
+        let listed = eng.list_kept(&roots).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].file, recovered.kept[0]);
+        assert_eq!(listed[0].class, Class::Vault);
+        assert!(!listed[0].edited);
+
+        let report = eng.clear_kept(&roots, &listed).await.unwrap();
+        assert_eq!(report.removed, 1);
+        assert!(!recovered.kept[0].exists());
+        // o arquivo da pessoa não foi tocado
+        assert_eq!(fs::read(h.target.join("a.md")).unwrap(), b"da pessoa");
+        assert_eq!(eng.list_kept(&roots).await.unwrap(), vec![]);
+        // idempotente: apagar de novo o que já foi é `Gone`, sem erro
+        let again = eng.clear_kept(&roots, &listed).await.unwrap();
+        assert_eq!(again.removed, 0);
+    }
+
     /// P-33 item 2: um diário corrompido em qualquer raiz recusa a recuperação **antes** de tocar
     /// em qualquer raiz. Hoje a primeira raiz (vault) já foi recuperada quando a segunda falha, e
     /// o conjunto fica meio voltado.
