@@ -2,6 +2,14 @@
 
 Mais recente no topo.
 
+### 2026-11-15 — Sessão 88 (P-33 (7): trava entre processos para `apply` e `recover`)
+
+- **Pedido**: "p33 7". Plan mode; decisão sua: `flock` na pasta da raiz (em vez de `.arca-lock` ou aceitar). Toca recuperação e troca de arquivos do usuário e concorrência (AGENTS §4), confirmado ao aprovar o plano.
+- **Feito ([arca#119](https://github.com/Arven-Labs/arca/pull/119))**: `Folder::lock` / `FolderLock` (`dirfd.rs`, `flock` não bloqueante via `rustix`); `lock_roots` (`apply.rs`, ordem de caminho, sem repetição, pula raiz que não existe, ocupado = `Busy`); `EngineError::Busy`; `apply` trava antes de `open_journals` e `open_journals` trava a raiz que cria (ganhou o parâmetro `locks`); `recover` trava do início ao fim.
+- **Testes (CI)**: **vermelho antes**: primeiro commit com o esqueleto (`Folder::lock` sem o `flock`) e os 6 testes de trava: run 43710065905, 6 falharam, 519 passaram. Verde com o `flock`: run 43710320068, 4 checks, 525 testes. Quebras de propósito (arca#120 e #121, fechados, branches apagadas): `recover` sem a trava derrubou `recover_is_busy_...` e `with_two_roots_one_busy_...` (run 43710640175); `apply` soltando a guarda logo depois de abrir os diários derrubou `apply_holds_the_lock_...` e `the_root_an_apply_creates_...` (run 43710646839).
+- **Não verificado**: a liberação pelo kernel quando o processo morre (os testes soltam por `drop`); macOS e NFS; a ordem "trava antes do diário" na raiz que o `apply` cria (só leitura de código; o teste só vê a trava durante o `stage`). Nada rodado localmente além de `cargo fmt`.
+- **Fica**: P-33 (8); P-09, P-22, P-25, P-26, P-29 (2) a (7), P-30 (2) a (6), P-31 a P-36. Warden: o `rev` do `arca-core` segue defasado (`fsync`, `dirs`, `kept`, `Busy`), e o Warden precisa tratar `Busy` e repetir depois (o loop do desktop e o "Sync now" do CLI são o caso real).
+
 ### 2026-11-15 — Sessão 87 (P-33 (5): listar e apagar os `.arca-kept-*`)
 
 - **Pedido**: "p33 5". Plan mode; decisão sua: API de limpar no molde do P-28 (em vez de só apertar o modo ou aceitar). Toca arquivo de segredo do usuário e apagamento (AGENTS §4), confirmado ao aprovar o plano.
