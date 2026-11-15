@@ -30,7 +30,7 @@ const JOURNAL_VERSION: u8 = 1;
 /// dois hashes) pesa quase o mesmo que a do manifest, então o diário tem o mesmo teto: se o
 /// manifest coube, o `apply` dele também cabe (P-33 item 8). O mesmo teto vale ao gravar e ao ler,
 /// para nunca gravar o que a recuperação não consegue ler.
-pub(crate) const MAX_JOURNAL_BYTES: u64 = crate::manifest::MAX_MANIFEST_JSON_BYTES as u64;
+pub(crate) const MAX_JOURNAL_BYTES: u64 = 16 << 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
