@@ -692,7 +692,7 @@ impl<S: BlobStore> Engine<S> {
         now: u64,
         allow_empty: &[Class],
     ) -> Result<Snapshot, EngineError> {
-        let _state_lock = self.lock_state().await?;
+        let _ = self.lock_state().await?;
         ensure_not_interrupted(roots)?;
         let state = self.load_state().await?;
         let Loaded {
