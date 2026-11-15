@@ -2736,6 +2736,108 @@ mod tests {
         assert_eq!(tree(&h.target), h.v2_tree);
     }
 
+    /// Backend que, a cada leitura e gravação, tenta pegar a trava do estado como um segundo
+    /// processo faria e registra se ela estava ocupada: prova que a trava vale **durante** a
+    /// operação, e não só no começo.
+    #[derive(Clone)]
+    struct StateLockSpy {
+        inner: Backend,
+        state: PathBuf,
+        busy: std::sync::Arc<std::sync::Mutex<Vec<bool>>>,
+    }
+
+    impl StateLockSpy {
+        fn new(inner: &Backend, state: &Path) -> StateLockSpy {
+            StateLockSpy {
+                inner: inner.clone(),
+                state: state.to_path_buf(),
+                busy: Default::default(),
+            }
+        }
+
+        fn probe(&self) {
+            let busy = crate::state::lock(&self.state).err() == Some(EngineError::Busy);
+            self.busy.lock().unwrap().push(busy);
+        }
+
+        /// Ocupada em todas as sondagens, e houve ao menos uma.
+        fn always_busy(&self) -> bool {
+            let seen = self.busy.lock().unwrap();
+            !seen.is_empty() && seen.iter().all(|busy| *busy)
+        }
+    }
+
+    impl BlobStore for StateLockSpy {
+        async fn put(&self, id: &ObjectId, bytes: &[u8]) -> Result<(), StoreError> {
+            self.probe();
+            self.inner.put(id, bytes).await
+        }
+        async fn get(&self, id: &ObjectId) -> Result<Option<Vec<u8>>, StoreError> {
+            self.probe();
+            self.inner.get(id).await
+        }
+        async fn has(&self, id: &ObjectId) -> Result<bool, StoreError> {
+            self.inner.has(id).await
+        }
+        async fn list(&self, kind: ObjectKind) -> Result<Vec<ObjectId>, StoreError> {
+            self.inner.list(kind).await
+        }
+        async fn delete(&self, id: &ObjectId) -> Result<(), StoreError> {
+            self.inner.delete(id).await
+        }
+        fn capabilities(&self) -> Capabilities {
+            self.inner.capabilities()
+        }
+    }
+
+    #[tokio::test]
+    async fn the_state_stays_locked_during_the_whole_snapshot_merge_and_apply() {
+        // snapshot
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        let path = state_path(&rig);
+        let spy = StateLockSpy::new(&rig.store, &path);
+        let eng = Engine::new(spy.clone(), keys(1), "pc")
+            .unwrap()
+            .with_state(&path);
+        write(&vault, "a.md", b"1");
+        created(eng.snapshot(&vault_only(&vault), 1).await.unwrap());
+        assert!(spy.always_busy(), "snapshot");
+
+        // merge
+        let d = diverge(
+            &[("a.md", b"1"), ("b.md", b"1")],
+            vec![
+                ("pa", 10, vec![("a.md", b"A")]),
+                ("pb", 20, vec![("b.md", b"B")]),
+            ],
+        )
+        .await;
+        let path = state_path(&d.rig);
+        let spy = StateLockSpy::new(&d.rig.store, &path);
+        let eng = Engine::new(spy.clone(), keys(1), "pc")
+            .unwrap()
+            .with_state(&path);
+        assert!(matches!(
+            eng.merge(30).await.unwrap(),
+            MergeOutcome::Merged { .. }
+        ));
+        assert!(spy.always_busy(), "merge");
+
+        // apply
+        let h = hist().await;
+        let path = state_path(&h.rig);
+        accepted(&h.v1, 1).save(&path).unwrap();
+        let spy = StateLockSpy::new(&h.rig.store, &path);
+        let eng = Engine::new(spy.clone(), keys(1), "pc")
+            .unwrap()
+            .with_state(&path);
+        eng.apply(Some(&h.v1), &h.v2, &vault_only(&h.target))
+            .await
+            .unwrap();
+        assert!(spy.always_busy(), "apply");
+    }
+
     /// A guarda sai de escopo também quando a operação falha: um erro não deixa o estado preso.
     #[tokio::test]
     async fn a_failed_operation_releases_the_state_lock() {
