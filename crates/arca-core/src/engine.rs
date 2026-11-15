@@ -3,10 +3,11 @@
 //! dispositivos, junção de pontas e regra de conflito são da Fase 2.
 
 use crate::apply::{
-    commit, finish, is_reserved_name, missing_dirs, plan, stage, undo_all, Item, Kind, Planned,
-    Undo,
+    commit, finish, is_reserved_name, lock_roots, missing_dirs, plan, stage, undo_all, Item, Kind,
+    Planned, Undo,
 };
 use crate::crypto::{open, seal, EpochKeys};
+use crate::dirfd::FolderLock;
 use crate::disk::{create_private_dir, write_atomic};
 use crate::envelope::Header;
 use crate::error::Error;
@@ -129,6 +130,10 @@ pub enum EngineError {
     /// (as pastas do `apply` interrompido) e chame `recover` de novo.
     #[error("the interrupted apply has journals in folders that were not given to recover")]
     IncompleteApply,
+    /// Outro `apply` ou `recover` (deste ou de outro processo) está usando uma das pastas
+    /// (P-33 item 7). Nada foi lido nem escrito; tente de novo depois.
+    #[error("another apply or recover is using one of the folders; try again later")]
+    Busy,
     /// A restauração só escreve em pasta inexistente ou vazia.
     #[error("restore target is not empty")]
     TargetNotEmpty,
@@ -870,8 +875,19 @@ impl<S: BlobStore> Engine<S> {
         // o mesmo id em todos os diários: a recuperação decide por `apply`, não por raiz (P-33 2)
         let group = ApplyGroup::new(journal_roots.len())?;
         let g = group.clone();
-        // raiz que ainda não existe é criada aqui (o diário mora nela) e sai de novo se falhar
-        let created = run(move || open_journals(&r, &p, &g)).await?;
+        // trava as raízes que já existem **antes** do diário: um `recover` de outro processo que
+        // visse o diário `open` deste `apply` o desfaria no meio (P-33 item 7); a trava fica até o
+        // fim da função, inclusive nos erros
+        let lock_dirs = journal_roots.clone();
+        let locks = run(move || lock_roots(&lock_dirs)).await?;
+        // raiz que ainda não existe é criada aqui (o diário mora nela, e a trava dela também) e
+        // sai de novo se falhar
+        let (created, _locks) = run(move || {
+            let mut locks = locks;
+            let created = open_journals(&r, &p, &g, &mut locks)?;
+            Ok((created, locks))
+        })
+        .await?;
         let journals = Journals {
             roots: journal_roots,
             created,
@@ -925,6 +941,9 @@ impl<S: BlobStore> Engine<S> {
             .map(|(_, root)| root.to_path_buf())
             .collect();
         run(move || {
+            // um `apply` vivo (deste ou de outro processo) tem a trava: o diário dele não é de uma
+            // queda, e desfazê-lo aqui quebraria o `apply` (P-33 item 7)
+            let _locks = lock_roots(&dirs)?;
             let done = recover_all(&dirs)?;
             Ok(Recovered {
                 rolled_back: done.rolled_back,
@@ -1397,6 +1416,7 @@ fn open_journals(
     roots: &[PathBuf],
     planned: &[Planned],
     group: &ApplyGroup,
+    locks: &mut Vec<FolderLock>,
 ) -> Result<Vec<PathBuf>, EngineError> {
     let mut created = Vec::new();
     let mut made: Vec<&PathBuf> = Vec::new();
@@ -1410,6 +1430,8 @@ fn open_journals(
                     dir = d.parent();
                 }
                 create_private_dir(root).map_err(io_error)?;
+                // a raiz criada agora ainda não tinha trava: pega antes de o diário existir
+                locks.extend(lock_roots(std::slice::from_ref(root))?);
             }
             // sem sobrescrever: um diário que já existe é de outro `apply` ou de uma queda
             // as pastas que faltam agora, para a recuperação tirar as que uma queda deixou (P-33 4)
@@ -4072,6 +4094,160 @@ mod tests {
         no_leftovers(&tree(&h.target));
     }
 
+    // ---------- trava entre processos (P-33 item 7) ----------
+
+    /// Backend que, a cada leitura de blob, tenta travar a raiz como outro `Engine` faria e anota
+    /// se estava ocupada.
+    #[derive(Clone)]
+    struct LockSpy {
+        inner: Backend,
+        root: PathBuf,
+        busy: std::sync::Arc<std::sync::Mutex<Vec<bool>>>,
+    }
+
+    impl BlobStore for LockSpy {
+        async fn put(&self, id: &ObjectId, bytes: &[u8]) -> Result<(), StoreError> {
+            self.inner.put(id, bytes).await
+        }
+        async fn get(&self, id: &ObjectId) -> Result<Option<Vec<u8>>, StoreError> {
+            if id.kind == ObjectKind::Blob {
+                let busy =
+                    lock_roots(std::slice::from_ref(&self.root)).err() == Some(EngineError::Busy);
+                self.busy.lock().unwrap().push(busy);
+            }
+            self.inner.get(id).await
+        }
+        async fn has(&self, id: &ObjectId) -> Result<bool, StoreError> {
+            self.inner.has(id).await
+        }
+        async fn list(&self, kind: ObjectKind) -> Result<Vec<ObjectId>, StoreError> {
+            self.inner.list(kind).await
+        }
+        async fn delete(&self, id: &ObjectId) -> Result<(), StoreError> {
+            self.inner.delete(id).await
+        }
+        fn capabilities(&self) -> Capabilities {
+            self.inner.capabilities()
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn recover_is_busy_while_another_operation_holds_the_folder_and_touches_nothing() {
+        let h = hist().await;
+        interrupt_apply(&h.target);
+        let before = tree(&h.target);
+        let eng = h.rig.engine("pc");
+        let roots = vault_only(&h.target);
+
+        let held = lock_roots(std::slice::from_ref(&h.target)).unwrap();
+        assert_eq!(eng.recover(&roots).await, Err(EngineError::Busy));
+        assert_eq!(tree(&h.target), before);
+        assert!(crate::journal::Journal::exists(&h.target));
+
+        // solta a trava: a mesma recuperação passa
+        drop(held);
+        let recovered = eng.recover(&roots).await.unwrap();
+        assert!(recovered.rolled_back > 0);
+        assert!(!crate::journal::Journal::exists(&h.target));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn apply_is_busy_while_another_operation_holds_the_folder_and_creates_no_journal() {
+        let h = hist().await;
+        let before = tree(&h.target);
+        let eng = h.rig.engine("pc");
+        let roots = vault_only(&h.target);
+
+        let held = lock_roots(std::slice::from_ref(&h.target)).unwrap();
+        assert_eq!(
+            eng.apply(Some(&h.v1), &h.v2, &roots).await.map(|_| ()),
+            Err(EngineError::Busy)
+        );
+        assert_eq!(tree(&h.target), before);
+        assert!(!crate::journal::Journal::exists(&h.target));
+
+        drop(held);
+        eng.apply(Some(&h.v1), &h.v2, &roots).await.unwrap();
+        assert_eq!(tree(&h.target), h.v2_tree);
+    }
+
+    /// O `apply` segura a trava durante o `stage` (quando outro processo, vendo o diário `open`,
+    /// o confundiria com uma queda) e a solta ao terminar, com sucesso ou com erro.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn apply_holds_the_lock_while_it_works_and_releases_it_at_the_end() {
+        let h = hist().await;
+        let busy = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let spy = LockSpy {
+            inner: h.rig.store.clone(),
+            root: h.target.clone(),
+            busy: busy.clone(),
+        };
+        let eng = Engine::new(spy, keys(1), "pc").unwrap();
+        let roots = vault_only(&h.target);
+
+        eng.apply(Some(&h.v1), &h.v2, &roots).await.unwrap();
+        let seen = busy.lock().unwrap().clone();
+        assert!(!seen.is_empty() && seen.iter().all(|b| *b), "{seen:?}");
+        // terminou: a trava está livre
+        drop(lock_roots(std::slice::from_ref(&h.target)).unwrap());
+
+        // um `apply` que falha (edição local no meio do caminho) também solta
+        let h = hist().await;
+        fs::write(h.target.join("a.md"), b"da pessoa").unwrap();
+        let eng = h.rig.engine("pc");
+        assert_eq!(
+            eng.apply(Some(&h.v1), &h.v2, &vault_only(&h.target))
+                .await
+                .map(|_| ()),
+            Err(EngineError::LocalChanges)
+        );
+        drop(lock_roots(std::slice::from_ref(&h.target)).unwrap());
+    }
+
+    /// A raiz que o próprio `apply` cria também fica travada enquanto ele trabalha.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_root_an_apply_creates_is_locked_while_it_works() {
+        let h = hist().await;
+        let fresh = h.rig.tmp.path().join("nova");
+        let busy = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let spy = LockSpy {
+            inner: h.rig.store.clone(),
+            root: fresh.clone(),
+            busy: busy.clone(),
+        };
+        let eng = Engine::new(spy, keys(1), "pc").unwrap();
+        eng.apply(None, &h.v2, &vault_only(&fresh)).await.unwrap();
+        let seen = busy.lock().unwrap().clone();
+        assert!(!seen.is_empty() && seen.iter().all(|b| *b), "{seen:?}");
+        drop(lock_roots(std::slice::from_ref(&fresh)).unwrap());
+    }
+
+    /// Com duas raízes e uma ocupada: `Busy`, e a outra não fica presa pela tentativa.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn with_two_roots_one_busy_recover_is_busy_and_leaves_the_other_free() {
+        let h = hist().await;
+        let config = h.rig.tmp.path().join("config");
+        copy_dir(&h.target, &config);
+        let roots = Roots {
+            vault: Some(h.target.clone()),
+            config: Some(config.clone()),
+            ..Roots::default()
+        };
+        let held = lock_roots(std::slice::from_ref(&config)).unwrap();
+        assert_eq!(
+            h.rig.engine("pc").recover(&roots).await,
+            Err(EngineError::Busy)
+        );
+        // o `vault` (pego primeiro, em ordem de caminho) foi solto ao desistir
+        drop(lock_roots(std::slice::from_ref(&h.target)).unwrap());
+        drop(held);
+    }
+
     /// P-33 item 2: os diários de todas as raízes de um `apply` levam o mesmo id e o número de
     /// raízes, tanto ao abrir quanto ao marcar `committed` (que reescreve o diário).
     #[tokio::test]
@@ -4101,7 +4277,7 @@ mod tests {
             .collect();
         let (planned, _) = plan(items).unwrap();
         let group = ApplyGroup::new(roots.len()).unwrap();
-        open_journals(&roots, &planned, &group).unwrap();
+        open_journals(&roots, &planned, &group, &mut Vec::new()).unwrap();
         let ids = |phase| {
             let journals: Vec<_> = roots
                 .iter()
