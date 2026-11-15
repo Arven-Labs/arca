@@ -138,6 +138,15 @@ pub enum EngineError {
     /// caminhos muito longos. Nada foi tocado e nenhum diário foi gravado.
     #[error("the apply touches too many files to journal; nothing was changed")]
     JournalTooLarge,
+    /// A operação (`snapshot` que cria manifest, `merge` ou `apply`) **valeu**, mas o estado do
+    /// dispositivo (o último manifest aceito) não pôde ser gravado (P-31 item 3). O resultado
+    /// (`id`, `conflicts`, `Applied`) se perde, mas refazer é seguro: o `snapshot` vira
+    /// `Unchanged`, o `apply` conta tudo como `unchanged` e o `merge` vira `Nothing`. Só a
+    /// proteção contra rollback fica um passo atrás, até uma gravação dar certo.
+    #[error(
+        "the operation took effect, but the device state could not be saved; repeating it is safe"
+    )]
+    StateNotSaved,
     /// A restauração só escreve em pasta inexistente ou vazia.
     #[error("restore target is not empty")]
     TargetNotEmpty,
@@ -417,6 +426,15 @@ impl<S: BlobStore> Engine<S> {
         run(move || state.save(&path)).await
     }
 
+    /// Como `remember`, para depois de uma operação que **já valeu** (`snapshot` que criou
+    /// manifest, `merge`, `apply`): se gravar falha, o erro é `StateNotSaved` e não `Io`, para o
+    /// chamador saber que refazer é seguro e que nada foi desfeito (P-31 item 3).
+    async fn remember_after(&self, id: &ObjectId) -> Result<(), EngineError> {
+        self.remember(id)
+            .await
+            .map_err(|_| EngineError::StateNotSaved)
+    }
+
     /// Abre o manifest com as chaves do dispositivo (erro se for de outra época).
     async fn read_manifest(&self, id: &ObjectId) -> Result<Manifest, EngineError> {
         let bytes = verified_get(&self.store, id)
@@ -633,7 +651,7 @@ impl<S: BlobStore> Engine<S> {
             descends(state, &readable, &first.id) || descends(state, &readable, &second.id)
         });
         if advances {
-            self.remember(&sealed.id).await?;
+            self.remember_after(&sealed.id).await?;
         }
         Ok((
             MergeOutcome::Merged {
@@ -784,7 +802,7 @@ impl<S: BlobStore> Engine<S> {
         };
         let sealed = manifest.seal(&self.keys)?;
         self.store.put(&sealed.id, &sealed.bytes).await?;
-        self.remember(&sealed.id).await?;
+        self.remember_after(&sealed.id).await?;
         Ok(Snapshot::Created {
             id: sealed.id,
             manifest,
@@ -931,7 +949,7 @@ impl<S: BlobStore> Engine<S> {
             Ok(())
         })
         .await?;
-        self.remember(to).await?;
+        self.remember_after(to).await?;
         Ok(applied)
     }
 
@@ -2632,6 +2650,122 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(saved(&apply_state), Some(accepted(&h.v2, 1)));
+    }
+
+    // ---------- o estado não grava depois da operação valer (P-31 item 3) ----------
+
+    /// Cria (se faltar) a pasta do estado e a deixa sem escrita (`0o500`): o arquivo existente
+    /// ainda lê, mas gravar um novo falha com `PermissionDenied`.
+    #[cfg(unix)]
+    fn lock_state_dir(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = path.parent().unwrap();
+        fs::create_dir_all(dir).unwrap();
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o500)).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn unlock_state_dir(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path.parent().unwrap(), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_snapshot_that_created_a_manifest_says_so_when_the_state_cannot_be_saved() {
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        let path = state_path(&rig);
+        let eng = guarded(&rig, "pc", &path);
+        write(&vault, "a.md", b"1");
+        lock_state_dir(&path);
+        assert_eq!(
+            eng.snapshot(&vault_only(&vault), 1).await,
+            Err(EngineError::StateNotSaved)
+        );
+        // a operação valeu: o manifest está no armazenamento, só o estado não foi gravado
+        let tips = eng.heads().await.unwrap().tips;
+        assert_eq!(tips.len(), 1);
+        assert_eq!(saved(&path), None);
+
+        // refazer é seguro: vira `Unchanged` e grava o estado
+        unlock_state_dir(&path);
+        assert!(matches!(
+            eng.snapshot(&vault_only(&vault), 2).await.unwrap(),
+            Snapshot::Unchanged { head, .. } if head == tips[0].id
+        ));
+        assert_eq!(saved(&path), Some(accepted(&tips[0].id, 1)));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unchanged_snapshot_that_cannot_save_the_state_is_a_plain_io_error() {
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        let path = state_path(&rig);
+        let eng = guarded(&rig, "pc", &path);
+        write(&vault, "a.md", b"1");
+        created(eng.snapshot(&vault_only(&vault), 1).await.unwrap());
+        lock_state_dir(&path);
+        // nada aconteceu além de aceitar a ponta como estado: não é "a operação valeu"
+        assert_eq!(
+            eng.snapshot(&vault_only(&vault), 2).await,
+            Err(EngineError::Io(io::ErrorKind::PermissionDenied))
+        );
+        unlock_state_dir(&path);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_apply_that_took_effect_says_so_when_the_state_cannot_be_saved() {
+        let h = hist().await;
+        let path = state_path(&h.rig);
+        accepted(&h.v1, 1).save(&path).unwrap();
+        let eng = guarded(&h.rig, "pc", &path);
+        let roots = vault_only(&h.target);
+        lock_state_dir(&path);
+        assert_eq!(
+            eng.apply(Some(&h.v1), &h.v2, &roots).await.map(|_| ()),
+            Err(EngineError::StateNotSaved)
+        );
+        // a pasta já é a nova, sem sobras e sem diário
+        assert_eq!(tree(&h.target), h.v2_tree);
+        assert!(!crate::journal::Journal::exists(&h.target));
+        assert_eq!(saved(&path), Some(accepted(&h.v1, 1)));
+
+        // refazer é seguro: nada a mudar, e o estado avança
+        unlock_state_dir(&path);
+        let again = eng.apply(Some(&h.v1), &h.v2, &roots).await.unwrap();
+        assert_eq!(again.created + again.updated + again.removed, 0);
+        assert_eq!(saved(&path), Some(accepted(&h.v2, 1)));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_merge_that_was_written_says_so_when_the_state_cannot_be_saved() {
+        let d = diverge(
+            &[("a.md", b"1"), ("b.md", b"1")],
+            vec![
+                ("pa", 10, vec![("a.md", b"A")]),
+                ("pb", 20, vec![("b.md", b"B")]),
+            ],
+        )
+        .await;
+        let path = state_path(&d.rig);
+        let eng = guarded(&d.rig, "pc", &path);
+        lock_state_dir(&path);
+        assert_eq!(eng.merge(30).await, Err(EngineError::StateNotSaved));
+        // a fusão existe: as duas pontas viraram uma
+        let tips = eng.heads().await.unwrap().tips;
+        assert_eq!(tips.len(), 1);
+        // refazer é seguro
+        unlock_state_dir(&path);
+        assert_eq!(
+            eng.merge(31).await.unwrap(),
+            MergeOutcome::Nothing {
+                head: Some(tips[0].id)
+            }
+        );
     }
 
     /// O ataque: o armazenamento volta a uma cópia velha. Nada é escrito, em nenhuma operação.
