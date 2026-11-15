@@ -2,6 +2,15 @@
 
 Mais recente no topo.
 
+### 2026-11-15 — Sessão 89 (P-33 (8): o teto do diário acompanha o do manifest)
+
+- **Pedido**: "p33 8". Decisão sua: alinhar ao manifest (64 MiB), em vez de só o erro claro ou um formato compacto. Toca limite e leitura do diário de recuperação (AGENTS §4).
+- **Desvio de processo**: fiz a pergunta de decisão e escrevi o plano **fora do plan mode** e só entrei nele depois, para a aprovação passar pelo `ExitPlanMode`, como pede o `CLAUDE.md`. Nada foi editado antes da aprovação.
+- **Feito ([arca#122](https://github.com/Arven-Labs/arca/pull/122))**: `MAX_JOURNAL_BYTES` = `MAX_MANIFEST_JSON_BYTES` (64 MiB); `EngineError::JournalTooLarge` em `Journal::encode` (antes `Io(InvalidInput)`); `missing_dirs` com `HashSet` (a busca linear por pasta era quadrática e só aparece com um `apply` grande, achei ao planejar o teste de 100 mil; não estava no plano, entrou aqui porque o caso de 100 mil dependia dele). SPEC-TECNICA atualizada.
+- **Testes (CI)**: **vermelho antes**: commit só com os testes (run 43712789886: 2 falharam, 524 passaram: o de 100 mil arquivos e o teste antigo de teto, agora esperando `JournalTooLarge`). Verde: run 43713119254, 4 checks, 526 testes. Quebra de propósito (arca#123, fechado, branch apagada): teto de volta a 16 MiB derrubou `a_journal_for_a_manifest_at_the_file_limit_fits_and_loads_back` (run 43713453123). O teste antigo `huge` (120 mil entradas de caminho de 180 bytes) passou a caber e foi trocado por 20 mil caminhos de ~4 KiB. **Não fiz** o teste de `Engine::apply` com diário que não cabe (previsto no plano): o `JournalTooLarge` está coberto em `save` e `create`, mas o `apply` inteiro não.
+- **Não verificado**: pico de memória do `recover` com um diário de 64 MiB; um vault real de 100 mil arquivos; macOS e Windows; nada rodado localmente além de `cargo fmt`. O teste de 100 mil aloca dezenas de MiB (ficou ~13 s o `cargo test` inteiro, sem estourar).
+- **Fica**: P-09, P-22, P-25, P-26, P-29 (2) a (7), P-30 (2) a (6), P-31 a P-36. O **P-33 fica só com o que está registrado como limite aceito** (queda de energia real, outros sistemas de arquivos, macOS/Windows). Warden: o `rev` do `arca-core` segue defasado (`fsync`, `dirs`, `kept`, `Busy`, `JournalTooLarge`) e ele precisa tratar `Busy`.
+
 ### 2026-11-15 — Sessão 88 (P-33 (7): trava entre processos para `apply` e `recover`)
 
 - **Pedido**: "p33 7". Plan mode; decisão sua: `flock` na pasta da raiz (em vez de `.arca-lock` ou aceitar). Toca recuperação e troca de arquivos do usuário e concorrência (AGENTS §4), confirmado ao aprovar o plano.
