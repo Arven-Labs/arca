@@ -779,7 +779,7 @@ impl<S: BlobStore> Engine<S> {
         if let Some(head) = &prev {
             if head.manifest.files == files {
                 // a pasta já é igual à cabeça: o dispositivo a aceita como estado atual
-                self.remember(&head.id).await?;
+                self.remember_after(&head.id).await?;
                 return Ok(Snapshot::Unchanged {
                     head: head.id,
                     skipped,
