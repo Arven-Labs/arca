@@ -2,6 +2,14 @@
 
 Mais recente no topo.
 
+### 2026-11-15 — Sessão 87 (P-33 (5): listar e apagar os `.arca-kept-*`)
+
+- **Pedido**: "p33 5". Plan mode; decisão sua: API de limpar no molde do P-28 (em vez de só apertar o modo ou aceitar). Toca arquivo de segredo do usuário e apagamento (AGENTS §4), confirmado ao aprovar o plano.
+- **Feito ([arca#116](https://github.com/Arven-Labs/arca/pull/116))**: módulo `kept` (`list`, `clear`, `KeptOriginal`) e os wrappers `Engine::list_kept` e `Engine::clear_kept`; `clear` reusa `losers::remove_in` (mover, conferir o hash, apagar) e `losers::{ClearReport, Skip}`; `MAX_DEPTH` do `losers` passou a `pub(crate)`. SPEC-TECNICA atualizada.
+- **Testes (CI)**: **vermelho antes**: primeiro commit com `todo!()` e os 10 testes (run 43707832802: 10 falharam, 508 passaram; o commit anterior nem chegou aos testes, o clippy barrou código morto, então liguei os wrappers). Com `list` e `clear`: 1 falhou, e era erro **do teste** (ordem esperada: por caminho `secret/` vem antes de `vault/`), corrigi a expectativa, não o código. Verde: run 43708398732, 4 checks, 519 testes (inclui o ponta a ponta `recover` → `list_kept` → `clear_kept`). Quebras de propósito (arca#117 e #118, fechados, branches apagadas): `clear` apagando sem conferir o hash derrubou `clear_never_deletes_what_the_person_edited` (run 43708642118); `list` seguindo link derrubou `list_ignores_names_that_are_not_ours_and_things_that_are_not_files` (run 43708648742).
+- **Não verificado**: macOS e Windows; apagamento seguro do conteúdo; nada rodado localmente além de `cargo fmt`. `list` percorre a raiz inteira (custo do `scan`).
+- **Fica**: a tela "apagar" no Warden (outro repo); P-33 (7), (8); P-09, P-22, P-25, P-26, P-29 (2) a (7), P-30 (2) a (6), P-31 a P-36. Warden: o `rev` do `arca-core` segue defasado (`fsync`, `dirs`, `kept`).
+
 ### 2026-11-15 — Sessão 86 (P-33 (4): a recuperação remove as pastas que o `apply` criou)
 
 - **Pedido**: "p33 4". Plan mode; decisão sua: registrar no diário (campo `dirs`), em vez de aceitar o limite. Toca recuperação de arquivos do usuário e parsing de dado externo (AGENTS §4).
