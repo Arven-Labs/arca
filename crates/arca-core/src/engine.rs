@@ -943,7 +943,6 @@ impl<S: BlobStore> Engine<S> {
         run(move || {
             // um `apply` vivo (deste ou de outro processo) tem a trava: o diário dele não é de uma
             // queda, e desfazê-lo aqui quebraria o `apply` (P-33 item 7)
-            let _locks = lock_roots(&dirs)?;
             let done = recover_all(&dirs)?;
             Ok(Recovered {
                 rolled_back: done.rolled_back,
