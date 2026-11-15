@@ -2,6 +2,14 @@
 
 Mais recente no topo.
 
+### 2026-11-15 — Sessão 85 (P-33 (3): `fsync` das pastas no `apply`)
+
+- **Pedido**: "p33 3". Plan mode; plano aprovado (inclui ignorar só `EINVAL` no `fsync` de pasta). Toca troca e recuperação de arquivos do usuário (AGENTS §4).
+- **Feito ([arca#112](https://github.com/Arven-Labs/arca/pull/112))**: `Folder::sync` (`dirfd.rs`); `create_beneath` sincroniza o pai de cada pasta criada; `Journal::create` sincroniza a raiz depois do `hard_link`; `commit` sincroniza cada pasta-pai distinta antes de devolver Ok, ou seja, antes do marcador `committed` (desvio do plano: o `sync_parents` fica dentro do `commit`, não numa função chamada pelo engine, para o teste cobrir a chamada); `finish` sincroniza no fim, melhor esforço.
+- **Testes (CI)**: **sem vermelho antes** (desvio do plano): os 3 testes novos contam chamadas de `Folder::sync` (contador `cfg(test)` por thread) e nasceram com o código. Verde: run 43703822922, 4 checks, 500 testes. Quebra de propósito (arca#113, fechado, branch apagada): `commit` sem `sync_parents` derrubou `commit_syncs_each_touched_folder_once_before_returning` (run 43704064992, 499 passaram, 1 falhou).
+- **Não verificado**: queda de energia real (os testes provam que a chamada existe, não que o disco a respeita); outros sistemas de arquivos; macOS (`F_FULLFSYNC`) e Windows (sem `fsync` de pasta); nada rodado localmente além de `cargo fmt`.
+- **Fica**: P-33 (4), (5), (7), (8); P-09, P-22, P-25, P-26, P-29 (2) a (7), P-30 (2) a (6), P-31 a P-36. Warden: o `rev` do `arca-core` segue defasado.
+
 ### 2026-11-14 — Sessão 84 (P-33 (2): a recuperação decide por `apply`, não por raiz)
 
 - **Pedido**: "vamos de 2". Plan mode; decisão sua: raiz ausente de `recover(&Roots)` com todos os diários `open` **recusa** (`IncompleteApply`, nada tocado). Toca recuperação de arquivos do usuário (AGENTS §4), confirmado ao aprovar o plano.
