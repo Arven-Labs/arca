@@ -12,6 +12,7 @@ use crate::envelope::Header;
 use crate::error::Error;
 use crate::heads::{tips, Head};
 use crate::journal::{recover_all, ApplyGroup, Journal, Phase};
+use crate::kept::{self, KeptOriginal};
 use crate::losers::{self, ClearReport, LoserCopy};
 use crate::manifest::{validate_device, validate_path, Class, FileEntry, Hash32, Manifest};
 use crate::merge::{common_ancestor, merge_files, reachable, Conflict, Side};
@@ -1055,6 +1056,27 @@ impl<S: BlobStore> Engine<S> {
         .await
     }
 
+    /// Os originais que a recuperação de um `apply` interrompido não pôde devolver
+    /// (`.arca-kept-<hex>`) nas pastas ligadas de `roots` (P-33 item 5), em ordem estável. Um
+    /// arquivo que a pessoa editou vem com `edited: true`.
+    pub async fn list_kept(&self, roots: &Roots) -> Result<Vec<KeptOriginal>, EngineError> {
+        let enabled = enabled_roots(roots);
+        run(move || kept::list(&enabled)).await
+    }
+
+    /// Apaga os itens de `items` que ainda são o que a recuperação guardou (P-33 item 5).
+    /// Revalida cada item no disco: fora das raízes ligadas, link, nome fora do padrão ou arquivo
+    /// que a pessoa editou nunca são apagados (ficam em `skipped`). Idempotente. Apagar não
+    /// sobrescreve o conteúdo (P-34).
+    pub async fn clear_kept(
+        &self,
+        roots: &Roots,
+        items: &[KeptOriginal],
+    ) -> Result<ClearReport, EngineError> {
+        let (enabled, items) = (enabled_roots(roots), items.to_vec());
+        run(move || kept::clear(&enabled, &items)).await
+    }
+
     /// Restaura o manifest `id` nas pastas de `roots`, que têm de não existir ou estar vazias.
     pub async fn restore(&self, id: &ObjectId, roots: &Roots) -> Result<Restored, EngineError> {
         let manifest = self.read_manifest(id).await?;
@@ -1324,6 +1346,14 @@ where
 }
 
 /// As pastas das classes ligadas.
+fn enabled_roots(roots: &Roots) -> Vec<(Class, PathBuf)> {
+    roots
+        .enabled()
+        .into_iter()
+        .map(|(class, root)| (class, root.to_path_buf()))
+        .collect()
+}
+
 fn live_dirs(roots: &Roots) -> Vec<PathBuf> {
     roots
         .enabled()
