@@ -2,6 +2,14 @@
 
 Mais recente no topo.
 
+### 2026-11-15 — Sessão 92 (a mensagem do `Busy` cobre o estado do dispositivo)
+
+- **Pedido**: preparar o Warden para o `Busy` (P-31 4). Plan mode; ao ler o código do Warden achei que o `sync_lock` dele já serializa os ciclos, então a mudança do lado do arca é só o texto. Decisão sua: corrigir a mensagem aqui, num PR pequeno separado, antes do bump do `rev` do Warden.
+- **Feito ([arca#130](https://github.com/Arven-Labs/arca/pull/130))**: `EngineError::Busy` passa de "another apply or recover is using one of the folders; try again later" (impreciso desde o P-31 4: `Busy` também vem do estado, em `snapshot` e `merge`) para "another operation is using the folders or the device state; try again later". Só texto e doc; nenhum comportamento mudou.
+- **Testes (CI)**: **vermelho antes**: commit só com o teste (run 43769997087: 1 falhou, 539 passaram; o `a_snapshot_is_busy_...` ganhou a conferência de que a mensagem cita o estado do dispositivo e não vaza o caminho). Verde: run 43770279027, 540 testes. Quebra de propósito (arca#131, fechado, branch apagada): o texto antigo derrubou só esse teste (run 43770295000).
+- **Não verificado**: nada além do texto; nada rodado localmente além de `cargo fmt --check`.
+- **Fica**: Warden, PR 2 (`rev` novo e `engine_failure` para `Busy` e `StateNotSaved`); P-31 (5); P-29 (2) a (7), P-30 (2) a (6); P-09, P-22, P-25, P-26, P-32 a P-36.
+
 ### 2026-11-15 — Sessão 91 (P-31 (4): trava do arquivo de estado entre processos)
 
 - **Pedido**: "vamos de p31 4". Plan mode. Decisões suas: só a trava (o MAC fica como limite aceito: quem escreve no arquivo é o mesmo usuário e lê a chave, e um MAC não barra a volta a um estado antigo); trava exclusiva na operação inteira com `Busy` (descartada a variante "compara antes de gravar"). Toca proteção contra rollback (AGENTS §4), confirmado ao aprovar o plano.
