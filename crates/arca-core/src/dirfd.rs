@@ -11,7 +11,7 @@ use crate::manifest::Hash32;
 use sha2::{Digest, Sha256};
 use std::io::{self, Read};
 
-pub(crate) use imp::Folder;
+pub(crate) use imp::{Folder, FolderLock};
 
 /// Conta os `Folder::sync` desta thread, só nos testes: queda de energia não é testável, mas
 /// "o `commit` sincronizou cada pasta" é.
@@ -84,8 +84,8 @@ mod imp {
     use super::{hash_reader, plain_name, Entry, FileRead, OpenError};
     use crate::manifest::Hash32;
     use rustix::fs::{
-        fstat, fsync, linkat, mkdirat, openat, renameat, statat, unlinkat, AtFlags, FileType, Mode,
-        OFlags, CWD,
+        flock, fstat, fsync, linkat, mkdirat, openat, renameat, statat, unlinkat, AtFlags,
+        FileType, FlockOperation, Mode, OFlags, CWD,
     };
     use rustix::io::Errno;
     use rustix::process::geteuid;
@@ -98,6 +98,12 @@ mod imp {
     /// Uma pasta aberta. Todas as operações agem nela, não em um caminho refeito do zero.
     pub(crate) struct Folder {
         fd: OwnedFd,
+    }
+
+    /// A trava de uma pasta (`Folder::lock`): vale enquanto este valor existir.
+    #[derive(Debug)]
+    pub(crate) struct FolderLock {
+        _fd: OwnedFd,
     }
 
     const DIR: OFlags = OFlags::RDONLY
@@ -209,6 +215,17 @@ mod imp {
             }
             fsync(&self.fd)?;
             Ok(())
+        }
+
+        /// Trava a pasta para este processo e devolve a guarda (P-33 item 7): a trava é solta
+        /// quando a guarda sai de escopo ou quando o processo morre. `WouldBlock` se outra abertura
+        /// da mesma pasta (deste ou de outro processo) já a tem. Não espera.
+        pub(crate) fn lock(self) -> io::Result<FolderLock> {
+            // `flock` é por descrição de arquivo aberto: esta abertura conflita com qualquer outra
+            // da mesma pasta, até no mesmo processo; o kernel a solta no `close` ou se o processo
+            // morre. `EWOULDBLOCK` vira `ErrorKind::WouldBlock`.
+            flock(&self.fd, FlockOperation::NonBlockingLockExclusive)?;
+            Ok(FolderLock { _fd: self.fd })
         }
 
         /// `fsync` da própria pasta: torna duráveis as entradas criadas, renomeadas ou apagadas
@@ -327,7 +344,15 @@ mod imp {
         path: PathBuf,
     }
 
+    /// Fora do Unix não há trava de pasta: a guarda existe, mas não impede nada.
+    #[derive(Debug)]
+    pub(crate) struct FolderLock;
+
     impl Folder {
+        pub(crate) fn lock(self) -> io::Result<FolderLock> {
+            Ok(FolderLock)
+        }
+
         pub(crate) fn open_beneath(base: &Path, relative: &Path) -> Result<Folder, OpenError> {
             let mut walk = base.to_path_buf();
             for part in relative.components() {
@@ -557,6 +582,20 @@ mod tests {
         let mut again = Vec::new();
         Folder::create_beneath(tmp.path(), Path::new("a/b/c"), &mut again).unwrap();
         assert!(again.is_empty());
+    }
+
+    /// P-33 item 7: uma pasta só tem uma trava por vez, entre aberturas diferentes (o que vale
+    /// também entre processos); soltar a guarda libera.
+    #[test]
+    fn a_second_lock_on_the_same_folder_would_block_until_the_first_is_dropped() {
+        let tmp = TempDir::new();
+        let open = || Folder::open_beneath(tmp.path(), Path::new("")).unwrap();
+        let first = open().lock().unwrap();
+        let err = open().lock().unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+        drop(first);
+        let again = open().lock();
+        assert!(again.is_ok());
     }
 
     #[test]

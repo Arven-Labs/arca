@@ -8,7 +8,7 @@
 //! 3. `commit`: move o original para o lado (`.arca-old-<n>`), relê-o para provar que era o
 //!    esperado e põe o novo no lugar. Qualquer falha desfaz o diário (`Undo`) ao contrário.
 
-use crate::dirfd::{Folder, OpenError};
+use crate::dirfd::{Folder, FolderLock, OpenError};
 use crate::disk::create_private_dir;
 use crate::engine::EngineError;
 use crate::manifest::{FileEntry, Hash32};
@@ -106,6 +106,34 @@ pub(crate) fn current_sha(path: &Path) -> Result<Option<Hash32>, EngineError> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(io_error(e)),
     }
+}
+
+/// Trava as raízes que existem (P-33 item 7), em ordem de caminho e sem repetição, sem esperar.
+/// Uma raiz que não existe é pulada (o `apply` a trava depois de criá-la). Se alguma já está
+/// travada por outra operação, as que foram pegas são soltas e o resultado é `Busy`. A trava vale
+/// enquanto as guardas devolvidas existirem.
+pub(crate) fn lock_roots(roots: &[PathBuf]) -> Result<Vec<FolderLock>, EngineError> {
+    let mut sorted: Vec<&PathBuf> = roots.iter().collect();
+    sorted.sort();
+    sorted.dedup();
+    let mut locks = Vec::new();
+    for root in sorted {
+        let folder = match Folder::open_beneath(root, Path::new("")) {
+            Ok(folder) => folder,
+            Err(OpenError::NotAFolder) => return Err(EngineError::LocalChanges),
+            Err(OpenError::Io(e)) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(OpenError::Io(e)) if e.kind() == io::ErrorKind::NotADirectory => {
+                return Err(EngineError::LocalChanges)
+            }
+            Err(OpenError::Io(e)) => return Err(io_error(e)),
+        };
+        match folder.lock() {
+            Ok(lock) => locks.push(lock),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Err(EngineError::Busy),
+            Err(e) => return Err(io_error(e)),
+        }
+    }
+    Ok(locks)
 }
 
 /// Abre a pasta-pai de `dest` descendo de `root` sem seguir link (P-29 item 1): quem confere e
