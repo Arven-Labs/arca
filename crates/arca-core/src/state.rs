@@ -5,6 +5,7 @@
 //! O arquivo é local, `0600`, e **corrupção nunca vale como ausência**: tratá-la assim seria um
 //! jeito de desligar a proteção.
 
+use crate::dirfd::FolderLock;
 use crate::disk::{create_private_dir, write_atomic};
 use crate::engine::EngineError;
 use crate::heads::equivalent_merges;
@@ -15,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const STATE_VERSION: u8 = 1;
 /// O arquivo tem uns 120 bytes; acima disto não é nosso.
@@ -74,6 +75,29 @@ impl DeviceState {
             create_private_dir(parent).map_err(|e| EngineError::Io(e.kind()))?;
         }
         write_atomic(path, &json).map_err(|e| EngineError::Io(e.kind()))
+    }
+}
+
+/// O arquivo de trava do estado: `<nome>.lock` ao lado dele. Não é o próprio arquivo de estado
+/// porque o `save` o troca por `rename` (o inode muda a cada gravação, e um `flock` no inode
+/// velho não impediria ninguém de travar o novo).
+pub(crate) fn lock_path(state: &Path) -> PathBuf {
+    let mut name = state.file_name().unwrap_or_default().to_os_string();
+    name.push(".lock");
+    state.with_file_name(name)
+}
+
+/// Trava o estado para este processo (P-31 item 4), sem esperar: ocupado por outro `snapshot`,
+/// `merge` ou `apply` com o mesmo arquivo de estado, deste ou de outro processo, é `Busy`. A
+/// pasta, se faltar, é criada `0700` (como no `save`). A guarda vale até sair de escopo.
+pub(crate) fn lock(state: &Path) -> Result<FolderLock, EngineError> {
+    if let Some(parent) = state.parent() {
+        create_private_dir(parent).map_err(|e| EngineError::Io(e.kind()))?;
+    }
+    match FolderLock::on_file(&lock_path(state)) {
+        Ok(guard) => Ok(guard),
+        Err(e) if e.kind() == io::ErrorKind::WouldBlock => Err(EngineError::Busy),
+        Err(e) => Err(EngineError::Io(e.kind())),
     }
 }
 

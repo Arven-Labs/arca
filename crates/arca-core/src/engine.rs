@@ -403,6 +403,17 @@ impl<S: BlobStore> Engine<S> {
         })
     }
 
+    /// Trava o arquivo de estado para a operação inteira (P-31 item 4), se a proteção está
+    /// ligada: dois processos do mesmo dispositivo não podem intercalar o `load_state` e o
+    /// `remember`, ou o que grava por último faria o estado recuar. Sem espera: ocupado é `Busy`.
+    /// Vem **antes** da trava das raízes (nenhuma espera, então não há impasse).
+    async fn lock_state(&self) -> Result<Option<FolderLock>, EngineError> {
+        let Some(path) = self.state.clone() else {
+            return Ok(None);
+        };
+        run(move || crate::state::lock(&path).map(Some)).await
+    }
+
     /// O último manifest aceito, se a proteção está ligada e o arquivo existe. Arquivo
     /// corrompido é `CorruptState`: nunca vale como "sem estado".
     async fn load_state(&self) -> Result<Option<DeviceState>, EngineError> {
@@ -574,6 +585,7 @@ impl<S: BlobStore> Engine<S> {
             saved: 0,
             already: 0,
         };
+        let _state_lock = self.lock_state().await?;
         let state = self.load_state().await?;
         let Loaded {
             readable, rejected, ..
@@ -680,6 +692,7 @@ impl<S: BlobStore> Engine<S> {
         now: u64,
         allow_empty: &[Class],
     ) -> Result<Snapshot, EngineError> {
+        let _state_lock = self.lock_state().await?;
         ensure_not_interrupted(roots)?;
         let state = self.load_state().await?;
         let Loaded {
@@ -820,6 +833,7 @@ impl<S: BlobStore> Engine<S> {
         to: &ObjectId,
         roots: &Roots,
     ) -> Result<Applied, EngineError> {
+        let _state_lock = self.lock_state().await?;
         ensure_not_interrupted(roots)?;
         let state = self.load_state().await?;
         let from_manifest = match from {
@@ -2652,6 +2666,304 @@ mod tests {
         assert_eq!(saved(&apply_state), Some(accepted(&h.v2, 1)));
     }
 
+    // ---------- trava do arquivo de estado entre processos (P-31 item 4) ----------
+
+    /// Outro processo do mesmo dispositivo está dentro de uma operação com este estado: um
+    /// segundo `lock` do mesmo arquivo (abertura própria, como a de outro processo) o simula.
+    fn state_busy(path: &Path) -> crate::dirfd::FolderLock {
+        crate::state::lock(path).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_is_busy_while_another_process_holds_the_state_and_writes_nothing() {
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        let path = state_path(&rig);
+        let eng = guarded(&rig, "pc", &path);
+        write(&vault, "a.md", b"1");
+        let held = state_busy(&path);
+        assert_eq!(
+            eng.snapshot(&vault_only(&vault), 1).await,
+            Err(EngineError::Busy)
+        );
+        assert_eq!(rig.count(ObjectKind::Manifest).await, 0);
+        assert_eq!(saved(&path), None);
+        // solta a trava: a mesma chamada passa
+        drop(held);
+        created(eng.snapshot(&vault_only(&vault), 1).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_merge_is_busy_while_another_process_holds_the_state_and_writes_nothing() {
+        let d = diverge(
+            &[("a.md", b"1"), ("b.md", b"1")],
+            vec![
+                ("pa", 10, vec![("a.md", b"A")]),
+                ("pb", 20, vec![("b.md", b"B")]),
+            ],
+        )
+        .await;
+        let path = state_path(&d.rig);
+        let eng = guarded(&d.rig, "pc", &path);
+        let held = state_busy(&path);
+        assert_eq!(eng.merge(30).await, Err(EngineError::Busy));
+        assert_eq!(eng.heads().await.unwrap().tips.len(), 2);
+        assert_eq!(saved(&path), None);
+        drop(held);
+        assert!(matches!(
+            eng.merge(30).await.unwrap(),
+            MergeOutcome::Merged { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_apply_is_busy_while_another_process_holds_the_state_and_writes_nothing() {
+        let h = hist().await;
+        let path = state_path(&h.rig);
+        accepted(&h.v1, 1).save(&path).unwrap();
+        let eng = guarded(&h.rig, "pc", &path);
+        let roots = vault_only(&h.target);
+        let before = tree(&h.target);
+        let held = state_busy(&path);
+        assert_eq!(
+            eng.apply(Some(&h.v1), &h.v2, &roots).await.map(|_| ()),
+            Err(EngineError::Busy)
+        );
+        assert_eq!(tree(&h.target), before);
+        assert_eq!(saved(&path), Some(accepted(&h.v1, 1)));
+        drop(held);
+        eng.apply(Some(&h.v1), &h.v2, &roots).await.unwrap();
+        assert_eq!(tree(&h.target), h.v2_tree);
+    }
+
+    /// Backend que, a cada leitura e gravação, tenta pegar a trava do estado como um segundo
+    /// processo faria e registra se ela estava ocupada: prova que a trava vale **durante** a
+    /// operação, e não só no começo.
+    #[derive(Clone)]
+    struct StateLockSpy {
+        inner: Backend,
+        state: PathBuf,
+        busy: std::sync::Arc<std::sync::Mutex<Vec<bool>>>,
+    }
+
+    impl StateLockSpy {
+        fn new(inner: &Backend, state: &Path) -> StateLockSpy {
+            StateLockSpy {
+                inner: inner.clone(),
+                state: state.to_path_buf(),
+                busy: Default::default(),
+            }
+        }
+
+        fn probe(&self) {
+            let busy = crate::state::lock(&self.state).err() == Some(EngineError::Busy);
+            self.busy.lock().unwrap().push(busy);
+        }
+
+        /// Ocupada em todas as sondagens, e houve ao menos uma.
+        fn always_busy(&self) -> bool {
+            let seen = self.busy.lock().unwrap();
+            !seen.is_empty() && seen.iter().all(|busy| *busy)
+        }
+    }
+
+    impl BlobStore for StateLockSpy {
+        async fn put(&self, id: &ObjectId, bytes: &[u8]) -> Result<(), StoreError> {
+            self.probe();
+            self.inner.put(id, bytes).await
+        }
+        async fn get(&self, id: &ObjectId) -> Result<Option<Vec<u8>>, StoreError> {
+            self.probe();
+            self.inner.get(id).await
+        }
+        async fn has(&self, id: &ObjectId) -> Result<bool, StoreError> {
+            self.inner.has(id).await
+        }
+        async fn list(&self, kind: ObjectKind) -> Result<Vec<ObjectId>, StoreError> {
+            self.inner.list(kind).await
+        }
+        async fn delete(&self, id: &ObjectId) -> Result<(), StoreError> {
+            self.inner.delete(id).await
+        }
+        fn capabilities(&self) -> Capabilities {
+            self.inner.capabilities()
+        }
+    }
+
+    #[tokio::test]
+    async fn the_state_stays_locked_during_the_whole_snapshot_merge_and_apply() {
+        // snapshot
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        let path = state_path(&rig);
+        let spy = StateLockSpy::new(&rig.store, &path);
+        let eng = Engine::new(spy.clone(), keys(1), "pc")
+            .unwrap()
+            .with_state(&path);
+        write(&vault, "a.md", b"1");
+        created(eng.snapshot(&vault_only(&vault), 1).await.unwrap());
+        assert!(spy.always_busy(), "snapshot");
+
+        // merge
+        let d = diverge(
+            &[("a.md", b"1"), ("b.md", b"1")],
+            vec![
+                ("pa", 10, vec![("a.md", b"A")]),
+                ("pb", 20, vec![("b.md", b"B")]),
+            ],
+        )
+        .await;
+        let path = state_path(&d.rig);
+        let spy = StateLockSpy::new(&d.rig.store, &path);
+        let eng = Engine::new(spy.clone(), keys(1), "pc")
+            .unwrap()
+            .with_state(&path);
+        assert!(matches!(
+            eng.merge(30).await.unwrap(),
+            MergeOutcome::Merged { .. }
+        ));
+        assert!(spy.always_busy(), "merge");
+
+        // apply
+        let h = hist().await;
+        let path = state_path(&h.rig);
+        accepted(&h.v1, 1).save(&path).unwrap();
+        let spy = StateLockSpy::new(&h.rig.store, &path);
+        let eng = Engine::new(spy.clone(), keys(1), "pc")
+            .unwrap()
+            .with_state(&path);
+        eng.apply(Some(&h.v1), &h.v2, &vault_only(&h.target))
+            .await
+            .unwrap();
+        assert!(spy.always_busy(), "apply");
+    }
+
+    /// A guarda sai de escopo também quando a operação falha: um erro não deixa o estado preso.
+    #[tokio::test]
+    async fn a_failed_operation_releases_the_state_lock() {
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        let path = state_path(&rig);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"lixo").unwrap();
+        let eng = guarded(&rig, "pc", &path);
+        assert_eq!(
+            eng.snapshot(&vault_only(&vault), 1).await,
+            Err(EngineError::CorruptState)
+        );
+        drop(state_busy(&path));
+    }
+
+    #[tokio::test]
+    async fn two_different_state_files_do_not_block_each_other() {
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        let other = rig.tmp.path().join("outro/estado.json");
+        let held = state_busy(&state_path(&rig));
+        write(&vault, "a.md", b"1");
+        created(
+            guarded(&rig, "pc", &other)
+                .snapshot(&vault_only(&vault), 1)
+                .await
+                .unwrap(),
+        );
+        drop(held);
+    }
+
+    #[tokio::test]
+    async fn an_engine_without_a_state_file_never_locks_and_never_creates_the_lock_file() {
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        let path = state_path(&rig);
+        let held = state_busy(&path);
+        write(&vault, "a.md", b"1");
+        created(
+            rig.engine("pc")
+                .snapshot(&vault_only(&vault), 1)
+                .await
+                .unwrap(),
+        );
+        drop(held);
+        fs::remove_file(crate::state::lock_path(&path)).unwrap();
+        write(&vault, "a.md", b"2");
+        created(
+            rig.engine("pc")
+                .snapshot(&vault_only(&vault), 2)
+                .await
+                .unwrap(),
+        );
+        assert!(!crate::state::lock_path(&path).exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_lock_file_is_0600_next_to_the_state_in_a_0700_folder() {
+        use std::os::unix::fs::PermissionsExt;
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        let path = state_path(&rig);
+        write(&vault, "a.md", b"1");
+        created(
+            guarded(&rig, "pc", &path)
+                .snapshot(&vault_only(&vault), 1)
+                .await
+                .unwrap(),
+        );
+        let lock = crate::state::lock_path(&path);
+        assert_eq!(lock.file_name().unwrap(), "estado.json.lock");
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&lock), 0o600);
+        assert_eq!(mode(path.parent().unwrap()), 0o700);
+    }
+
+    /// Um link no lugar do `.lock` não é seguido: a operação recusa antes de agir.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlink_where_the_lock_file_should_be_is_refused_before_anything_runs() {
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        let path = state_path(&rig);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let elsewhere = rig.tmp.path().join("alvo");
+        fs::write(&elsewhere, b"intacto").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, crate::state::lock_path(&path)).unwrap();
+        write(&vault, "a.md", b"1");
+        let result = guarded(&rig, "pc", &path)
+            .snapshot(&vault_only(&vault), 1)
+            .await;
+        assert!(matches!(result, Err(EngineError::Io(_))), "{result:?}");
+        assert_eq!(rig.count(ObjectKind::Manifest).await, 0);
+        assert_eq!(fs::read(&elsewhere).unwrap(), b"intacto");
+    }
+
+    /// As duas travas são independentes e nenhuma fica presa pela tentativa que falhou na outra.
+    #[tokio::test]
+    async fn the_state_lock_and_the_root_lock_do_not_hold_each_other() {
+        let h = hist().await;
+        let path = state_path(&h.rig);
+        accepted(&h.v1, 1).save(&path).unwrap();
+        let eng = guarded(&h.rig, "pc", &path);
+        let roots = vault_only(&h.target);
+
+        // estado ocupado: a raiz não pode ter ficado presa
+        let held = state_busy(&path);
+        assert_eq!(
+            eng.apply(Some(&h.v1), &h.v2, &roots).await.map(|_| ()),
+            Err(EngineError::Busy)
+        );
+        drop(lock_roots(std::slice::from_ref(&h.target)).unwrap());
+        drop(held);
+
+        // raiz ocupada: o estado não pode ter ficado preso
+        let held = lock_roots(std::slice::from_ref(&h.target)).unwrap();
+        assert_eq!(
+            eng.apply(Some(&h.v1), &h.v2, &roots).await.map(|_| ()),
+            Err(EngineError::Busy)
+        );
+        drop(state_busy(&path));
+        drop(held);
+    }
+
     // ---------- o estado não grava depois da operação valer (P-31 item 3) ----------
 
     /// Cria (se faltar) a pasta do estado e a deixa sem escrita (`0o500`): o arquivo existente
@@ -2661,6 +2973,9 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = path.parent().unwrap();
         fs::create_dir_all(dir).unwrap();
+        // a trava do estado (P-31 item 4) precisa existir antes da pasta perder a escrita: abrir
+        // um arquivo que já existe funciona, criar um novo não
+        fs::File::create(crate::state::lock_path(path)).unwrap();
         fs::set_permissions(dir, fs::Permissions::from_mode(0o500)).unwrap();
     }
 
