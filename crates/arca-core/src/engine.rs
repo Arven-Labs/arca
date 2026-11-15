@@ -3,7 +3,8 @@
 //! dispositivos, junção de pontas e regra de conflito são da Fase 2.
 
 use crate::apply::{
-    commit, finish, is_reserved_name, plan, stage, undo_all, Item, Kind, Planned, Undo,
+    commit, finish, is_reserved_name, missing_dirs, plan, stage, undo_all, Item, Kind, Planned,
+    Undo,
 };
 use crate::crypto::{open, seal, EpochKeys};
 use crate::disk::{create_private_dir, write_atomic};
@@ -1381,7 +1382,11 @@ fn open_journals(
                 create_private_dir(root).map_err(io_error)?;
             }
             // sem sobrescrever: um diário que já existe é de outro `apply` ou de uma queda
-            Journal::open(root, planned).in_apply(group).create(root)?;
+            // as pastas que faltam agora, para a recuperação tirar as que uma queda deixou (P-33 4)
+            Journal::open(root, planned)
+                .with_dirs(missing_dirs(root, planned))
+                .in_apply(group)
+                .create(root)?;
             made.push(root);
             Ok(())
         })();

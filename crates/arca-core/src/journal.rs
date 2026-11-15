@@ -61,6 +61,11 @@ pub(crate) struct Journal {
     pub apply_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peers: Option<usize>,
+    /// Pastas (caminhos relativos à raiz, pai antes do filho) que **não existiam** quando o diário
+    /// foi gravado e que o `apply` vai criar (P-33 item 4). Só a recuperação em fase `open` as usa,
+    /// e só com `rmdir` (pasta vazia): uma que já existia nunca entra aqui.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dirs: Vec<String>,
 }
 
 /// O `apply` que reúne os diários de várias raízes.
@@ -115,7 +120,14 @@ impl Journal {
             entries,
             apply_id: None,
             peers: None,
+            dirs: Vec::new(),
         }
+    }
+
+    /// Registra as pastas que o `apply` vai criar (ver `dirs`).
+    pub(crate) fn with_dirs(mut self, dirs: Vec<String>) -> Journal {
+        self.dirs = dirs;
+        self
     }
 
     /// Marca o diário como parte de um `apply` de várias raízes.
@@ -214,6 +226,13 @@ impl Journal {
         };
         if !group_fits {
             return Err(EngineError::CorruptJournal);
+        }
+        let mut dir_seen = HashSet::new();
+        for d in &self.dirs {
+            let reserved = d.rsplit('/').next().is_some_and(is_reserved_name);
+            if validate_path(d).is_err() || reserved || !dir_seen.insert(d.as_str()) {
+                return Err(EngineError::CorruptJournal);
+            }
         }
         let mut seen = HashSet::new();
         let mut paths = HashSet::new();
@@ -433,9 +452,27 @@ fn recover_with(root: &Path, journal: &Journal, phase: Phase) -> Result<RootReco
                 }
             }
             recovery.rolled_back = journal.entries.len();
+            remove_created_dirs(root, &journal.dirs);
         }
     }
     Ok(recovery)
+}
+
+/// Remove as pastas que o `apply` interrompido ia criar (P-33 item 4), do filho para o pai, só
+/// com `rmdir`: pasta com qualquer coisa dentro, que sumiu ou com link no caminho fica como está.
+fn remove_created_dirs(root: &Path, dirs: &[String]) {
+    for dir in dirs.iter().rev() {
+        let relative = Path::new(dir);
+        let (Some(parent), Some(name)) = (
+            relative.parent(),
+            relative.file_name().and_then(|n| n.to_str()),
+        ) else {
+            continue;
+        };
+        if let Ok(folder) = Folder::open_beneath(root, parent) {
+            let _ = folder.rmdir(name);
+        }
+    }
 }
 
 /// Devolve `.arca-old-<n>` a `name` se, e só se, o disco bate com o diário. Nunca sobrescreve
@@ -1071,6 +1108,7 @@ mod tests {
             entries: (0..8000).map(|i| entry(i, path(i))).collect(),
             apply_id: None,
             peers: None,
+            dirs: vec![],
         };
         big.save(dir.path()).unwrap();
         assert_eq!(Journal::load(dir.path()), Ok(Some(big)));
@@ -1081,6 +1119,7 @@ mod tests {
             entries: (0..120_000).map(|i| entry(i, path(i))).collect(),
             apply_id: None,
             peers: None,
+            dirs: vec![],
         };
         let other = TempDir::new();
         assert!(huge.save(other.path()).is_err());
@@ -1176,6 +1215,7 @@ mod tests {
             entries: vec![],
             apply_id: None,
             peers: None,
+            dirs: vec![],
         };
         assert_eq!(mine.create(&c.root), Err(EngineError::Interrupted));
         assert_eq!(fs::read(Journal::path(&c.root)).unwrap(), theirs);
@@ -1197,6 +1237,7 @@ mod tests {
             entries: vec![],
             apply_id: None,
             peers: None,
+            dirs: vec![],
         };
         let free = TempDir::new();
         let before = crate::dirfd::probe::syncs();
@@ -1206,6 +1247,106 @@ mod tests {
         let before = crate::dirfd::probe::syncs();
         assert_eq!(journal.create(free.path()), Err(EngineError::Interrupted));
         assert_eq!(crate::dirfd::probe::syncs(), before);
+    }
+
+    // ---------- pastas criadas pelo `apply` (P-33 item 4) ----------
+
+    fn journal_with_dirs(phase: Phase, dirs: &[&str]) -> Journal {
+        Journal {
+            version: 1,
+            phase,
+            entries: vec![],
+            apply_id: None,
+            peers: None,
+            dirs: dirs.iter().map(|d| (*d).to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn recovering_an_open_journal_removes_the_empty_folders_it_lists_child_first() {
+        let dir = TempDir::new();
+        fs::create_dir_all(dir.path().join("a/b")).unwrap();
+        fs::create_dir_all(dir.path().join("fica")).unwrap(); // não está no diário
+        journal_with_dirs(Phase::Open, &["a", "a/b"])
+            .save(dir.path())
+            .unwrap();
+        recover_root(dir.path()).unwrap();
+        assert!(!dir.path().join("a").exists());
+        assert!(dir.path().join("fica").is_dir());
+    }
+
+    #[test]
+    fn a_listed_folder_with_a_file_of_the_person_stays_and_only_the_empty_one_goes() {
+        let dir = TempDir::new();
+        fs::create_dir_all(dir.path().join("a/b")).unwrap();
+        fs::write(dir.path().join("a/da-pessoa.md"), b"meu").unwrap();
+        journal_with_dirs(Phase::Open, &["a", "a/b"])
+            .save(dir.path())
+            .unwrap();
+        recover_root(dir.path()).unwrap();
+        assert!(!dir.path().join("a/b").exists());
+        assert_eq!(fs::read(dir.path().join("a/da-pessoa.md")).unwrap(), b"meu");
+    }
+
+    #[test]
+    fn a_committed_journal_keeps_its_listed_folders() {
+        let dir = TempDir::new();
+        fs::create_dir_all(dir.path().join("a/b")).unwrap();
+        journal_with_dirs(Phase::Committed, &["a", "a/b"])
+            .save(dir.path())
+            .unwrap();
+        recover_root(dir.path()).unwrap();
+        assert!(dir.path().join("a/b").is_dir());
+    }
+
+    #[test]
+    fn a_listed_path_through_a_link_touches_nothing_outside_the_root() {
+        let dir = TempDir::new();
+        let outside = TempDir::new();
+        fs::create_dir_all(outside.path().join("x")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("link")).unwrap();
+        journal_with_dirs(Phase::Open, &["link/x"])
+            .save(dir.path())
+            .unwrap();
+        recover_root(dir.path()).unwrap();
+        assert!(outside.path().join("x").is_dir());
+    }
+
+    #[test]
+    fn a_journal_with_bad_dirs_is_corrupt() {
+        for dirs in [
+            vec!["../fora"],
+            vec!["/abs"],
+            vec!["a", "a"],
+            vec!["a/.arca-new-1"],
+            vec![".arca-apply-journal"],
+            vec![""],
+        ] {
+            let dir = TempDir::new();
+            journal_with_dirs(Phase::Open, &dirs)
+                .save(dir.path())
+                .unwrap();
+            assert_eq!(
+                Journal::load(dir.path()),
+                Err(EngineError::CorruptJournal),
+                "{dirs:?}"
+            );
+        }
+    }
+
+    /// Um diário gravado antes do campo existir continua valendo.
+    #[test]
+    fn a_journal_written_before_dirs_existed_still_loads() {
+        let dir = TempDir::new();
+        let old = br#"{"version":1,"phase":"open","entries":[]}"#;
+        let path = Journal::path(dir.path());
+        fs::write(&path, old).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let loaded = Journal::load(dir.path()).unwrap().unwrap();
+        assert!(loaded.dirs.is_empty());
     }
 
     // ---------- idempotência ----------

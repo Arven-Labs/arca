@@ -255,6 +255,37 @@ pub(crate) fn stage(
     Ok(())
 }
 
+/// As pastas sob `root` que o `apply` vai ter de criar e que **não existem agora** (P-33 item 4),
+/// com `/`, o pai antes do filho, sem repetição. Desce sem seguir link e para no primeiro
+/// componente que existe como pasta; link ou arquivo no caminho não entra (o `stage` recusa).
+pub(crate) fn missing_dirs(root: &Path, planned: &[Planned]) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    for p in planned.iter().filter(|p| p.root == root) {
+        if !matches!(p.kind, Kind::Create | Kind::Update) {
+            continue;
+        }
+        let Some(parent) = p.dest.strip_prefix(root).ok().and_then(Path::parent) else {
+            continue;
+        };
+        let mut walk = std::path::PathBuf::new();
+        for part in parent.components() {
+            walk.push(part);
+            match Folder::open_beneath(root, &walk) {
+                Ok(_) => {}
+                Err(OpenError::Io(e)) if e.kind() == io::ErrorKind::NotFound => {
+                    let text: Vec<_> = walk.iter().map(|c| c.to_string_lossy()).collect();
+                    let text = text.join("/");
+                    if !found.contains(&text) {
+                        found.push(text);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    }
+    found
+}
+
 /// Põe `tmp` em `name` sem sobrescrever: `link` falha se `name` apareceu no meio-tempo.
 fn place(folder: &Folder, tmp: &str, name: &str) -> Result<(), EngineError> {
     match folder.link(tmp, name) {
@@ -459,6 +490,33 @@ mod tests {
             from_sha: from.map(sha),
             to: None,
         }
+    }
+
+    /// P-33 item 4: só entram as pastas que faltam agora, pai antes do filho, sem repetição; uma
+    /// que já existe nunca é listada (a recuperação poderia apagá-la se estivesse vazia).
+    #[test]
+    fn missing_dirs_lists_only_what_does_not_exist_parent_first() {
+        let dir = TempDir::new();
+        let root = dir.path();
+        fs::create_dir_all(root.join("a")).unwrap();
+        let all = [
+            planned(Kind::Create, root, "a/b/c/x.md", None),
+            planned(Kind::Create, root, "a/b/y.md", None),
+            planned(Kind::Create, root, "z/w.md", None),
+            planned(Kind::Create, root, "a/raiz-existe.md", None),
+            // remoção não cria pasta
+            planned(Kind::Remove, root, "r/s/t.md", Some(b"x")),
+        ];
+        assert_eq!(missing_dirs(root, &all), vec!["a/b", "a/b/c", "z"]);
+    }
+
+    #[test]
+    fn missing_dirs_does_not_follow_a_link() {
+        let dir = TempDir::new();
+        let outside = TempDir::new();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("link")).unwrap();
+        let all = [planned(Kind::Create, dir.path(), "link/novo/x.md", None)];
+        assert!(missing_dirs(dir.path(), &all).is_empty());
     }
 
     /// P-33 item 3: o `commit` só devolve Ok depois de sincronizar cada pasta mexida, uma vez por
