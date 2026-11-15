@@ -430,7 +430,9 @@ impl<S: BlobStore> Engine<S> {
     /// manifest, `merge`, `apply`): se gravar falha, o erro é `StateNotSaved` e não `Io`, para o
     /// chamador saber que refazer é seguro e que nada foi desfeito (P-31 item 3).
     async fn remember_after(&self, id: &ObjectId) -> Result<(), EngineError> {
-        self.remember(id).await
+        self.remember(id)
+            .await
+            .map_err(|_| EngineError::StateNotSaved)
     }
 
     /// Abre o manifest com as chaves do dispositivo (erro se for de outra época).
