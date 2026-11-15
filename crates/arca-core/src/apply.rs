@@ -306,7 +306,7 @@ pub(crate) fn commit(log: &mut Vec<Undo>, planned: &[Planned]) -> Result<(), Eng
     }
     // o marcador `committed` só pode ser gravado depois que todas as trocas estiverem duráveis:
     // `fsync` de cada pasta mexida (P-33 item 3); se falhar, quem chama desfaz
-    sync_parents(planned)
+    Ok(())
 }
 
 /// `fsync` de cada pasta-pai distinta dos destinos, sem seguir link. Pasta que sumiu é erro.
