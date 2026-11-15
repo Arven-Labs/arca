@@ -60,7 +60,10 @@ fn collect(
         let entry = entry.map_err(io_error)?;
         let path = entry.path();
         // `DirEntry::file_type` não segue link: link e o que não é arquivo nem pasta são ignorados
-        let kind = entry.file_type().map_err(io_error)?;
+        let kind = match fs::metadata(&path) {
+            Ok(meta) => meta.file_type(),
+            Err(_) => continue,
+        };
         if kind.is_dir() {
             collect(class, &path, depth + 1, out)?;
             continue;
