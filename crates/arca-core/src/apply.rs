@@ -304,6 +304,22 @@ pub(crate) fn commit(log: &mut Vec<Undo>, planned: &[Planned]) -> Result<(), Eng
             });
         }
     }
+    // o marcador `committed` só pode ser gravado depois que todas as trocas estiverem duráveis:
+    // `fsync` de cada pasta mexida (P-33 item 3); se falhar, quem chama desfaz
+    sync_parents(planned)
+}
+
+/// `fsync` de cada pasta-pai distinta dos destinos, sem seguir link. Pasta que sumiu é erro.
+fn sync_parents(planned: &[Planned]) -> Result<(), EngineError> {
+    let mut seen = std::collections::HashSet::new();
+    for p in planned {
+        if !seen.insert(parent_of(&p.dest)?.to_path_buf()) {
+            continue;
+        }
+        let folder =
+            open_parent(&p.root, &p.dest)?.ok_or(EngineError::Io(io::ErrorKind::NotFound))?;
+        folder.sync().map_err(io_error)?;
+    }
     Ok(())
 }
 
@@ -321,6 +337,9 @@ pub(crate) fn finish(planned: &[Planned]) {
             remove_emptied_folders(&p.root, &p.dest);
         }
     }
+    // para o `.arca-old-<n>` apagado não reaparecer depois de uma queda e travar o próximo
+    // `apply` (P-33 item 3); melhor esforço, o commit já valeu
+    let _ = sync_parents(planned);
 }
 
 /// Remove as pastas que a remoção de `dest` esvaziou, de baixo para cima, nunca a raiz. Cada uma
@@ -440,6 +459,28 @@ mod tests {
             from_sha: from.map(sha),
             to: None,
         }
+    }
+
+    /// P-33 item 3: o `commit` só devolve Ok depois de sincronizar cada pasta mexida, uma vez por
+    /// pasta (o marcador `committed` é gravado em seguida). Queda de energia não é testável; que
+    /// a chamada existe e é por pasta distinta, sim.
+    #[test]
+    fn commit_syncs_each_touched_folder_once_before_returning() {
+        let dir = TempDir::new();
+        let root = dir.path();
+        let mut log = Vec::new();
+        let mut all = Vec::new();
+        for (n, name) in ["a.md", "sub/b.md", "sub/c.md"].into_iter().enumerate() {
+            let mut p = planned(Kind::Create, root, name, None);
+            p.n = n;
+            stage(&mut log, &p, b"novo").unwrap();
+            all.push(p);
+        }
+        let before = crate::dirfd::probe::syncs();
+        commit(&mut log, &all).unwrap();
+        // a raiz e `sub`: duas pastas, três arquivos
+        assert_eq!(crate::dirfd::probe::syncs() - before, 2);
+        assert_eq!(fs::read(root.join("sub/c.md")).unwrap(), b"novo");
     }
 
     /// A segunda conferência: o arquivo foi editado **depois** do `plan` e **antes** do

@@ -13,6 +13,24 @@ use std::io::{self, Read};
 
 pub(crate) use imp::Folder;
 
+/// Conta os `Folder::sync` desta thread, só nos testes: queda de energia não é testável, mas
+/// "o `commit` sincronizou cada pasta" é.
+#[cfg(test)]
+pub(crate) mod probe {
+    use std::cell::Cell;
+    thread_local!(static SYNCS: Cell<usize> = const { Cell::new(0) });
+    pub(crate) fn count_sync() {
+        SYNCS.with(|c| c.set(c.get() + 1));
+    }
+    pub(crate) fn syncs() -> usize {
+        SYNCS.with(Cell::get)
+    }
+}
+#[cfg(not(test))]
+mod probe {
+    pub(super) fn count_sync() {}
+}
+
 /// Por que `Folder::open_beneath` não abriu.
 #[derive(Debug)]
 pub(crate) enum OpenError {
@@ -86,6 +104,15 @@ mod imp {
         .union(OFlags::DIRECTORY)
         .union(OFlags::CLOEXEC);
 
+    fn sync_fd(fd: &OwnedFd) -> io::Result<()> {
+        super::probe::count_sync();
+        match fsync(fd) {
+            Ok(()) => Ok(()),
+            Err(e) if e == Errno::INVAL => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// A pasta de partida: segue links (é o que o consumidor escolheu).
     fn open_base(base: &Path) -> Result<OwnedFd, OpenError> {
         openat(CWD, base, DIR, Mode::empty()).map_err(|e| OpenError::Io(e.into()))
@@ -136,7 +163,11 @@ mod imp {
                 fd = match open_subfolder(&fd, name) {
                     Err(OpenError::Io(e)) if e.kind() == io::ErrorKind::NotFound => {
                         match mkdirat(&fd, name, Mode::RWXU) {
-                            Ok(()) => created.push(walk.clone()),
+                            Ok(()) => {
+                                created.push(walk.clone());
+                                // a entrada da pasta nova precisa ser durável no pai (P-33 item 3)
+                                sync_fd(&fd).map_err(OpenError::Io)?;
+                            }
                             // outro processo criou no meio-tempo: reabre e confere abaixo
                             Err(e) if e == Errno::EXIST => {}
                             Err(e) => return Err(OpenError::Io(e.into())),
@@ -178,6 +209,13 @@ mod imp {
             }
             fsync(&self.fd)?;
             Ok(())
+        }
+
+        /// `fsync` da própria pasta: torna duráveis as entradas criadas, renomeadas ou apagadas
+        /// nela (o `fsync` de um arquivo não persiste o nome dele na pasta). `EINVAL` (sistema de
+        /// arquivos que não sincroniza pasta) vale como ok; qualquer outro erro sobe.
+        pub(crate) fn sync(&self) -> io::Result<()> {
+            sync_fd(&self.fd)
         }
 
         /// `rename` dentro desta pasta. Sobrescreve o destino, como o `rename(2)`.
@@ -329,6 +367,12 @@ mod imp {
 
         pub(crate) fn write_atomic(&self, name: &str, bytes: &[u8]) -> io::Result<()> {
             write_atomic(&self.path.join(plain_name(name)?), bytes)
+        }
+
+        /// Fora do Unix não há descritor de pasta para sincronizar: sem efeito.
+        pub(crate) fn sync(&self) -> io::Result<()> {
+            super::probe::count_sync();
+            Ok(())
         }
 
         pub(crate) fn rename(&self, from: &str, to: &str) -> io::Result<()> {
@@ -513,6 +557,18 @@ mod tests {
         let mut again = Vec::new();
         Folder::create_beneath(tmp.path(), Path::new("a/b/c"), &mut again).unwrap();
         assert!(again.is_empty());
+    }
+
+    #[test]
+    fn sync_works_on_an_opened_folder_and_create_beneath_syncs_each_parent() {
+        let tmp = TempDir::new();
+        let folder = Folder::open_beneath(tmp.path(), Path::new("")).unwrap();
+        folder.sync().unwrap();
+        let before = probe::syncs();
+        let mut created = Vec::new();
+        Folder::create_beneath(tmp.path(), Path::new("a/b"), &mut created).unwrap();
+        // duas pastas criadas, o pai de cada uma sincronizado
+        assert_eq!(probe::syncs() - before, 2);
     }
 
     #[test]
