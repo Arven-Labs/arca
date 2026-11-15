@@ -949,7 +949,7 @@ impl<S: BlobStore> Engine<S> {
             Ok(())
         })
         .await?;
-        self.remember_after(to).await?;
+        self.remember(to).await?;
         Ok(applied)
     }
 
