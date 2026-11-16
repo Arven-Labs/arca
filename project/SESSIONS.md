@@ -2,13 +2,20 @@
 
 Mais recente no topo.
 
+### 2026-11-16 — Sessão 93 (conferir o que a Sessão 92 deixou como "Fica" no Warden)
+
+- **Pedido**: Warden PR 2 (bump do `rev` e `engine_failure` para `Busy`). Ao ler o código, já estava feito: [Warden#154](https://github.com/Arven-Labs/warden/pull/154), mesclado em 2026-11-15, `rev = 1d8c38e` (o do arca#130) nos dois `Cargo.toml`, `engine_failure` com texto próprio para `Busy` e `StateNotSaved` e dois testes unitários em `arca_sync.rs`.
+- **Conferido (só leitura de código, nada rodado)**: o Warden liga `with_state` em `arca_engine()` (`arca_sync.rs:522`), então o P-31 (5) é só limite aceito do lado da arca; o desktop mostra `secret_skipped`, `secret_ignored` e `recovered_kept` (`SyncPayload` e `arcaMode.ts`), a tela não foi renderizada.
+- **Feito**: só documentação. `PENDING.md` (P-31 5 e P-36) e a linha "Fica" da Sessão 92 corrigidas. Nenhum código mudou.
+- **Fica**: variante `Arca` no `backend` do relatório e `/arca on`/`/arca sync` no CLI (Warden, P183); P-29 (2) a (7), P-30 (2) a (6); P-09, P-22, P-25, P-26, P-32 a P-36.
+
 ### 2026-11-15 — Sessão 92 (a mensagem do `Busy` cobre o estado do dispositivo)
 
 - **Pedido**: preparar o Warden para o `Busy` (P-31 4). Plan mode; ao ler o código do Warden achei que o `sync_lock` dele já serializa os ciclos, então a mudança do lado do arca é só o texto. Decisão sua: corrigir a mensagem aqui, num PR pequeno separado, antes do bump do `rev` do Warden.
 - **Feito ([arca#130](https://github.com/Arven-Labs/arca/pull/130))**: `EngineError::Busy` passa de "another apply or recover is using one of the folders; try again later" (impreciso desde o P-31 4: `Busy` também vem do estado, em `snapshot` e `merge`) para "another operation is using the folders or the device state; try again later". Só texto e doc; nenhum comportamento mudou.
 - **Testes (CI)**: **vermelho antes**: commit só com o teste (run 43769997087: 1 falhou, 539 passaram; o `a_snapshot_is_busy_...` ganhou a conferência de que a mensagem cita o estado do dispositivo e não vaza o caminho). Verde: run 43770279027, 540 testes. Quebra de propósito (arca#131, fechado, branch apagada): o texto antigo derrubou só esse teste (run 43770295000).
 - **Não verificado**: nada além do texto; nada rodado localmente além de `cargo fmt --check`.
-- **Fica**: Warden, PR 2 (`rev` novo e `engine_failure` para `Busy` e `StateNotSaved`); P-31 (5); P-29 (2) a (7), P-30 (2) a (6); P-09, P-22, P-25, P-26, P-32 a P-36.
+- **Fica**: ~~Warden, PR 2 (`rev` novo e `engine_failure` para `Busy` e `StateNotSaved`)~~ (feito no [Warden#154](https://github.com/Arven-Labs/warden/pull/154), mesclado em 2026-11-15; confirmado em 2026-11-16); P-31 (5) (só limites aceitos; o Warden liga o `with_state`); P-29 (2) a (7), P-30 (2) a (6); P-09, P-22, P-25, P-26, P-32 a P-36.
 
 ### 2026-11-15 — Sessão 91 (P-31 (4): trava do arquivo de estado entre processos)
 
