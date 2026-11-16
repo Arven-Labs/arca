@@ -2,8 +2,9 @@
 //! e regra de conflito por arquivo, em três vias. Funções puras: não leem nem gravam nada.
 
 use crate::error::Error;
-use crate::manifest::{validate_path, Class, FileEntry, Manifest};
+use crate::manifest::{validate_path, Class, FileEntry, Manifest, MAX_COMPONENT_BYTES};
 use crate::object::ObjectId;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// Ancestral comum mais próximo de `a` e `b` no grafo (`base_version` e `merged_from`).
@@ -201,16 +202,11 @@ pub fn merge_files(base: &[FileEntry], left: Side, right: Side) -> Result<Merged
         } else {
             left.manifest.created_at
         };
-        let stem = format!(
-            "{}.conflito-{}-{}",
-            conflict.path,
-            conflict.loser_device,
-            utc_stamp(loser_at)
-        );
-        let mut candidate = format!("{stem}.md");
+        let stamp = utc_stamp(loser_at);
+        let mut candidate = copy_path(&conflict.path, &conflict.loser_device, &stamp, None);
         let mut n = 2;
         while taken.contains(&(Class::Vault, candidate.to_lowercase())) {
-            candidate = format!("{stem}-{n}.md");
+            candidate = copy_path(&conflict.path, &conflict.loser_device, &stamp, Some(n));
             n += 1;
         }
         validate_path(&candidate)?;
@@ -225,6 +221,37 @@ pub fn merge_files(base: &[FileEntry], left: Side, right: Side) -> Result<Merged
     files.extend(copies);
     files.sort_by(|a, b| (a.class, &a.path).cmp(&(b.class, &b.path)));
     Ok(Merged { files, conflicts })
+}
+
+/// Caminho da cópia do perdedor: `<path>.conflito-<dispositivo>-<data>[-<n>].md`.
+///
+/// Se o último componente estoura `MAX_COMPONENT_BYTES` (P-26), o nome original é cortado numa
+/// fronteira de caractere e ganha `~<8 hex do sha256 do path completo>` antes do sufixo, que
+/// fica inteiro. O hash é do caminho original (não do conteúdo) para o nome ser o mesmo em
+/// qualquer dispositivo que funda o mesmo par (ADR 0014) e para dois nomes longos que só diferem
+/// no trecho cortado não colidirem. Quando cabe, o nome é o de sempre. A pasta não muda: um
+/// caminho inteiro acima de `MAX_PATH_BYTES` segue recusado por `validate_path`.
+fn copy_path(path: &str, device: &str, stamp: &str, n: Option<usize>) -> String {
+    let tail = match n {
+        None => format!(".conflito-{device}-{stamp}.md"),
+        Some(n) => format!(".conflito-{device}-{stamp}-{n}.md"),
+    };
+    let (dir, name) = path
+        .rsplit_once('/')
+        .map_or(("", path), |(d, f)| (&path[..=d.len()], f));
+    if name.len() + tail.len() <= MAX_COMPONENT_BYTES {
+        return format!("{dir}{name}{tail}");
+    }
+    let digest = Sha256::digest(path.as_bytes());
+    let hash: String = digest[..4].iter().map(|b| format!("{b:02x}")).collect();
+    // sobra para o nome: o componente menos o sufixo, o `~` e os 8 hex
+    let mut cut = MAX_COMPONENT_BYTES
+        .saturating_sub(tail.len() + 1 + hash.len())
+        .min(name.len());
+    while !name.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{dir}{}~{hash}{tail}", &name[..cut])
 }
 
 /// `AAAAMMDDTHHMMSSZ` em UTC a partir de segundos Unix (calendário gregoriano proléptico,
