@@ -239,7 +239,7 @@ fn copy_path(path: &str, device: &str, stamp: &str, n: Option<usize>) -> String 
     let (dir, name) = path
         .rsplit_once('/')
         .map_or(("", path), |(d, f)| (&path[..=d.len()], f));
-    if name.len() + tail.len() <= MAX_COMPONENT_BYTES {
+    if name.len() + tail.len() < MAX_COMPONENT_BYTES {
         return format!("{dir}{name}{tail}");
     }
     let digest = Sha256::digest(path.as_bytes());
