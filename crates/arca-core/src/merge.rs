@@ -624,8 +624,14 @@ mod tests {
             .filter_map(|c| c.copy_path.clone())
             .collect();
         assert_eq!(copies.len(), 2);
-        assert_ne!(copies[0], copies[1]);
         assert!(copies.iter().all(|c| c.len() <= 255));
+        // a distinção vem do hash do caminho, não do `-2` do laço de nomes ocupados
+        assert!(copies.iter().all(|c| !c.ends_with("-2.md")), "{copies:?}");
+        let hash_of = |c: &str| {
+            let (stem, _) = c.split_once(".conflito-").unwrap();
+            stem.rsplit('~').next().unwrap().to_string()
+        };
+        assert_ne!(hash_of(&copies[0]), hash_of(&copies[1]));
     }
 
     #[test]
