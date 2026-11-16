@@ -2,6 +2,15 @@
 
 Mais recente no topo.
 
+### 2026-11-16 — Sessão 94 (P-31 (2): adiado até o S3)
+
+- **Pedido**: "vamos de p31". Dos itens, só o (2) estava aberto e acionável. Plan mode.
+- **Achado (leitura de código, nada rodado)**: o falso `Rollback` existe na lógica (`Engine::load` monta o grafo só do `list`; `descends_in` só reconhece a gêmea com o aceito no grafo), mas `Disk` e `Hub` declaram `consistent_list: true`, não há S3 no crate e o engine nem consulta o campo. Nenhum caminho real dispara. Não há teste do cenário.
+- **Decisão sua**: adiar para a Fase 3 (descartadas: impressão da fusão no estado v2; releitura do `list`).
+- **Feito**: só documentação. `PENDING.md` (P-31 2 com gatilho e soluções) e `SPEC-TECNICA.md` (texto "decidir com o 2b" atualizado). Nenhum código mudou.
+- **Não verificado**: que o hub é de fato consistente (declara por contrato).
+- **Fica**: P-31 (1) (Fase 4); P-29 (2) a (7), P-30 (2) a (6); P-09, P-22, P-25, P-26, P-32 a P-36. Warden: variante `Arca` no relatório e `/arca on`/`/arca sync` (P183).
+
 ### 2026-11-16 — Sessão 93 (conferir o que a Sessão 92 deixou como "Fica" no Warden)
 
 - **Pedido**: Warden PR 2 (bump do `rev` e `engine_failure` para `Busy`). Ao ler o código, já estava feito: [Warden#154](https://github.com/Arven-Labs/warden/pull/154), mesclado em 2026-11-15, `rev = 1d8c38e` (o do arca#130) nos dois `Cargo.toml`, `engine_failure` com texto próprio para `Busy` e `StateNotSaved` e dois testes unitários em `arca_sync.rs`.
