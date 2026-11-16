@@ -2538,9 +2538,10 @@ mod tests {
         assert_eq!(d.rig.count(ObjectKind::Manifest).await, 3);
     }
 
-    /// P-26: o nome da cópia não cabe num componente de caminho. Erro claro, nada gravado.
+    /// P-26: o nome da cópia não cabe num componente de caminho: a cópia sai com o nome
+    /// encurtado e a fusão não trava.
     #[tokio::test]
-    async fn a_conflict_copy_name_that_does_not_fit_is_an_error_and_writes_nothing() {
+    async fn a_conflict_copy_name_that_does_not_fit_is_shortened_and_the_merge_goes_through() {
         let name = format!("{}.md", "n".repeat(250));
         let d = diverge(
             &[(name.as_str(), b"1")],
@@ -2550,11 +2551,21 @@ mod tests {
             ],
         )
         .await;
-        assert_eq!(
-            d.rig.engine("pc").merge(30).await,
-            Err(EngineError::ConflictCopyName)
-        );
-        assert_eq!(d.rig.count(ObjectKind::Manifest).await, 3);
+        let MergeOutcome::Merged {
+            manifest,
+            conflicts,
+            tips_after,
+            ..
+        } = d.rig.engine("pc").merge(30).await.unwrap()
+        else {
+            panic!("esperava Merged");
+        };
+        assert_eq!(tips_after, 1);
+        assert_eq!(d.rig.count(ObjectKind::Manifest).await, 4);
+        let copy = conflicts[0].copy_path.clone().expect("copy_path");
+        assert!(copy.len() <= 255 && copy.contains('~'), "{copy}");
+        assert_eq!(manifest.files.len(), 2);
+        assert!(manifest.files.iter().any(|f| f.path == copy));
     }
 
     #[test]

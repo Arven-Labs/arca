@@ -519,14 +519,128 @@ mod tests {
         assert_eq!(m.files.len(), 4);
     }
 
+    /// Funde um conflito `BothEdited` em `name` (o perdedor é `pa`, de `created_at` menor) e
+    /// devolve o caminho da cópia.
+    fn copy_of(name: &str, loser_device: &str) -> String {
+        let m = run(
+            &[v(name, 1)],
+            (loser_device, 10, vec![v(name, 2)]),
+            ("pb", 20, vec![v(name, 3)]),
+        );
+        assert_eq!(m.conflicts.len(), 1);
+        let copy = m.conflicts[0].copy_path.clone().expect("copy_path");
+        assert!(m.files.iter().any(|f| f.path == copy && f.sha256 == h(2)));
+        validate_path(&copy).unwrap();
+        copy
+    }
+
+    fn last_component(path: &str) -> &str {
+        path.rsplit('/').next().unwrap()
+    }
+
+    // P-26: o nome da cópia não cabe num componente (255 bytes): encurta e acrescenta hash.
+
     #[test]
-    fn a_copy_name_too_long_for_a_path_component_is_an_error_not_a_lost_file() {
-        let long = "n".repeat(250);
-        let name = format!("{long}.md");
+    fn a_long_name_gets_a_copy_that_fits_in_a_component() {
+        let name = format!("{}.md", "n".repeat(250));
+        let copy = copy_of(&name, "pa");
+        let component = last_component(&copy);
+        assert!(component.len() <= 255, "{}", component.len());
+        assert!(
+            component.ends_with(".conflito-pa-19700101T000010Z.md"),
+            "{copy}"
+        );
+        let (prefix, _) = component.split_once(".conflito-").unwrap();
+        let (kept, hash) = prefix.rsplit_once('~').expect("~<hash>");
+        assert!(kept.starts_with("nnnn") && kept.len() > 100, "{kept}");
+        assert!(
+            hash.len() == 8 && hash.bytes().all(|b| b.is_ascii_hexdigit()),
+            "{hash}"
+        );
+    }
+
+    #[test]
+    fn a_short_name_keeps_the_copy_name_it_always_had() {
+        assert_eq!(
+            copy_of("a.md", "pa"),
+            "a.md.conflito-pa-19700101T000010Z.md"
+        );
+        assert_eq!(
+            copy_of("notas/x.md", "pa"),
+            "notas/x.md.conflito-pa-19700101T000010Z.md"
+        );
+    }
+
+    #[test]
+    fn a_name_that_exactly_fits_is_not_shortened() {
+        // 10 (`.conflito-`) + 2 + 1 + 16 + 3 (`.md`) = 32 bytes de sufixo
+        let name = format!("{}.md", "n".repeat(255 - 32 - 3));
+        let copy = copy_of(&name, "pa");
+        assert_eq!(copy.len(), 255);
+        assert_eq!(copy, format!("{name}.conflito-pa-19700101T000010Z.md"));
+    }
+
+    #[test]
+    fn two_long_names_that_differ_only_at_the_end_get_different_copies() {
+        let (a, b) = (
+            format!("{}1.md", "x".repeat(250)),
+            format!("{}2.md", "x".repeat(250)),
+        );
+        let m = run(
+            &[v(&a, 1), v(&b, 1)],
+            ("pa", 10, vec![v(&a, 2), v(&b, 2)]),
+            ("pb", 20, vec![v(&a, 3), v(&b, 3)]),
+        );
+        let copies: Vec<_> = m
+            .conflicts
+            .iter()
+            .filter_map(|c| c.copy_path.clone())
+            .collect();
+        assert_eq!(copies.len(), 2);
+        assert_ne!(copies[0], copies[1]);
+        assert!(copies.iter().all(|c| c.len() <= 255));
+    }
+
+    #[test]
+    fn the_cut_never_splits_a_multibyte_character_and_keeps_the_directory() {
+        // `é` tem 2 bytes: o corte cai ora numa fronteira, ora no meio de um caractere
+        for extra in ["", "a"] {
+            let name = format!("{extra}{}.md", "é".repeat(125));
+            let copy = copy_of(&format!("notas/{name}"), "pa");
+            assert!(copy.starts_with("notas/"), "{copy}");
+            assert!(last_component(&copy).len() <= 255);
+        }
+    }
+
+    #[test]
+    fn a_taken_name_with_a_suffix_still_fits_with_the_longest_device() {
+        let device = "d".repeat(64);
+        // sem `-n` a cópia cabe em exatos 255 bytes; o `-2` estouraria
+        let name = format!("{}.md", "n".repeat(255 - (10 + 64 + 1 + 16 + 3) - 3));
+        let first = format!("{name}.conflito-{device}-19700101T000010Z.md");
+        assert_eq!(first.len(), 255);
+        let m = run(
+            &[v(&name, 1), v(&first, 7)],
+            (device.as_str(), 10, vec![v(&name, 2), v(&first, 7)]),
+            ("pb", 20, vec![v(&name, 3), v(&first, 7)]),
+        );
+        let copy = m.conflicts[0].copy_path.clone().unwrap();
+        assert_ne!(copy, first);
+        assert!(copy.len() <= 255, "{}", copy.len());
+        assert!(copy.ends_with("-2.md"), "{copy}");
+        assert_eq!(m.files.len(), 3);
+    }
+
+    #[test]
+    fn a_whole_path_over_the_limit_is_still_an_error_not_a_lost_file() {
+        // o componente cabe; é o caminho inteiro que passa de 4096 com o sufixo
+        let dir = vec!["d".repeat(203); 20].join("/");
+        let name = format!("{dir}/a.md");
+        assert!(name.len() <= 4096);
         let result = try_run(
             &[v(&name, 1)],
-            ("pa", 20, vec![v(&name, 2)]),
-            ("pb", 10, vec![v(&name, 3)]),
+            ("pa", 10, vec![v(&name, 2)]),
+            ("pb", 20, vec![v(&name, 3)]),
         );
         assert!(matches!(result, Err(Error::InvalidPath(_))), "{result:?}");
     }
