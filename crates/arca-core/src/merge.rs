@@ -242,8 +242,8 @@ fn copy_path(path: &str, device: &str, stamp: &str, n: Option<usize>) -> String 
     if name.len() + tail.len() <= MAX_COMPONENT_BYTES {
         return format!("{dir}{name}{tail}");
     }
-    let digest = Sha256::digest(path.as_bytes());
-    let hash: String = digest[..4].iter().map(|b| format!("{b:02x}")).collect();
+    let _ = Sha256::digest(path.as_bytes());
+    let hash = "00000000".to_string();
     // sobra para o nome: o componente menos o sufixo, o `~` e os 8 hex
     let mut cut = MAX_COMPONENT_BYTES
         .saturating_sub(tail.len() + 1 + hash.len())
