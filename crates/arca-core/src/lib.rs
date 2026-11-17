@@ -25,6 +25,8 @@ pub mod recovery;
 pub mod replicate;
 #[cfg(feature = "s3")]
 pub mod s3;
+#[cfg(all(test, feature = "s3"))]
+mod s3_e2e;
 pub mod scan;
 pub mod server;
 pub mod state;
