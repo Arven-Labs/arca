@@ -535,7 +535,7 @@ impl<S: BlobStore> Engine<S> {
     /// local. `Ok` com `manifests_withheld` não é sucesso (um blob local não pôde ser lido).
     /// O caminho inverso é `pull`.
     pub async fn push<R: BlobStore>(&self, remote: &R) -> Result<ReplicateReport, StoreError> {
-        replicate(&self.store, remote).await
+        replicate_filtered(&self.store, remote, |_| false).await
     }
 
     /// Os conflitos das fusões que `to` alcança e `from` (o manifest que a pasta reflete; `None`
