@@ -10,8 +10,8 @@
 //! hash do texto claro). Relatórios e erros só trazem ids, nunca caminho ou nome de arquivo.
 
 use super::{Engine, EngineError};
-use crate::object::{ObjectId, ObjectKind};
-use crate::store::{BlobStore, StoreError};
+use crate::object::ObjectId;
+use crate::store::BlobStore;
 
 /// Quanto custa e o que prova uma rodada de `verify`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,7 +85,8 @@ mod tests {
     use crate::disk::DiskStore;
     use crate::engine::{Roots, Snapshot};
     use crate::envelope::{Alg, Header, NONCE_LEN};
-    use crate::store::Capabilities;
+    use crate::object::ObjectKind;
+    use crate::store::{Capabilities, StoreError};
     use crate::testutil::TempDir;
     use crate::FORMAT_VERSION;
     use std::fs;
