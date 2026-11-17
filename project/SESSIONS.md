@@ -2,6 +2,15 @@
 
 Mais recente no topo.
 
+### 2026-11-17 — Sessão 100 (Fase 3, fatia 2: push, pull e restauração direto do S3, provados no Garage)
+
+- **Pedido**: "vamos continuar no resto da fase 3". Plan mode. Decisões suas: fatia 2 = só provar o round-trip (descartados: `verify` já; fatias 2 e 3 juntas); `verify` fica para a fatia 3; isolamento por **1 bucket novo por cenário no CI** (descartados: campo `prefix` no `S3Config`; só push/pull sem `Engine<S3Store>`).
+- **Achado que o plano não trazia**: o job `s3-garage` tinha 1 bucket só, cheio do lixo de `s3.rs` (blobs sem envelope, 1100 manifests falsos). `Engine<S3Store>` direto nele leria o lixo como `rejected`. Daí os buckets `arca-e2e-1..3` e as variáveis `ARCA_S3_TEST_BUCKET_E2E_<n>`.
+- **Feito ([arca#151](https://github.com/Arven-Labs/arca/pull/151))**: só testes e CI, **nenhuma linha de produção**. `s3_e2e.rs` (3 cenários `real_s3_*`): (1) `push` idempotente, `pull` para disco vazio e `restore` byte a byte, com arquivo vazio e de 5 MB; (2) `Engine<S3Store>` sem disco local (`heads`, `restore`, `apply`, `merge`, dois `snapshot` com `with_state` e `consistent_list: false`); (3) `pull` com manifest forjado e blob corrompido plantados no bucket.
+- **Testes (CI)**: **passaram de primeira** (nenhum defeito achado; era o esperado, o código já era genérico em `BlobStore`): 8 `real_s3_*` no Garage real, `rust`, `msrv` e `audit` verdes. **Quebras de propósito** (arca#152 a #154, fechados): `push` sem gravar manifests derrubou os 3 cenários; `pull` sem o filtro derrubou o 3; `replicate` ignorando o que o destino já tem derrubou o 1 (o 2º `push` copia 0).
+- **Não verificado**: o `list` **atrasado de verdade**. O Garage lista o que acabou de gravar, então o cenário 2 não consegue provocar o atraso; esse mecanismo continua coberto só pelo espião `LaggedList` (e a quebra do `with_accepted` não seria pega pelo Garage, por isso troquei a quebra 3). B2/Storj reais, HTTPS real, Android. Nada rodado localmente além de `cargo fmt --check`.
+- **Fica**: verificação periódica de integridade e teste de restauração (fatia 3, a forma do `verify` se decide lá), retenção (P-05), integração no Warden (P-38); P-31 (1), P-29, P-30, P-09, P-22, P-25, P-32 a P-36. Warden: subir o `rev` do `arca-core` (de `1d8c38e`).
+
 ### 2026-11-17 — Sessão 99 (P-31 (2): `list` atrasado não dá mais `Rollback` falso)
 
 - **Pedido**: "p31 2". Plan mode. Decisões suas: ler o aceito **pelo id** (descartados: reler o `list` com espera; impressão da fusão no estado v2) e **para todos os backends**, sem consultar `capabilities()`.
