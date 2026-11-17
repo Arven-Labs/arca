@@ -166,7 +166,8 @@ impl S3Store {
 
 /// A chave do objeto: `<tipo>/<hex>`.
 fn path_of(id: &ObjectId) -> Path {
-    Path::from(id.to_string().as_str())
+    let name = id.to_string();
+    Path::from(name.split_once('/').map_or(name.as_str(), |(_, hex)| hex))
 }
 
 fn unavailable(kind: io::ErrorKind) -> StoreError {
