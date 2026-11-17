@@ -9,9 +9,10 @@
 //! `verified_get` (os bytes cifrados têm o hash do id) e `plain_blob` (tag de autenticação e
 //! hash do texto claro). Relatórios e erros só trazem ids, nunca caminho ou nome de arquivo.
 
-use super::{Engine, EngineError};
-use crate::object::ObjectId;
-use crate::store::BlobStore;
+use super::{Engine, EngineError, Loaded};
+use crate::object::{ObjectId, ObjectKind};
+use crate::store::{verified_get, BlobStore, StoreError};
+use std::collections::{BTreeSet, HashSet};
 
 /// Quanto custa e o que prova uma rodada de `verify`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,30 +64,98 @@ impl<S: BlobStore> Engine<S> {
     /// Ver `VerifyMode`. `Unavailable` ao listar ou abrir os manifests é `Err` (tentar de
     /// novo); numa checagem de blob vira `unreadable` e a rodada segue.
     pub async fn verify(&self, mode: VerifyMode) -> Result<VerifyReport, EngineError> {
-        let _ = mode;
-        unimplemented!("verify")
+        let Loaded {
+            readable, rejected, ..
+        } = self.load().await?;
+        let mut report = VerifyReport {
+            manifests_ok: readable.len(),
+            rejected: rejected.iter().map(|r| r.id).collect(),
+            ..VerifyReport::default()
+        };
+
+        // os blobs distintos de todo o histórico, em ordem por hash (a ordem da janela)
+        let referenced: BTreeSet<[u8; 32]> = readable
+            .iter()
+            .flat_map(|(_, manifest)| manifest.files.iter().map(|entry| entry.blob.0))
+            .collect();
+        let blobs: Vec<ObjectId> = referenced
+            .into_iter()
+            .map(|hash| ObjectId {
+                kind: ObjectKind::Blob,
+                hash,
+            })
+            .collect();
+        report.referenced_blobs = blobs.len();
+
+        let mut present = HashSet::with_capacity(blobs.len());
+        for id in &blobs {
+            match self.store.has(id).await {
+                Ok(true) => {
+                    present.insert(*id);
+                }
+                Ok(false) => report.missing.push(*id),
+                Err(StoreError::Unavailable(_)) => report.unreadable.push(*id),
+                Err(e) => return Err(e.into()),
+            }
+        }
+
+        if let VerifyMode::Sample { max_blobs, offset } = mode {
+            if !blobs.is_empty() {
+                let start = offset % blobs.len();
+                let end = start.saturating_add(max_blobs).min(blobs.len());
+                report.sampled = end - start;
+                report.next_offset = end % blobs.len();
+                for id in &blobs[start..end] {
+                    // o que já falhou na presença não é lido de novo
+                    if !present.contains(id) {
+                        continue;
+                    }
+                    match verified_get(&self.store, id).await {
+                        Ok(Some(_)) => {}
+                        Ok(None) => report.missing.push(*id),
+                        Err(StoreError::Corrupt) => report.corrupt.push(*id),
+                        Err(StoreError::Unavailable(_)) => report.unreadable.push(*id),
+                        Err(e) => return Err(e.into()),
+                    }
+                }
+            }
+        }
+
+        report.clean = report.rejected.is_empty()
+            && report.missing.is_empty()
+            && report.corrupt.is_empty()
+            && report.unreadable.is_empty();
+        Ok(report)
     }
 
     /// Baixa, decifra e confere o texto claro de cada entrada de `id`, um blob por vez e sem
     /// escrever em disco. Baixa o Vault inteiro (egress do provedor): uso raro. O primeiro erro
     /// aborta (`MissingObject`, `Store(Corrupt)`, `Integrity`).
     pub async fn verify_restore(&self, id: &ObjectId) -> Result<RestoreCheck, EngineError> {
-        let _ = id;
-        unimplemented!("verify_restore")
+        let manifest = self.read_manifest(id).await?;
+        let mut check = RestoreCheck { files: 0, bytes: 0 };
+        for entry in &manifest.files {
+            if !self.accepts(entry) {
+                continue;
+            }
+            // o texto claro vive só nesta volta do laço e é zerado ao sair (`Zeroizing`)
+            let plain = self.plain_blob(entry).await?;
+            check.files += 1;
+            check.bytes += plain.len() as u64;
+        }
+        Ok(check)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::Loaded;
     use super::*;
     use crate::backend::Backend;
     use crate::crypto::{EpochKeys, VaultKey};
     use crate::disk::DiskStore;
     use crate::engine::{Roots, Snapshot};
     use crate::envelope::{Alg, Header, NONCE_LEN};
-    use crate::object::ObjectKind;
-    use crate::store::{Capabilities, StoreError};
+    use crate::store::Capabilities;
     use crate::testutil::TempDir;
     use crate::FORMAT_VERSION;
     use std::fs;
