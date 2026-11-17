@@ -1,0 +1,12 @@
+# Configuração do `cargo audit` (o job `audit` roda `cargo audit --deny warnings`).
+#
+# Ignorados de propósito, decisão do dono em 2026-11-17 (Fase 3, fatia 1, S3):
+# o `object_store` =0.14.2 (feature `s3`, ADR 0008) puxa `chrono` e `humantime`, que o RustSec
+# marcou como SEM MANUTENÇÃO em 2026-09-14. Não são vulnerabilidades. Só estes dois IDs: qualquer
+# outro aviso continua derrubando o `audit`.
+# Rever quando o `object_store` trocar essas crates ou ao subir a versão dele (P-15), e na Fase 4.
+[advisories]
+ignore = [
+    "RUSTSEC-2026-0542", # humantime is unmaintained
+    "RUSTSEC-2026-0543", # chrono is unmaintained
+]

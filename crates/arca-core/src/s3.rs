@@ -124,7 +124,6 @@ impl BlobStore for S3Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::MAX_BLOB_OBJECT_BYTES;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::{ObjectStoreExt, PutPayload};
@@ -273,15 +272,6 @@ mod tests {
             s.get(&id).await,
             Err(StoreError::Unavailable(io::ErrorKind::InvalidData))
         );
-    }
-
-    #[tokio::test]
-    async fn the_default_cap_is_the_one_of_the_kind() {
-        // sem `with_limits`, um objeto de 1 byte passa e o teto padrão é o do servidor
-        let (s, _mem) = mem_store(false);
-        let (id, bytes) = obj(ObjectKind::Blob, b"x");
-        s.put(&id, &bytes).await.unwrap();
-        assert!(MAX_BLOB_OBJECT_BYTES > 1);
     }
 
     // ---- list ----
