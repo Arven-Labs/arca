@@ -2,6 +2,9 @@
 //! do zero** (`SPEC-TECNICA.md` §6, "Envio" e "Recebimento", sem a parte de rede). Sync entre
 //! dispositivos, junção de pontas e regra de conflito são da Fase 2.
 
+mod verify;
+pub use verify::{RestoreCheck, VerifyMode, VerifyReport};
+
 use crate::apply::{
     commit, finish, is_reserved_name, lock_roots, missing_dirs, plan, stage, undo_all, Item, Kind,
     Planned, Undo,

@@ -9,11 +9,11 @@
 use crate::backend::Backend;
 use crate::crypto::{EpochKeys, VaultKey};
 use crate::disk::DiskStore;
-use crate::engine::{Engine, MergeOutcome, Roots, Snapshot};
+use crate::engine::{Engine, EngineError, MergeOutcome, Roots, Snapshot, VerifyMode};
 use crate::envelope::{Alg, Header, NONCE_LEN};
 use crate::object::{ObjectId, ObjectKind};
 use crate::s3::{S3Config, S3Store};
-use crate::store::BlobStore;
+use crate::store::{BlobStore, StoreError};
 use crate::testutil::TempDir;
 use crate::FORMAT_VERSION;
 use object_store::aws::AmazonS3Builder;
@@ -181,6 +181,36 @@ async fn real_s3_push_pull_and_restore_round_trip() {
     assert_eq!(b.restore(&tip, &roots_b).await.unwrap().files, 5);
     assert_eq!(tree(&vault_b), tree(&vault_a));
     assert_eq!(tree(&config_b), tree(&config_a));
+
+    // Fase 3, fatia 3: `verify` e `verify_restore` direto no bucket. Por último, porque o
+    // blob de 5 MB é sobrescrito (este bucket não é reusado por outro cenário).
+    let checker = Engine::new(s3.clone(), keys(), "v").unwrap();
+    let presence = checker.verify(VerifyMode::Presence).await.unwrap();
+    assert!(presence.clean, "{presence:?}");
+    assert_eq!(presence.referenced_blobs, 5);
+    let sample = VerifyMode::Sample {
+        max_blobs: 100,
+        offset: 0,
+    };
+    let healthy = checker.verify(sample).await.unwrap();
+    assert!(healthy.clean && healthy.sampled == 5, "{healthy:?}");
+    assert_eq!(checker.verify_restore(&id).await.unwrap().files, 5);
+
+    let mut big = None;
+    for blob in s3.list(ObjectKind::Blob).await.unwrap() {
+        if s3.get(&blob).await.unwrap().unwrap().len() > 5 * 1024 * 1024 {
+            big = Some(blob);
+        }
+    }
+    let big = big.expect("o blob de 5 MB não está no bucket");
+    raw_put(&cfg, &big.to_string(), b"adulterado").await;
+    let broken = checker.verify(sample).await.unwrap();
+    assert_eq!(broken.corrupt, vec![big]);
+    assert!(!broken.clean);
+    assert!(matches!(
+        checker.verify_restore(&id).await,
+        Err(EngineError::Store(StoreError::Corrupt))
+    ));
 }
 
 /// Cenário 2: um `Engine<S3Store>` sem disco local acha a ponta e restaura direto do bucket, e
