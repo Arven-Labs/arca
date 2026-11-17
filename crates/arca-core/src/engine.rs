@@ -3208,6 +3208,373 @@ mod tests {
         assert_eq!(saved(&path), Some(accepted(&s2, 1)));
     }
 
+    // ---------- `list` atrasado (P-31 item 2) ----------
+
+    /// Backend de `list` atrasado, como um S3-compatível de listagem eventual: `put` e `get`
+    /// são fiéis, mas o `list` de manifests não mostra o que está em `hidden` (ou nada, com
+    /// `list_empty`). Declara `consistent_list: false`. Também simula o backend que perdeu o
+    /// objeto de verdade (`gone`), o hostil (`forged`) e o fora do ar (`failing`), e conta os
+    /// `get` de manifest por hash.
+    #[derive(Clone)]
+    struct LaggedList {
+        inner: Backend,
+        script: std::sync::Arc<std::sync::Mutex<LagScript>>,
+    }
+
+    #[derive(Default)]
+    struct LagScript {
+        hidden: Vec<[u8; 32]>,
+        list_empty: bool,
+        gone: Vec<[u8; 32]>,
+        forged: Vec<([u8; 32], Vec<u8>)>,
+        failing: Vec<[u8; 32]>,
+        manifest_gets: Vec<[u8; 32]>,
+    }
+
+    impl LaggedList {
+        fn new(inner: &Backend) -> LaggedList {
+            LaggedList {
+                inner: inner.clone(),
+                script: Default::default(),
+            }
+        }
+
+        /// O `list` não mostra `id` (o `get` continua entregando).
+        fn hide(&self, id: &ObjectId) {
+            self.script.lock().unwrap().hidden.push(id.hash);
+        }
+
+        /// O `list` de manifests volta vazio.
+        fn hide_every_manifest(&self) {
+            self.script.lock().unwrap().list_empty = true;
+        }
+
+        /// O objeto sumiu de verdade: `get` devolve `None` e `has` devolve `false`.
+        fn lose(&self, id: &ObjectId) {
+            self.script.lock().unwrap().gone.push(id.hash);
+        }
+
+        /// O `get` de `id` devolve `bytes` (que não têm o hash do id).
+        fn forge(&self, id: &ObjectId, bytes: &[u8]) {
+            self.script
+                .lock()
+                .unwrap()
+                .forged
+                .push((id.hash, bytes.to_vec()));
+        }
+
+        /// O `get` de `id` falha com `Unavailable`.
+        fn fail_get(&self, id: &ObjectId) {
+            self.script.lock().unwrap().failing.push(id.hash);
+        }
+
+        fn gets_of(&self, id: &ObjectId) -> usize {
+            let script = self.script.lock().unwrap();
+            script
+                .manifest_gets
+                .iter()
+                .filter(|hash| **hash == id.hash)
+                .count()
+        }
+    }
+
+    impl BlobStore for LaggedList {
+        async fn put(&self, id: &ObjectId, bytes: &[u8]) -> Result<(), StoreError> {
+            self.inner.put(id, bytes).await
+        }
+        async fn get(&self, id: &ObjectId) -> Result<Option<Vec<u8>>, StoreError> {
+            {
+                let mut script = self.script.lock().unwrap();
+                if id.kind == ObjectKind::Manifest {
+                    script.manifest_gets.push(id.hash);
+                }
+                if script.failing.contains(&id.hash) {
+                    return Err(StoreError::Unavailable(std::io::ErrorKind::Other));
+                }
+                if script.gone.contains(&id.hash) {
+                    return Ok(None);
+                }
+                if let Some((_, bytes)) = script.forged.iter().find(|(hash, _)| *hash == id.hash) {
+                    return Ok(Some(bytes.clone()));
+                }
+            }
+            self.inner.get(id).await
+        }
+        async fn has(&self, id: &ObjectId) -> Result<bool, StoreError> {
+            if self.script.lock().unwrap().gone.contains(&id.hash) {
+                return Ok(false);
+            }
+            self.inner.has(id).await
+        }
+        async fn list(&self, kind: ObjectKind) -> Result<Vec<ObjectId>, StoreError> {
+            let all = self.inner.list(kind).await?;
+            if kind != ObjectKind::Manifest {
+                return Ok(all);
+            }
+            let script = self.script.lock().unwrap();
+            if script.list_empty {
+                return Ok(Vec::new());
+            }
+            Ok(all
+                .into_iter()
+                .filter(|id| !script.hidden.contains(&id.hash))
+                .collect())
+        }
+        async fn delete(&self, id: &ObjectId) -> Result<(), StoreError> {
+            self.inner.delete(id).await
+        }
+        fn capabilities(&self) -> Capabilities {
+            Capabilities {
+                consistent_list: false,
+            }
+        }
+    }
+
+    /// Engine sobre o `LaggedList`, com a proteção ligada no arquivo `state`.
+    fn lagged(lag: &LaggedList, state: &Path) -> Engine<LaggedList> {
+        Engine::new(lag.clone(), keys(1), "pc")
+            .unwrap()
+            .with_state(state)
+    }
+
+    #[tokio::test]
+    async fn a_list_that_does_not_show_the_accepted_manifest_is_not_a_rollback_for_snapshot() {
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        let path = state_path(&rig);
+        let lag = LaggedList::new(&rig.store);
+        let eng = lagged(&lag, &path);
+        write(&vault, "a.md", b"1");
+        let (s1, ..) = created(eng.snapshot(&vault_only(&vault), 1).await.unwrap());
+        assert_eq!(saved(&path), Some(accepted(&s1, 1)));
+
+        // o `list` ainda não mostra o s1 que acabamos de gravar; o `get` o entrega
+        lag.hide(&s1);
+        assert!(matches!(
+            eng.snapshot(&vault_only(&vault), 2).await,
+            Ok(Snapshot::Unchanged { head, .. }) if head == s1
+        ));
+        assert_eq!(saved(&path), Some(accepted(&s1, 1)));
+        assert_eq!(rig.count(ObjectKind::Manifest).await, 1);
+    }
+
+    #[tokio::test]
+    async fn an_empty_list_with_the_accepted_manifest_in_the_store_is_not_a_rollback() {
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        let path = state_path(&rig);
+        let lag = LaggedList::new(&rig.store);
+        let eng = lagged(&lag, &path);
+        write(&vault, "a.md", b"1");
+        let (s1, ..) = created(eng.snapshot(&vault_only(&vault), 1).await.unwrap());
+
+        lag.hide_every_manifest();
+        assert!(matches!(
+            eng.snapshot(&vault_only(&vault), 2).await,
+            Ok(Snapshot::Unchanged { head, .. }) if head == s1
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_next_snapshot_builds_on_the_accepted_manifest_the_list_did_not_show() {
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        let path = state_path(&rig);
+        let lag = LaggedList::new(&rig.store);
+        let eng = lagged(&lag, &path);
+        write(&vault, "a.md", b"1");
+        let (s1, ..) = created(eng.snapshot(&vault_only(&vault), 1).await.unwrap());
+
+        lag.hide(&s1);
+        write(&vault, "a.md", b"2");
+        let (s2, m2, ..) = created(eng.snapshot(&vault_only(&vault), 2).await.unwrap());
+        // a história continua em linha reta (sem dois ramos) e o estado avança
+        assert_eq!(m2.base_version, Some(Hash32(s1.hash)));
+        assert_eq!(saved(&path), Some(accepted(&s2, 1)));
+    }
+
+    #[tokio::test]
+    async fn a_list_that_does_not_show_the_accepted_manifest_is_not_a_rollback_for_merge() {
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        let path = state_path(&rig);
+        let lag = LaggedList::new(&rig.store);
+        let eng = lagged(&lag, &path);
+        write(&vault, "a.md", b"1");
+        let (s1, ..) = created(eng.snapshot(&vault_only(&vault), 1).await.unwrap());
+
+        lag.hide(&s1);
+        assert_eq!(
+            eng.merge(3).await,
+            Ok(MergeOutcome::Nothing { head: Some(s1) })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_list_that_does_not_show_the_accepted_manifest_is_not_a_rollback_for_apply() {
+        let h = hist().await;
+        let path = state_path(&h.rig);
+        // o aceito é a ponta (v2): ninguém o cita, então só o `get` o mostra
+        accepted(&h.v2, 1).save(&path).unwrap();
+        let lag = LaggedList::new(&h.rig.store);
+        lag.hide(&h.v2);
+        let eng = lagged(&lag, &path);
+
+        eng.apply(Some(&h.v1), &h.v2, &vault_only(&h.target))
+            .await
+            .unwrap();
+        assert_eq!(tree(&h.target), h.v2_tree);
+        assert_eq!(saved(&path), Some(accepted(&h.v2, 1)));
+    }
+
+    /// O cenário do PENDING: dois dispositivos fundiram o mesmo par; a gêmea de menor hash está
+    /// no `list`, a de maior hash (a que este dispositivo aceitou) ainda não.
+    #[tokio::test]
+    async fn a_twin_merge_accepted_but_not_yet_listed_is_not_a_rollback() {
+        let d = diverge(
+            &[("a.md", b"1"), ("b.md", b"1")],
+            vec![
+                ("pa", 10, vec![("a.md", b"A")]),
+                ("pb", 20, vec![("b.md", b"B")]),
+            ],
+        )
+        .await;
+        let other = forked(&d.rig);
+        let merged = |out: MergeOutcome| match out {
+            MergeOutcome::Merged { id, .. } => id,
+            other => panic!("esperava Merged, veio {other:?}"),
+        };
+        let first = merged(d.rig.engine("pa").merge(30).await.unwrap());
+        let second = merged(other.engine("pb").merge(31).await.unwrap());
+        absorb(&d.rig, &other);
+        let (smaller, larger) = if first.hash < second.hash {
+            (first, second)
+        } else {
+            (second, first)
+        };
+
+        let path = state_path(&d.rig);
+        accepted(&larger, 1).save(&path).unwrap();
+        let lag = LaggedList::new(&d.rig.store);
+        lag.hide(&larger);
+        let eng = lagged(&lag, &path);
+        assert_eq!(
+            eng.merge(40).await,
+            Ok(MergeOutcome::Nothing {
+                head: Some(smaller)
+            })
+        );
+    }
+
+    /// Rollback de verdade: o aceito sumiu do armazenamento (também do `get`), não é atraso.
+    #[tokio::test]
+    async fn an_accepted_manifest_that_is_really_gone_is_still_a_rollback() {
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        let path = state_path(&rig);
+        let lag = LaggedList::new(&rig.store);
+        let eng = lagged(&lag, &path);
+        write(&vault, "a.md", b"1");
+        created(eng.snapshot(&vault_only(&vault), 1).await.unwrap());
+        write(&vault, "a.md", b"2");
+        let (s2, ..) = created(eng.snapshot(&vault_only(&vault), 2).await.unwrap());
+
+        lag.hide(&s2);
+        lag.lose(&s2);
+        assert_eq!(
+            eng.snapshot(&vault_only(&vault), 3).await,
+            Err(EngineError::Rollback)
+        );
+        assert_eq!(eng.merge(4).await, Err(EngineError::Rollback));
+        assert_eq!(saved(&path), Some(accepted(&s2, 1)), "o estado não recua");
+    }
+
+    /// Um backend hostil que serve outros bytes sob o id aceito não passa: o hash não bate.
+    #[tokio::test]
+    async fn bytes_that_do_not_match_the_accepted_hash_are_still_a_rollback() {
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        let path = state_path(&rig);
+        let lag = LaggedList::new(&rig.store);
+        let eng = lagged(&lag, &path);
+        write(&vault, "a.md", b"1");
+        let (s1, ..) = created(eng.snapshot(&vault_only(&vault), 1).await.unwrap());
+
+        lag.hide(&s1);
+        lag.forge(&s1, b"lixo que nao e o manifest");
+        assert_eq!(
+            eng.snapshot(&vault_only(&vault), 2).await,
+            Err(EngineError::Rollback)
+        );
+        assert_eq!(saved(&path), Some(accepted(&s1, 1)));
+    }
+
+    /// Backend fora do ar na leitura do aceito: é erro de armazenamento (tentar de novo), não
+    /// uma acusação de rollback.
+    #[tokio::test]
+    async fn an_unavailable_get_of_the_accepted_manifest_is_a_store_error_not_a_rollback() {
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        let path = state_path(&rig);
+        let lag = LaggedList::new(&rig.store);
+        let eng = lagged(&lag, &path);
+        write(&vault, "a.md", b"1");
+        let (s1, ..) = created(eng.snapshot(&vault_only(&vault), 1).await.unwrap());
+
+        lag.hide(&s1);
+        lag.fail_get(&s1);
+        assert_eq!(
+            eng.snapshot(&vault_only(&vault), 2).await,
+            Err(EngineError::Store(StoreError::Unavailable(
+                std::io::ErrorKind::Other
+            )))
+        );
+    }
+
+    /// O estado é de outra época que as chaves: não se tenta ler o aceito (rotação segue o
+    /// caminho de sempre) e nenhum `get` extra sai.
+    #[tokio::test]
+    async fn a_state_from_another_epoch_does_not_read_the_accepted_manifest_by_id() {
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        let path = state_path(&rig);
+        let lag = LaggedList::new(&rig.store);
+        write(&vault, "a.md", b"1");
+        let (s1, ..) = created(
+            rig.engine("pc")
+                .snapshot(&vault_only(&vault), 1)
+                .await
+                .unwrap(),
+        );
+        accepted(&s1, 2).save(&path).unwrap();
+
+        lag.hide(&s1);
+        assert_eq!(
+            lagged(&lag, &path).snapshot(&vault_only(&vault), 2).await,
+            Err(EngineError::Rollback)
+        );
+        assert_eq!(lag.gets_of(&s1), 0);
+    }
+
+    /// Com o aceito no `list` não há leitura extra: o `get` que a listagem já faz basta.
+    #[tokio::test]
+    async fn a_listed_accepted_manifest_is_read_once_not_twice() {
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        let path = state_path(&rig);
+        let lag = LaggedList::new(&rig.store);
+        let eng = lagged(&lag, &path);
+        write(&vault, "a.md", b"1");
+        let (s1, ..) = created(eng.snapshot(&vault_only(&vault), 1).await.unwrap());
+
+        let before = lag.gets_of(&s1);
+        assert_eq!(
+            eng.merge(2).await,
+            Ok(MergeOutcome::Nothing { head: Some(s1) })
+        );
+        assert_eq!(lag.gets_of(&s1) - before, 1);
+    }
+
     /// Falso `Rollback` seria o pior efeito prático: dois dispositivos fundiram o mesmo par, a
     /// regra de colapso escolheu a gêmea de menor hash como ponta, e este dispositivo tinha
     /// aceito a de **maior** hash (a que ele próprio gerou).
