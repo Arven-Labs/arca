@@ -579,7 +579,7 @@ mod tests {
     // sem fazer nada, para o `cargo test` comum não precisar de servidor. Os testes dividem um
     // bucket e rodam em paralelo: as asserções de `list` usam "contém", nunca igualdade.
 
-    fn integration_config() -> Option<S3Config> {
+    fn config_from_env() -> Option<S3Config> {
         let var = |k: &str| std::env::var(k).ok();
         Some(S3Config {
             endpoint: var("ARCA_S3_TEST_ENDPOINT")?,
@@ -590,6 +590,16 @@ mod tests {
             allow_http: true,
             consistent_list: false,
         })
+    }
+
+    fn integration_config() -> Option<S3Config> {
+        let config = config_from_env();
+        // o job `s3-garage` exige o servidor: sem as variáveis o teste falha, não passa vazio
+        assert!(
+            config.is_some() || std::env::var_os("ARCA_S3_TEST_REQUIRED").is_none(),
+            "ARCA_S3_TEST_REQUIRED está definida mas faltam variáveis ARCA_S3_TEST_*"
+        );
+        config
     }
 
     fn unique(label: &str) -> Vec<u8> {
