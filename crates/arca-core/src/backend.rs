@@ -6,6 +6,8 @@ use crate::disk::DiskStore;
 #[cfg(feature = "hub")]
 use crate::hub::HubStore;
 use crate::object::{ObjectId, ObjectKind};
+#[cfg(feature = "s3")]
+use crate::s3::S3Store;
 use crate::store::{BlobStore, Capabilities, StoreError};
 
 #[derive(Debug, Clone)]
@@ -15,6 +17,9 @@ pub enum Backend {
     /// O hub (`warden-server`) como réplica, sobre HTTP (2b-1).
     #[cfg(feature = "hub")]
     Hub(HubStore),
+    /// Um bucket S3-compatível, para o backup externo (Fase 3).
+    #[cfg(feature = "s3")]
+    S3(S3Store),
 }
 
 impl BlobStore for Backend {
@@ -23,6 +28,8 @@ impl BlobStore for Backend {
             Backend::Disk(disk) => disk.put(id, bytes).await,
             #[cfg(feature = "hub")]
             Backend::Hub(hub) => hub.put(id, bytes).await,
+            #[cfg(feature = "s3")]
+            Backend::S3(s3) => s3.put(id, bytes).await,
         }
     }
 
@@ -31,6 +38,8 @@ impl BlobStore for Backend {
             Backend::Disk(disk) => disk.get(id).await,
             #[cfg(feature = "hub")]
             Backend::Hub(hub) => hub.get(id).await,
+            #[cfg(feature = "s3")]
+            Backend::S3(s3) => s3.get(id).await,
         }
     }
 
@@ -39,6 +48,8 @@ impl BlobStore for Backend {
             Backend::Disk(disk) => disk.has(id).await,
             #[cfg(feature = "hub")]
             Backend::Hub(hub) => hub.has(id).await,
+            #[cfg(feature = "s3")]
+            Backend::S3(s3) => s3.has(id).await,
         }
     }
 
@@ -47,6 +58,8 @@ impl BlobStore for Backend {
             Backend::Disk(disk) => disk.list(kind).await,
             #[cfg(feature = "hub")]
             Backend::Hub(hub) => hub.list(kind).await,
+            #[cfg(feature = "s3")]
+            Backend::S3(s3) => s3.list(kind).await,
         }
     }
 
@@ -55,6 +68,8 @@ impl BlobStore for Backend {
             Backend::Disk(disk) => disk.delete(id).await,
             #[cfg(feature = "hub")]
             Backend::Hub(hub) => hub.delete(id).await,
+            #[cfg(feature = "s3")]
+            Backend::S3(s3) => s3.delete(id).await,
         }
     }
 
@@ -63,6 +78,8 @@ impl BlobStore for Backend {
             Backend::Disk(disk) => disk.capabilities(),
             #[cfg(feature = "hub")]
             Backend::Hub(hub) => hub.capabilities(),
+            #[cfg(feature = "s3")]
+            Backend::S3(s3) => s3.capabilities(),
         }
     }
 }
@@ -101,6 +118,35 @@ mod tests {
         assert_eq!(b.delete(&id).await, Ok(()));
         assert_eq!(d.has(&id).await, Ok(false));
         assert_eq!(b.capabilities(), d.capabilities());
+    }
+
+    /// `Backend::S3` só delega ao `S3Store` (sobre `InMemory`, sem rede), com a mesma chave
+    /// `<tipo>/<hex>` do disco e a leitura verificada do núcleo.
+    #[cfg(feature = "s3")]
+    #[tokio::test]
+    async fn backend_s3_delegates_to_the_s3_store() {
+        use object_store::memory::InMemory;
+        use std::sync::Arc;
+        let s3 = S3Store::from_object_store(Arc::new(InMemory::new()), true);
+        let b = Backend::S3(s3.clone());
+        let data = b"cifrado".to_vec();
+        let id = ObjectId::of(ObjectKind::Blob, &data);
+
+        assert_eq!(b.has(&id).await, Ok(false));
+        assert_eq!(b.get(&id).await, Ok(None));
+        b.put(&id, &data).await.unwrap();
+        assert_eq!(s3.get(&id).await, Ok(Some(data.clone()))); // o mesmo armazenamento
+        assert_eq!(verified_get(&b, &id).await, Ok(Some(data)));
+        assert_eq!(b.has(&id).await, Ok(true));
+        assert_eq!(b.list(ObjectKind::Blob).await, Ok(vec![id]));
+        assert_eq!(b.list(ObjectKind::Manifest).await, Ok(vec![]));
+        assert_eq!(b.put(&id, b"outro").await, Err(StoreError::IdMismatch));
+        assert_eq!(
+            b.delete(&id).await,
+            Err(StoreError::Unavailable(std::io::ErrorKind::Unsupported))
+        );
+        assert_eq!(b.capabilities(), s3.capabilities());
+        assert!(b.capabilities().consistent_list);
     }
 
     #[tokio::test]

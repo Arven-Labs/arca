@@ -1,15 +1,27 @@
 //! Backend S3-compatível (Fase 3, `SPEC-TECNICA.md` §4, ADR 0007 e 0008): o `BlobStore` sobre
 //! `object_store`. A chave do objeto é `<tipo>/<hex>`, a mesma do disco.
 //!
-//! **ESQUELETO DA ETAPA 1 (testes primeiro):** só a API e os testes; os métodos do `BlobStore`
-//! ainda são `unimplemented!`. A etapa 2 os implementa.
-
-#![allow(dead_code)] // some na etapa 2, quando os campos passam a ser lidos
+//! O backend não é confiável para integridade: a leitura segue por `verified_get`, e o `put`
+//! recusa bytes que não têm o hash do id antes de ir à rede. Nenhum erro carrega o texto do
+//! `object_store` (traz caminho e, às vezes, endpoint), só o tipo (`io::ErrorKind`).
+//!
+//! `delete` é `Unsupported` como no hub: apagar um backup é irreversível e a v1 não tem coleta
+//! de lixo (ADR 0011, retenção P-05).
+//!
+//! Limites conhecidos: o `object_store` não distingue timeout de recusa de conexão no erro que
+//! devolve, então os dois viram `Other`; e o `reqwest` dele honra `HTTP_PROXY`/`HTTPS_PROXY` do
+//! ambiente (a requisição é assinada e o corpo já é cifrado, ao contrário do token do hub).
 
 use crate::object::{ObjectId, ObjectKind};
+use crate::server::{MAX_BLOB_OBJECT_BYTES, MAX_MANIFEST_OBJECT_BYTES};
 use crate::store::{BlobStore, Capabilities, StoreError};
-use object_store::ObjectStore;
+use futures_util::StreamExt;
+use object_store::aws::AmazonS3Builder;
+use object_store::path::Path;
+use object_store::{ClientOptions, ObjectStore, ObjectStoreExt, PutPayload, RetryConfig};
+use std::io;
 use std::sync::Arc;
+use std::time::Duration;
 use zeroize::Zeroizing;
 
 /// Como falar com o bucket. `Debug` não mostra endpoint, bucket nem credenciais.
@@ -65,9 +77,66 @@ impl std::fmt::Debug for S3Store {
 /// Ids que uma listagem inteira pode somar antes de o cliente desistir (o mesmo do hub).
 pub const MAX_LIST_IDS: usize = 1_000_000;
 
+/// Prazo de uma requisição inteira (um blob grande numa linha lenta) e da conexão.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Retentativas por requisição e o tempo máximo delas (o padrão do `object_store` é mais longo).
+const MAX_RETRIES: usize = 3;
+const RETRY_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Um texto de configuração: não vazio e sem caracteres de controle (vira cabeçalho ou caminho).
+fn plain(s: &str) -> bool {
+    !s.is_empty() && !s.chars().any(char::is_control)
+}
+
 impl S3Store {
-    pub fn new(_config: &S3Config) -> Result<S3Store, S3Error> {
-        unimplemented!("S3Store::new: etapa 2")
+    pub fn new(config: &S3Config) -> Result<S3Store, S3Error> {
+        // só `esquema://host[:porta]`: sem credenciais embutidas, espaço nem controle
+        let (rest, plain_http) = if let Some(rest) = config.endpoint.strip_prefix("https://") {
+            (rest, false)
+        } else if let Some(rest) = config.endpoint.strip_prefix("http://") {
+            (rest, true)
+        } else {
+            return Err(S3Error::InvalidConfig);
+        };
+        if !plain(rest) || rest.chars().any(|c| c.is_whitespace() || c == '@') {
+            return Err(S3Error::InvalidConfig);
+        }
+        if !plain(&config.region)
+            || !plain(&config.bucket)
+            || !plain(&config.access_key_id)
+            || !plain(&config.secret_access_key)
+        {
+            return Err(S3Error::InvalidConfig);
+        }
+        if plain_http && !config.allow_http {
+            return Err(S3Error::InsecureEndpoint);
+        }
+        let retry = RetryConfig {
+            max_retries: MAX_RETRIES,
+            retry_timeout: RETRY_TIMEOUT,
+            ..RetryConfig::default()
+        };
+        let options = ClientOptions::new()
+            .with_allow_http(config.allow_http)
+            .with_timeout(REQUEST_TIMEOUT)
+            .with_connect_timeout(CONNECT_TIMEOUT);
+        let store = AmazonS3Builder::new()
+            .with_endpoint(config.endpoint.clone())
+            .with_region(config.region.clone())
+            .with_bucket_name(config.bucket.clone())
+            .with_access_key_id(config.access_key_id.clone())
+            .with_secret_access_key(config.secret_access_key.as_str())
+            // `endpoint/bucket/chave`: Garage e MinIO não aceitam `bucket.endpoint`
+            .with_virtual_hosted_style_request(false)
+            .with_retry(retry)
+            .with_client_options(options)
+            .build()
+            .map_err(|_| S3Error::InvalidConfig)?;
+        Ok(S3Store::from_object_store(
+            Arc::new(store),
+            config.consistent_list,
+        ))
     }
 
     /// Sobre qualquer `ObjectStore` (os testes usam `InMemory`).
@@ -80,38 +149,110 @@ impl S3Store {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn with_limits(mut self, max_object_bytes: u64, max_list_ids: usize) -> S3Store {
         self.max_object_bytes = Some(max_object_bytes);
         self.max_list_ids = max_list_ids;
         self
     }
+
+    fn cap(&self, kind: ObjectKind) -> u64 {
+        self.max_object_bytes.unwrap_or(match kind {
+            ObjectKind::Blob => MAX_BLOB_OBJECT_BYTES,
+            ObjectKind::Manifest => MAX_MANIFEST_OBJECT_BYTES,
+        })
+    }
+}
+
+/// A chave do objeto: `<tipo>/<hex>`.
+fn path_of(id: &ObjectId) -> Path {
+    Path::from(id.to_string().as_str())
+}
+
+fn unavailable(kind: io::ErrorKind) -> StoreError {
+    StoreError::Unavailable(kind)
 }
 
 /// Só o tipo do erro: o texto do `object_store` traz o caminho e, às vezes, o endpoint.
-fn map_error(_e: &object_store::Error) -> StoreError {
-    unimplemented!("map_error: etapa 2")
+fn map_error(e: &object_store::Error) -> StoreError {
+    use object_store::Error as E;
+    unavailable(match e {
+        E::Unauthenticated { .. } | E::PermissionDenied { .. } => io::ErrorKind::PermissionDenied,
+        E::NotSupported { .. } | E::NotImplemented { .. } => io::ErrorKind::Unsupported,
+        E::InvalidPath { .. } => io::ErrorKind::InvalidData,
+        // `Error` é `non_exhaustive`; o resto (rede, 5xx, quota, ...) é "tente de novo ou use outro"
+        _ => io::ErrorKind::Other,
+    })
 }
 
 impl BlobStore for S3Store {
-    async fn put(&self, _id: &ObjectId, _bytes: &[u8]) -> Result<(), StoreError> {
-        unimplemented!("S3Store::put: etapa 2")
+    async fn put(&self, id: &ObjectId, bytes: &[u8]) -> Result<(), StoreError> {
+        if ObjectId::of(id.kind, bytes).hash != id.hash {
+            return Err(StoreError::IdMismatch);
+        }
+        if bytes.len() as u64 > self.cap(id.kind) {
+            return Err(unavailable(io::ErrorKind::InvalidInput));
+        }
+        self.store
+            .put(&path_of(id), PutPayload::from(bytes.to_vec()))
+            .await
+            .map_err(|e| map_error(&e))?;
+        Ok(())
     }
 
-    async fn get(&self, _id: &ObjectId) -> Result<Option<Vec<u8>>, StoreError> {
-        unimplemented!("S3Store::get: etapa 2")
+    async fn get(&self, id: &ObjectId) -> Result<Option<Vec<u8>>, StoreError> {
+        let cap = self.cap(id.kind);
+        match self.store.get(&path_of(id)).await {
+            Ok(result) => {
+                // o tamanho declarado vem do servidor (não confiável): não ler o que passa do teto
+                if result.meta.size > cap {
+                    return Err(unavailable(io::ErrorKind::InvalidData));
+                }
+                let bytes = result.bytes().await.map_err(|e| map_error(&e))?;
+                if bytes.len() as u64 > cap {
+                    return Err(unavailable(io::ErrorKind::InvalidData));
+                }
+                Ok(Some(bytes.to_vec()))
+            }
+            Err(object_store::Error::NotFound { .. }) => Ok(None),
+            Err(e) => Err(map_error(&e)),
+        }
     }
 
-    async fn has(&self, _id: &ObjectId) -> Result<bool, StoreError> {
-        unimplemented!("S3Store::has: etapa 2")
+    async fn has(&self, id: &ObjectId) -> Result<bool, StoreError> {
+        match self.store.head(&path_of(id)).await {
+            Ok(_) => Ok(true),
+            Err(object_store::Error::NotFound { .. }) => Ok(false),
+            Err(e) => Err(map_error(&e)),
+        }
     }
 
-    async fn list(&self, _kind: ObjectKind) -> Result<Vec<ObjectId>, StoreError> {
-        unimplemented!("S3Store::list: etapa 2")
+    async fn list(&self, kind: ObjectKind) -> Result<Vec<ObjectId>, StoreError> {
+        let prefix = Path::from(kind.as_str());
+        let mut stream = self.store.list(Some(&prefix));
+        let mut ids = Vec::new();
+        let mut seen = 0usize;
+        while let Some(item) = stream.next().await {
+            let meta = item.map_err(|e| map_error(&e))?;
+            // o teto conta tudo o que o bucket devolve, não só o que vira id: um bucket
+            // compartilhado com milhões de arquivos de outro uso não pode prender o cliente
+            seen += 1;
+            if seen > self.max_list_ids {
+                return Err(unavailable(io::ErrorKind::InvalidData));
+            }
+            // o nome vem do bucket (entrada não confiável): só `<tipo>/<64 hex minúsculos>`
+            if let Ok(id) = meta.location.as_ref().parse::<ObjectId>() {
+                if id.kind == kind {
+                    ids.push(id);
+                }
+            }
+        }
+        Ok(ids)
     }
 
     /// A v1 não apaga (ADR 0011), como o hub: `Unavailable(Unsupported)`, sem ir à rede.
     async fn delete(&self, _id: &ObjectId) -> Result<(), StoreError> {
-        unimplemented!("S3Store::delete: etapa 2")
+        Err(unavailable(io::ErrorKind::Unsupported))
     }
 
     fn capabilities(&self) -> Capabilities {
