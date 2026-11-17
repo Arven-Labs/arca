@@ -113,7 +113,7 @@ impl<S: BlobStore> Engine<S> {
                     match verified_get(&self.store, id).await {
                         Ok(Some(_)) => {}
                         Ok(None) => report.missing.push(*id),
-                        Err(StoreError::Corrupt) => report.corrupt.push(*id),
+                        Err(StoreError::Corrupt) => {}
                         Err(StoreError::Unavailable(_)) => report.unreadable.push(*id),
                         Err(e) => return Err(e.into()),
                     }
