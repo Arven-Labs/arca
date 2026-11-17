@@ -23,6 +23,8 @@ pub mod merge;
 pub mod object;
 pub mod recovery;
 pub mod replicate;
+#[cfg(feature = "s3")]
+pub mod s3;
 pub mod scan;
 pub mod server;
 pub mod state;

@@ -32,11 +32,12 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
 
+      # `--all-features`: a feature `s3` não é do `default` (Fase 3), e sem a flag nada dela compila nem roda.
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
       - name: Test
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --all-features --locked
 
   # Versão mínima do Rust (`rust-version` do Cargo.toml, medida em 2026-11-01: 1.88 por causa de
   # `sha2` 0.11 e de `slice::as_chunks`). Só compila a biblioteca; os testes usam APIs mais
@@ -53,7 +54,7 @@ jobs:
           rustc +1.88.0 --version
 
       - name: Check
-        run: cargo +1.88.0 check --workspace --locked
+        run: cargo +1.88.0 check --workspace --all-features --locked
 
   # Advisories do RustSec contra o Cargo.lock. A ferramenta é compilada do crates.io
   # numa versão fixa (sem ação de terceiros); o custo é alguns minutos por execução.
@@ -68,3 +69,66 @@ jobs:
 
       - name: Audit
         run: cargo audit --deny warnings
+
+  # Os testes de integração do `S3Store` (Fase 3) contra um Garage de verdade, o mesmo servidor do
+  # spike do P-15 (ADR 0008). Não é check obrigatório. A imagem é fixada pelo digest do manifesto
+  # da v2.5.0; o `rpc_secret`, o bucket e a chave são descartáveis, gerados aqui, e a máquina some
+  # no fim do job. Sem segredos do repositório.
+  s3-garage:
+    runs-on: ubuntu-24.04
+    env:
+      GARAGE_IMAGE: dxflrs/garage:v2.5.0@sha256:677e5b758e4425a325b811c425c026bf35a4bf42f7ddbaa773de3f4fd779a5a5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Garage
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/garage.toml" <<EOF
+          metadata_dir = "/var/lib/garage/meta"
+          data_dir = "/var/lib/garage/data"
+          db_engine = "sqlite"
+          replication_factor = 1
+          rpc_bind_addr = "127.0.0.1:3901"
+          rpc_public_addr = "127.0.0.1:3901"
+          rpc_secret = "$(openssl rand -hex 32)"
+
+          [s3_api]
+          s3_region = "garage"
+          api_bind_addr = "127.0.0.1:3900"
+          root_domain = ".s3.garage.localhost"
+          EOF
+          docker run -d --name garage --network host \
+            -v "$RUNNER_TEMP/garage.toml:/etc/garage.toml:ro" "$GARAGE_IMAGE"
+          for i in $(seq 1 30); do
+            docker exec garage /garage status >/dev/null 2>&1 && break
+            sleep 1
+          done
+          docker exec garage /garage status
+          NODE=$(docker exec garage /garage status | awk '/^[0-9a-f]{16}/ {print $1; exit}')
+          docker exec garage /garage layout assign -z dc1 -c 1G "$NODE"
+          docker exec garage /garage layout apply --version 1
+          docker exec garage /garage bucket create arca-test
+          docker exec garage /garage key create arca-test-key > "$RUNNER_TEMP/key.txt"
+          KEY_ID=$(awk '/^Key ID:/ {print $3}' "$RUNNER_TEMP/key.txt")
+          SECRET=$(awk '/^Secret key:/ {print $3}' "$RUNNER_TEMP/key.txt")
+          echo "::add-mask::$SECRET"
+          docker exec garage /garage bucket allow --read --write --owner arca-test --key arca-test-key
+          {
+            echo "ARCA_S3_TEST_ENDPOINT=http://127.0.0.1:3900"
+            echo "ARCA_S3_TEST_REGION=garage"
+            echo "ARCA_S3_TEST_BUCKET=arca-test"
+            echo "ARCA_S3_TEST_KEY=$KEY_ID"
+            echo "ARCA_S3_TEST_SECRET=$SECRET"
+            echo "ARCA_S3_TEST_REQUIRED=1"
+          } >> "$GITHUB_ENV"
+
+      - name: Toolchain
+        run: |
+          rustc --version
+          cargo --version
+
+      # `ARCA_S3_TEST_REQUIRED` faz um teste sem as variáveis falhar em vez de passar vazio.
+      - name: Integration tests (real S3)
+        run: cargo test -p arca-core --features s3 --locked real_s3 -- --nocapture
