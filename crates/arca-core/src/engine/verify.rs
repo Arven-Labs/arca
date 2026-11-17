@@ -139,9 +139,15 @@ impl<S: BlobStore> Engine<S> {
                 continue;
             }
             // o texto claro vive só nesta volta do laço e é zerado ao sair (`Zeroizing`)
-            let plain = self.plain_blob(entry).await?;
+            let blob = ObjectId {
+                kind: ObjectKind::Blob,
+                hash: entry.blob.0,
+            };
+            let bytes = verified_get(&self.store, &blob)
+                .await?
+                .ok_or(EngineError::MissingObject)?;
             check.files += 1;
-            check.bytes += plain.len() as u64;
+            check.bytes += bytes.len() as u64;
         }
         Ok(check)
     }
