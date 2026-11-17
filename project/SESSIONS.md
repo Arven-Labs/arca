@@ -2,6 +2,16 @@
 
 Mais recente no topo.
 
+### 2026-11-17 — Sessão 97 (ruleset do Warden: `Rust` obrigatório)
+
+- **Pedido**: `/projeto arca`, "o que você recomenda?" e parte 1 da recomendação: fechar a decisão pendente da sessão 96 (o `protect-main` do Warden exigia só o `guard`) e medir a distância do pin do Warden. O arca não mudou; o trabalho foi no repo do Warden.
+- **Achado**: o `ci.yml` do Warden tinha `paths-ignore` (docs) no workflow, então um check `rust` obrigatório travaria todo PR só de docs ("Expected" para sempre). Era a razão de só o `guard` ser obrigatório. Opção A, escolhida por você: tirar o filtro (jobs já têm `if` por área; job pulado passa).
+- **Feito (Warden)**: [#173](https://github.com/Arven-Labs/warden/pull/173) (tira o `paths-ignore`; CI verde, `Rust` 8m17s), [#174](https://github.com/Arven-Labs/warden/pull/174) (versiona `.github/ruleset-protect-main.json`), [#175](https://github.com/Arven-Labs/warden/pull/175) (registro; PR só de `.md`). Você mesclou os três e aplicou o ruleset 26167705 com `gh api -X PUT`; `required_status_checks` listado: `guard` e `Rust (clippy and tests)`.
+- **Prova**: no #175, com o ruleset já aplicado, `Rust` apareceu como "skipping" e o GitHub marcou `CLEAN`/`MERGEABLE`; mesclado em 2026-11-17 12:43 UTC.
+- **Pin do Warden**: o `rev` real do `arca-core` é `1d8c38e` (nos três `Cargo.toml`), não o `a8e2677` da pesquisa de dependências de 2026-11-13. Faltam 4 commits; só o `328ce71` (P-26, nome longo do `.conflito-*`) mexe em código. Subir o `rev` não é urgente.
+- **Não verificado**: PR de código com o `rust` obrigatório e falhando (a regra bloquear de fato); só o caso "skipped" foi visto. O Warden segue sem job `audit`.
+- **Fica**: subir o `rev` do Warden (decisão sua); alerta 36 do Dependabot no Warden (moderado, sem triagem); P-31 (1) e (2), P-29, P-30, P-09, P-22, P-25, P-32 a P-36; Fase 3 (S3) é o próximo marco.
+
 ### 2026-11-17 — Sessão 96 (P-35: `/arca on` no CLI do Warden)
 
 - **Pedido**: "vamos de p35". Plan mode. Dos itens do P-35, só o ponto de entrada CLI do 2b-4 estava aberto e acionável. Todo o trabalho foi **no repo do Warden**; o arca não mudou. Decisões suas: recorte `/arca on` (descartados: tela dos perdedores, pareamento web, mobile); **extrair** a sequência para o `warden-sync` em vez de reimplementar no CLI; Vault pareado só por git **segue o desktop** (sem Pull do git antes de ligar).
