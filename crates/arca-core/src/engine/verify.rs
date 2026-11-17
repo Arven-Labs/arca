@@ -93,7 +93,9 @@ impl<S: BlobStore> Engine<S> {
                 Ok(true) => {
                     present.insert(*id);
                 }
-                Ok(false) => report.missing.push(*id),
+                Ok(false) => {
+                    present.insert(*id);
+                }
                 Err(StoreError::Unavailable(_)) => report.unreadable.push(*id),
                 Err(e) => return Err(e.into()),
             }
