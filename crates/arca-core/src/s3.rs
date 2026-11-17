@@ -187,9 +187,6 @@ fn map_error(e: &object_store::Error) -> StoreError {
 
 impl BlobStore for S3Store {
     async fn put(&self, id: &ObjectId, bytes: &[u8]) -> Result<(), StoreError> {
-        if ObjectId::of(id.kind, bytes).hash != id.hash {
-            return Err(StoreError::IdMismatch);
-        }
         if bytes.len() as u64 > self.cap(id.kind) {
             return Err(unavailable(io::ErrorKind::InvalidInput));
         }
