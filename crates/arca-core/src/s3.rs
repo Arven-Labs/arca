@@ -257,7 +257,7 @@ impl BlobStore for S3Store {
 
     fn capabilities(&self) -> Capabilities {
         Capabilities {
-            consistent_list: true,
+            consistent_list: !self.consistent_list,
         }
     }
 }
