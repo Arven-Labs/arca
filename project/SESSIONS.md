@@ -2,6 +2,15 @@
 
 Mais recente no topo.
 
+### 2026-11-17 — Sessão 96 (P-35: `/arca on` no CLI do Warden)
+
+- **Pedido**: "vamos de p35". Plan mode. Dos itens do P-35, só o ponto de entrada CLI do 2b-4 estava aberto e acionável. Todo o trabalho foi **no repo do Warden**; o arca não mudou. Decisões suas: recorte `/arca on` (descartados: tela dos perdedores, pareamento web, mobile); **extrair** a sequência para o `warden-sync` em vez de reimplementar no CLI; Vault pareado só por git **segue o desktop** (sem Pull do git antes de ligar).
+- **Feito no Warden**: [warden#165](https://github.com/Arven-Labs/warden/pull/165) (`SyncEngine::arca_enable_after_pull`, o `enable` do desktop vira wrapper; sem comportamento novo) e [warden#169](https://github.com/Arven-Labs/warden/pull/169) (`/arca on`: aviso de que não tem volta, teclas pendentes descartadas, só um `s`/`sim`/`y`/`yes` digitado liga, Pull antes, sem logins MCP). Mesclados em 2026-11-16 (#165, `1374b40`) e 2026-11-17 (#169, `de0c73d`).
+- **Testes (CI do Warden)**: #165 vermelho antes (96 passaram, 5 falharam), verde 101; #169 vermelho antes (93 passaram, 10 falharam, por asserção), verde 103. Seis quebras de propósito (#166 a #168 e #170 a #172, fechados), cada uma derrubando só o teste esperado. Detalhes no `SESSIONS.md` do Warden.
+- **O que o fluxo mostrou**: (1) o ruleset `protect-main` do **Warden só exige o `guard`**: os dois PRs foram mesclados com o `Rust` do commit final (só docs) pendente; o do arca exige `guard`, `rust` e `audit`. Decisão sua pendente: exigir o `Rust (clippy and tests)` também. (2) o Warden não usa rustfmt, então não há checagem local leve. (3) o teste do gate de confirmação passava no vermelho (o esqueleto sempre cancelava), então só a quebra de propósito provou que ele testa algo.
+- **Não verificado**: `/arca on` num terminal real; o Pull com Arweave real; Windows e macOS; o CI da `main` do Warden no commit `de0c73d` (ainda rodando quando este registro foi escrito).
+- **Fica**: `warden-server`, mobile e a classe `config` (P-35, P183 do Warden); tela para listar e limpar perdedores `secret`/`config`; pareamento na web (P182); P-31 (1) (Fase 4) e (2) (adiado para o S3); P-29, P-30, P-09, P-22, P-25, P-32 a P-36.
+
 ### 2026-11-16 — Sessão 95 (P-26: nome longo da cópia `.conflito-*`)
 
 - **Pedido**: "vamos de p26". Plan mode. Decisão sua: truncar o nome e acrescentar hash (descartados: conflito sem cópia no vault; manter o erro).
