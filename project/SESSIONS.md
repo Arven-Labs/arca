@@ -2,6 +2,17 @@
 
 Mais recente no topo.
 
+### 2026-11-17 — Sessão 98 (Fase 3, fatia 1: `S3Store` e `Backend::S3`)
+
+- **Pedido**: "vamos de dependabot e dps fase 3". Plan mode. Decisões suas: primeira fatia = só o backend; teste com Garage como container no CI mais `InMemory`; `consistent_list` `false` por padrão (descartados: replicar e restaurar do S3 na mesma fatia; começar pela verificação de integridade; só `InMemory`; `true` fixo).
+- **Dependabot do Warden** (antes da Fase 3): 1 alerta (#36, `next` 16.4.2, `GHSA-mfr8-8qww-v76h`), classificado **não alcançável** (`output: "export"`, sem `unstable_cache` nem `use cache`), corrigido assim mesmo por ser só lockfile: [warden#176](https://github.com/Arven-Labs/warden/pull/176) (`next` 16.4.6), mesclado em 12:59 UTC, alerta fechado sozinho em 13:00. 0 abertos.
+- **Feito ([arca#141](https://github.com/Arven-Labs/arca/pull/141))**: `s3.rs` (`S3Config`, `S3Store`, erros só por `io::ErrorKind`, tetos, `delete` `Unsupported`), `Backend::S3`, feature `s3` fora do `default`, job `s3-garage` no CI (Garage v2.5.0 por digest, chave e bucket descartáveis), `--all-features` em clippy, test e msrv. Aprovação da dependência: `object_store` `=0.14.2` (`avaliar-dependencia`, +48 crates).
+- **Testes (CI)**: **vermelho antes**: 569 testes, 552 passaram, 17 falharam, todos por `unimplemented!` (run 44093609292). Verde depois: 570 no `rust` (run 44095037956) e 5 testes `real_s3_*` no Garage real (5 passaram, 1,22 s). **Quebras de propósito** (arca#142 a #145, fechados): sem `IdMismatch` derrubou 2; `>` por `>=` no teto do `list` derrubou 1; chave sem o tipo derrubou 5 no `rust` e o `real_s3_list_paginates...` no Garage; `consistent_list` invertido derrubou 2. A primeira versão da 4 (campo fixo em `true`) caiu no clippy por `dead_code`, não no teste: refeita como 4b.
+- **O que o CI achou e a avaliação não tinha medido**: `chrono` e `humantime` com aviso RustSec "sem manutenção" derrubaram o `audit` obrigatório (decisão sua: ignorar só os dois IDs em `.cargo/audit.toml`); `crc-fast` 1.10.0 exige rustc 1.89 e derrubou o `msrv` (decisão sua: fixar 1.9.0 no lock). Erro meu: um `assert!` de constante num teste (clippy).
+- **Decisão minha, a confirmar**: `delete` `Unsupported` (o plano dizia "ausente é `Ok`"; troquei para seguir o hub e o ADR 0011: apagar backup é irreversível).
+- **Não verificado**: B2 real, HTTPS real, a feature `s3` compilada para Android, `HTTP_PROXY` no ambiente real, e o `S3Store` dentro do ciclo do `Engine` (a próxima fatia). Nada rodado localmente além de `cargo fmt --check`, `cargo metadata` e `cargo update -p crc-fast`.
+- **Fica**: P-31 (2) (antes de pôr o S3 no `Engine`), `replicate` e restauração só do S3, verificação periódica e teste de restauração, retenção (P-05), integração no Warden (P-38); P-31 (1), P-29, P-30, P-09, P-22, P-25, P-32 a P-36. Warden: subir o `rev` do `arca-core` (de `1d8c38e`), job `audit`.
+
 ### 2026-11-17 — Sessão 97 (ruleset do Warden: `Rust` obrigatório)
 
 - **Pedido**: `/projeto arca`, "o que você recomenda?" e parte 1 da recomendação: fechar a decisão pendente da sessão 96 (o `protect-main` do Warden exigia só o `guard`) e medir a distância do pin do Warden. O arca não mudou; o trabalho foi no repo do Warden.

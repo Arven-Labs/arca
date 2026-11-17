@@ -32,4 +32,5 @@ A spec (§7 e §14) lista backends possíveis e deixa em aberto se o backup exte
 - Sem backup externo, um Vault com cópias só em dispositivos e hub continua vulnerável a perda total; o aviso torna isso visível, mas não obriga.
 - O Warden fica com dois caminhos de sync (o do `warden-sync` e o da arca) até migrar; isso é tolerado e precisa de um plano de migração depois.
 - AGPL do Garage não contamina a arca: ele roda como servidor separado e é acessado pela API S3.
+- **Nota (Fase 3, fatia 1, 2026-11-17):** o backend S3 existe (`S3Store`, feature `s3`), com `delete` `Unsupported` como o hub (backup apagado não volta; retenção é o P-05) e `consistent_list` `false` por padrão (decisão do dono; o P-31 (2) passa a ser alcançável). Detalhes em `SPEC-TECNICA.md` §4 e P-38 do `PENDING.md`. O aviso de menos de 2 locais continua sendo do `replica_status`, ainda sem o S3 no ciclo.
 - **Não validado:** a API S3 do B2 e do Storj não foi testada; o suporte a retenção/Object Lock e o custo de operações de listagem para a verificação periódica da Fase 3; a documentação do Garage além da página inicial; o custo real de um Vault do Warden.
