@@ -422,9 +422,6 @@ impl<S: BlobStore> Engine<S> {
         let Some(state) = state else {
             return Ok(loaded);
         };
-        if state.key_epoch != self.keys.epoch() {
-            return Ok(loaded);
-        }
         let hash = state.last_accepted.0;
         let known = loaded.readable.iter().any(|(id, _)| id.hash == hash)
             || loaded.rejected.iter().any(|r| r.id.hash == hash)
