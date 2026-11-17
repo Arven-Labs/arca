@@ -102,7 +102,7 @@ impl<S: BlobStore> Engine<S> {
         if let VerifyMode::Sample { max_blobs, offset } = mode {
             if !blobs.is_empty() {
                 let start = offset % blobs.len();
-                let end = start.saturating_add(max_blobs).min(blobs.len());
+                let end = start.saturating_add(max_blobs + 1).min(blobs.len());
                 report.sampled = end - start;
                 report.next_offset = end % blobs.len();
                 for id in &blobs[start..end] {
