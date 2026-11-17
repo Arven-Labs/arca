@@ -32,11 +32,12 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
 
+      # `--all-features`: a feature `s3` não é do `default` (Fase 3), e sem a flag nada dela compila nem roda.
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
       - name: Test
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --all-features --locked
 
   # Versão mínima do Rust (`rust-version` do Cargo.toml, medida em 2026-11-01: 1.88 por causa de
   # `sha2` 0.11 e de `slice::as_chunks`). Só compila a biblioteca; os testes usam APIs mais
@@ -53,7 +54,7 @@ jobs:
           rustc +1.88.0 --version
 
       - name: Check
-        run: cargo +1.88.0 check --workspace --locked
+        run: cargo +1.88.0 check --workspace --all-features --locked
 
   # Advisories do RustSec contra o Cargo.lock. A ferramenta é compilada do crates.io
   # numa versão fixa (sem ação de terceiros); o custo é alguns minutos por execução.
