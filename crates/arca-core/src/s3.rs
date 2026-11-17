@@ -237,7 +237,7 @@ impl BlobStore for S3Store {
             // o teto conta tudo o que o bucket devolve, não só o que vira id: um bucket
             // compartilhado com milhões de arquivos de outro uso não pode prender o cliente
             seen += 1;
-            if seen > self.max_list_ids {
+            if seen >= self.max_list_ids {
                 return Err(unavailable(io::ErrorKind::InvalidData));
             }
             // o nome vem do bucket (entrada não confiável): só `<tipo>/<64 hex minúsculos>`
