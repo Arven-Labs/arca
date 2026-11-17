@@ -2,6 +2,16 @@
 
 Mais recente no topo.
 
+### 2026-11-17 — Sessão 99 (P-31 (2): `list` atrasado não dá mais `Rollback` falso)
+
+- **Pedido**: "p31 2". Plan mode. Decisões suas: ler o aceito **pelo id** (descartados: reler o `list` com espera; impressão da fusão no estado v2) e **para todos os backends**, sem consultar `capabilities()`.
+- **Achado que o PENDING não trazia**: o falso `Rollback` não precisava de gêmea. Bastava o `list` não mostrar o manifest aceito quando ele é a **ponta** (`reachable` já inclui os pais citados mesmo ausentes, então um aceito com sucessor listado passava): um `snapshot` seguido de outro com o `list` atrasado, ou `list` vazio. A gêmea é um caso particular.
+- **Feito ([arca#146](https://github.com/Arven-Labs/arca/pull/146))**: `Engine::with_accepted` (só `engine.rs`), chamado em `snapshot`, `merge` e `apply` antes da guarda. Lê o aceito com `classify_manifest` (hash conferido, aberto com a chave), só se ele não está em `readable`/`rejected`/`superseded` e a época do estado é a das chaves. `Unavailable` na leitura é erro de armazenamento; qualquer outra falha deixa o grafo como estava (a guarda decide).
+- **Testes (CI)**: **vermelho antes**: 581 testes, 574 passaram, 7 falharam, todos por `Err(Rollback)` onde se esperava sucesso (run 44100432797); os 4 testes de guarda (aceito perdido de verdade, bytes forjados, época diferente, leitura única) já passavam, como previsto. **Verde depois**: 581 (run 44101137818). **Quebras de propósito** (arca#147 a #150, fechados): aceito lido mas não posto no grafo derrubou 6; `Unavailable` engolido derrubou 1; sem o portão de época derrubou 1; `known` com `!=` derrubou 8, incluindo testes antigos. Todas compilaram limpas e caíram nos testes (não no clippy).
+- **Espião novo**: `LaggedList` (`BlobStore` com `list` atrasado, `consistent_list: false`, e simulações de objeto perdido, bytes forjados e `get` fora do ar), no `mod tests` do `engine.rs`.
+- **Não verificado**: um S3 real com `list` atrasado de verdade (só o espião simula); um `get` também atrasado (continua `Rollback` falso, do lado seguro); nada rodado localmente além de `cargo fmt --check`.
+- **Fica**: o resto da Fase 3 (`replicate` e restauração só do S3, verificação periódica e teste de restauração, retenção P-05, integração no Warden, P-38); P-31 (1) (Fase 4); P-29, P-30, P-09, P-22, P-25, P-32 a P-36. Warden: subir o `rev` do `arca-core` (de `1d8c38e`), job `audit`.
+
 ### 2026-11-17 — Sessão 98 (Fase 3, fatia 1: `S3Store` e `Backend::S3`)
 
 - **Pedido**: "vamos de dependabot e dps fase 3". Plan mode. Decisões suas: primeira fatia = só o backend; teste com Garage como container no CI mais `InMemory`; `consistent_list` `false` por padrão (descartados: replicar e restaurar do S3 na mesma fatia; começar pela verificação de integridade; só `InMemory`; `true` fixo).
