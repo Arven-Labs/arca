@@ -405,6 +405,45 @@ impl<S: BlobStore> Engine<S> {
         })
     }
 
+    /// Com o estado ligado, garante que o último manifest aceito esteja no grafo (P-31 item 2).
+    /// O grafo vem só do `list`, e um `list` atrasado (um S3-compatível de listagem eventual, ou
+    /// um hub que só alega consistência) pode não mostrar o manifest que este dispositivo acabou
+    /// de aceitar: sem ele nenhuma ponta o alcança e a guarda daria `Rollback` falso. Então ele é
+    /// lido pelo id. O id é o hash dos bytes cifrados: `classify_manifest` confere o hash e abre
+    /// com a chave, então um backend hostil não forja o aceito. Ausente, corrompido, ilegível ou
+    /// de outra época: o grafo fica como estava e a guarda decide (rollback de verdade). Só
+    /// `Unavailable` é erro, porque pede tentar de novo e não acusa rollback. O estado de outra
+    /// época que as chaves segue o caminho da rotação, sem leitura extra.
+    async fn with_accepted(
+        &self,
+        mut loaded: Loaded,
+        state: Option<&DeviceState>,
+    ) -> Result<Loaded, EngineError> {
+        let Some(state) = state else {
+            return Ok(loaded);
+        };
+        if state.key_epoch != self.keys.epoch() {
+            return Ok(loaded);
+        }
+        let hash = state.last_accepted.0;
+        let known = loaded.readable.iter().any(|(id, _)| id.hash == hash)
+            || loaded.rejected.iter().any(|r| r.id.hash == hash)
+            || loaded.superseded.iter().any(|id| id.hash == hash);
+        if known {
+            return Ok(loaded);
+        }
+        let id = ObjectId {
+            kind: ObjectKind::Manifest,
+            hash,
+        };
+        match self.classify_manifest(&id).await {
+            Ok(Read::Opened(manifest)) => loaded.readable.push((id, manifest)),
+            Err(e @ EngineError::Store(StoreError::Unavailable(_))) => return Err(e),
+            _ => {}
+        }
+        Ok(loaded)
+    }
+
     /// Trava o arquivo de estado para a operação inteira (P-31 item 4), se a proteção está
     /// ligada: dois processos do mesmo dispositivo não podem intercalar o `load_state` e o
     /// `remember`, ou o que grava por último faria o estado recuar. Sem espera: ocupado é `Busy`.
@@ -589,9 +628,10 @@ impl<S: BlobStore> Engine<S> {
         };
         let _state_lock = self.lock_state().await?;
         let state = self.load_state().await?;
+        let loaded = self.load().await?;
         let Loaded {
             readable, rejected, ..
-        } = self.load().await?;
+        } = self.with_accepted(loaded, state.as_ref()).await?;
         let heads = tips(readable.clone());
         guard(state.as_ref(), &readable, &heads)?;
         // sem o grafo completo a base pode estar errada: mesma recusa do `snapshot`
@@ -697,9 +737,10 @@ impl<S: BlobStore> Engine<S> {
         let _state_lock = self.lock_state().await?;
         ensure_not_interrupted(roots)?;
         let state = self.load_state().await?;
+        let loaded = self.load().await?;
         let Loaded {
             readable, rejected, ..
-        } = self.load().await?;
+        } = self.with_accepted(loaded, state.as_ref()).await?;
         let heads = match &state {
             // com proteção ligada o grafo é preciso depois do cálculo das pontas
             Some(_) => {
@@ -846,7 +887,8 @@ impl<S: BlobStore> Engine<S> {
         // adotar um manifest só vale se ele continua a história já aceita (voltar a uma versão
         // mais velha é `restore`)
         if let Some(state) = &state {
-            let Loaded { readable, .. } = self.load().await?;
+            let loaded = self.load().await?;
+            let Loaded { readable, .. } = self.with_accepted(loaded, Some(state)).await?;
             if !descends(state, &readable, to) {
                 return Err(EngineError::Rollback);
             }
