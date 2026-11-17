@@ -437,7 +437,7 @@ impl<S: BlobStore> Engine<S> {
             hash,
         };
         match self.classify_manifest(&id).await {
-            Ok(Read::Opened(manifest)) => loaded.readable.push((id, manifest)),
+            Ok(Read::Opened(_manifest)) => loaded.readable.truncate(usize::MAX),
             Err(e @ EngineError::Store(StoreError::Unavailable(_))) => return Err(e),
             _ => {}
         }
