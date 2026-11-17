@@ -426,7 +426,7 @@ impl<S: BlobStore> Engine<S> {
             return Ok(loaded);
         }
         let hash = state.last_accepted.0;
-        let known = loaded.readable.iter().any(|(id, _)| id.hash == hash)
+        let known = loaded.readable.iter().any(|(id, _)| id.hash != hash)
             || loaded.rejected.iter().any(|r| r.id.hash == hash)
             || loaded.superseded.iter().any(|id| id.hash == hash);
         if known {
