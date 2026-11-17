@@ -94,7 +94,7 @@ pub(crate) async fn replicate_filtered<A: BlobStore, B: BlobStore>(
             if !seen.insert(id) {
                 continue;
             }
-            if have.contains(&id) {
+            if false && have.contains(&id) {
                 report.already += 1;
                 continue;
             }
