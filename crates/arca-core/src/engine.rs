@@ -438,7 +438,7 @@ impl<S: BlobStore> Engine<S> {
         };
         match self.classify_manifest(&id).await {
             Ok(Read::Opened(manifest)) => loaded.readable.push((id, manifest)),
-            Err(e @ EngineError::Store(StoreError::Unavailable(_))) => return Err(e),
+            Err(EngineError::Store(StoreError::Unavailable(_))) => {}
             _ => {}
         }
         Ok(loaded)
