@@ -2,6 +2,7 @@
 //! (`SPEC-TECNICA.md` §5.3). Vem de fora, então só se constrói a partir de bytes por
 //! `Manifest::from_slice`, que valida tudo.
 
+use crate::apply::is_reserved_name;
 use crate::crypto::{EpochKeys, Sealed};
 use crate::error::Error;
 use crate::object::{hex_digit, ObjectKind};
@@ -154,6 +155,12 @@ fn validate_component(component: &str) -> Result<(), Error> {
     }
     if component.ends_with('.') || component.ends_with(' ') {
         return Err(Error::InvalidPath("component ends with dot or space"));
+    }
+    // Arquivos de trabalho do próprio arca (diário, temporários, original guardado) vivem na mesma
+    // pasta dos dados e só se distinguem pelo nome: nunca entram num manifest, em nenhum
+    // componente (P-42).
+    if is_reserved_name(component) {
+        return Err(Error::InvalidPath("reserved name"));
     }
     // O Windows trata `CON.txt` como `CON`: vale o trecho antes do primeiro ponto.
     let stem = component.split('.').next().unwrap_or("").trim_end();
