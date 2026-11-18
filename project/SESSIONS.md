@@ -2,6 +2,13 @@
 
 Mais recente no topo.
 
+### 2026-11-18 — Sessão 103 (Fase 4, etapa 1 e 2: modelo de ameaças)
+
+- **Pedido**: planejar a Fase 4 (veio de "o que destrava o sync do Anchor"). Plan mode; plano aprovado em 5 etapas (modelo de ameaças, auditoria por área, roteiro dos experimentos do SPEC §10, decisão sobre "fonte única", fechamento). Decisão sua: o dispositivo perdido publicando na época antiga (T8) entra como **lacuna a desenhar num ADR futuro**, não se resolve na Fase 4.
+- **Feito**: só docs. `AMEACAS.md` novo (ativos, 6 atacantes, 22 ameaças com mitigação ou lacuna, e as 4 condições que pesam para "fonte única"); linha em `INDEX.md`; Fase 4 "Em andamento" no `OVERVIEW.md`.
+- **Não verificado**: nenhuma linha foi conferida contra o código; a tabela repete ADRs, `SPEC-TECNICA.md` e `PENDING.md`. Logs e erros quanto a vazamento de chave não foram lidos. Pareamento e hub vivem no Warden e não foram avaliados.
+- **Fica**: etapa 3 (auditoria `security-auditor` por área, que corrige o `AMEACAS.md`), etapa 4 (`VALIDACAO.md`; experimentos 1 a 4 e 6 dependem do dono), etapa 5 (decisão e ADR, se aprovado).
+
 ### 2026-11-18 — Sessão 102 (fechamento da Fase 3, sem GC)
 
 - **Pedido**: "vamos terminar a fase 3". Plan mode. Decisões suas: **fechar sem GC** (descartados: implementar o GC agora; só a integração no Warden); a integração no Warden é **fase do Warden**; gatilho de reavaliação **custo medido ≥ US$ 0,50/mês** (descartados: US$ 1/mês; só por tamanho, 20 GB).

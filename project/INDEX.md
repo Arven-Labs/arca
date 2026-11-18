@@ -12,6 +12,7 @@ Leia o arquivo relevante para o que você precisa:
 | Visão geral, stack e status | `OVERVIEW.md` |
 | O que o Warden já tem de storage e sync (Fase 0, P-01) | `FASE0-P01.md` |
 | Interface `BlobStore`, formato do manifest e protocolo da v1 | `SPEC-TECNICA.md` |
+| Modelo de ameaças e o que decide "fonte única" (Fase 4, rascunho) | `AMEACAS.md` |
 | Decisões em aberto | `PENDING.md` |
 | Decisões tomadas e seus motivos | `adr/` |
 | Log de sessões de trabalho (mais recente no topo) | `SESSIONS.md` |
