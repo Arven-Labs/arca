@@ -2,6 +2,15 @@
 
 Mais recente no topo.
 
+### 2026-11-18 — Sessão 105 (P-43: `restore` só apaga o que criou, [arca#164](https://github.com/Arven-Labs/arca/pull/164))
+
+- **Pedido**: "vamos de 1" (a correção mais barata e concreta da Fase 4). Plan mode; decisões: registrar o que o restore criou e desfazer só isso, mais travar as raízes; `remove_dir` e não `remove_dir_all`.
+- **Feito**: `restore_files` cria as raízes, trava (`lock_roots`) e acumula `Created`; `undo_restore` remove arquivos, pastas vazias e raízes criadas; `cleanup` antigo removido. Só `crates/arca-core/src/engine.rs` (mais o helper de teste `LaggedList`, que ganhou `drop_file_on_first_blob_get`).
+- **Testes primeiro**: 2 novos, rodados no CI **antes** da correção: 599 passaram e **2 falharam** (o primeiro por apagar até a pasta do usuário, o segundo porque o `restore` devolvia `Ok` em vez de `Busy`). **Depois**: `rust / test` com 601 passados, 0 falhas, `clippy -D warnings` limpo (run 44325461028).
+- **Quebra proposital** (apagamento, obrigatória): `remove_dir_all` na raiz criada, em PR de rascunho descartável (#165, fechado e branch apagada): o teste do arquivo do dono falhou (600 passaram, 1 falhou; run 44326141782). Revertida (a mudança nunca entrou na branch do PR).
+- **Não verificado**: o `restore` contra S3 ou hub reais com falha no meio; queda de energia durante o desfazer; link trocado durante o restore (segue por caminho); Windows. O `cargo fmt --check` local passou, build e teste só no CI (ADR 0009).
+- **Fica**: P-41 e P-42 (mesma auditoria), ADR de rotação (P-39 e P-40), `VALIDACAO.md`.
+
 ### 2026-11-18 — Sessão 104 (Fase 4, etapa 3: auditorias de cripto e de arquivos)
 
 - **Pedido**: seguir a Fase 4 (arca#162 já mesclado). Duas auditorias `security-auditor` em paralelo, só leitura: (1) cripto e chaves; (2) `apply`, diário, symlinks, perdedores e armazenamento. A frente 3 (hub e pareamento, no Warden) **ficou de fora**: não autorizada.
