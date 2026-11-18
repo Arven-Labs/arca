@@ -10,7 +10,7 @@ use crate::apply::{
     Planned, Undo,
 };
 use crate::crypto::{open, seal, EpochKeys};
-use crate::dirfd::FolderLock;
+use crate::dirfd::{Folder, FolderLock, OpenError};
 use crate::disk::{create_private_dir, write_atomic};
 use crate::envelope::Header;
 use crate::error::Error;
@@ -1615,21 +1615,28 @@ fn io_error(e: io::Error) -> EngineError {
     EngineError::Io(e.kind())
 }
 
-/// Lê o arquivo inteiro. Some entre a varredura e a leitura, ou cresceu além do teto: vai para
-/// `skipped` em vez de abortar o snapshot.
+/// Motivo em `skipped` quando, entre a varredura e a leitura, o arquivo virou link, FIFO ou
+/// pasta, um componente do caminho virou link, ou ele passou do teto (P-41).
+const NOT_REGULAR: &str = "not a regular file or too large";
+
+/// Lê o arquivo inteiro, **sem seguir link e com o teto valendo antes de ler** (P-41): a pasta-pai
+/// é aberta descendo da raiz da classe sem seguir link e o arquivo é lido por ela, com tipo e
+/// tamanho conferidos no descritor aberto. Some entre a varredura e a leitura, virou outra coisa
+/// ou cresceu além do teto: vai para `skipped` em vez de abortar o snapshot.
 async fn read_file(
     candidate: &Candidate,
-    _root: &Path,
+    root: &Path,
     skipped: &mut Vec<Skipped>,
 ) -> Result<Option<Zeroizing<Vec<u8>>>, EngineError> {
-    let abs = candidate.abs.clone();
-    let read = tokio::task::spawn_blocking(move || fs::read(abs))
+    let root = root.to_path_buf();
+    let path = candidate.path.clone();
+    let read = tokio::task::spawn_blocking(move || read_beneath(&root, &path))
         .await
         .map_err(|_| EngineError::Io(io::ErrorKind::Other))?;
     let reason = match read {
-        Ok(data) if data.len() as u64 <= MAX_FILE_BYTES => return Ok(Some(Zeroizing::new(data))),
-        Ok(_) => "file too large",
+        Ok(data) => return Ok(Some(Zeroizing::new(data))),
         Err(e) if e.kind() == io::ErrorKind::NotFound => "file disappeared",
+        Err(e) if e.kind() == io::ErrorKind::InvalidInput => NOT_REGULAR,
         Err(e) => return Err(io_error(e)),
     };
     skipped.push(Skipped {
@@ -1638,6 +1645,25 @@ async fn read_file(
         reason,
     });
     Ok(None)
+}
+
+/// Lê `relative` (caminho do manifest, separador `/`, já validado) sob `root`. Link, FIFO, pasta
+/// ou arquivo acima do teto: `InvalidInput`; um componente do caminho que virou link ou arquivo
+/// também. Não existe mais: `NotFound`.
+fn read_beneath(root: &Path, relative: &str) -> io::Result<Vec<u8>> {
+    let relative = Path::new(relative);
+    let invalid = || io::Error::from(io::ErrorKind::InvalidInput);
+    let name = relative
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(invalid)?;
+    let parent = relative.parent().unwrap_or(Path::new(""));
+    let folder = Folder::open_beneath(root, parent).map_err(|e| match e {
+        OpenError::NotAFolder => invalid(),
+        OpenError::Io(e) if e.kind() == io::ErrorKind::NotADirectory => invalid(),
+        OpenError::Io(e) => e,
+    })?;
+    Ok(folder.read_limited(name, MAX_FILE_BYTES)?.bytes)
 }
 
 /// Ordena por `(classe, path em bytes)` e resolve as colisões por caixa, que o manifest não
@@ -5707,8 +5733,6 @@ mod tests {
     //
     // O candidato é montado à mão, como o `scan` o viu; o disco já está diferente (a troca
     // acontece entre a varredura e a leitura).
-
-    const NOT_REGULAR: &str = "not a regular file or too large";
 
     fn seen_by_scan(root: &Path, rel: &str) -> Candidate {
         Candidate {
