@@ -2,6 +2,15 @@
 
 Mais recente no topo.
 
+### 2026-11-18 — Sessão 104 (Fase 4, etapa 3: auditorias de cripto e de arquivos)
+
+- **Pedido**: seguir a Fase 4 (arca#162 já mesclado). Duas auditorias `security-auditor` em paralelo, só leitura: (1) cripto e chaves; (2) `apply`, diário, symlinks, perdedores e armazenamento. A frente 3 (hub e pareamento, no Warden) **ficou de fora**: não autorizada.
+- **Resultado**: nenhum achado crítico; cripto correta (nonce, AAD, HKDF, `Debug` redigido). Confirmadas T1, T2, T3, T5, T14, T15, T16, T19; **T4, T6, T7, T17, T18, T21 corrigidas ou ampliadas**; T10 não verificável (a rotação não existe no núcleo).
+- **Achados que mudam o modelo**: o `pull` **grava** manifest de época forjada e trava o dispositivo (P-39); a API não liga época a troca de chave e o núcleo não inicia época nova (P-40); o snapshot lê por caminho e segue symlink (P-41); `restore` e `validate_path` não barram nome reservado (P-42); `restore` falho apaga tudo na pasta (P-43); `.tmp-*` e `.arca-old-n` órfãos (P-44); escala e tetos, S3 com precipício em 1.000.000 (P-45); pequenos (P-46).
+- **Feito**: só docs. `AMEACAS.md` revisado (T23 a T30 novas, 8 linhas corrigidas, seção 4 com 6 condições), `PENDING.md` com P-39 a P-46, `OVERVIEW.md`.
+- **Não verificado**: nada foi executado (sem build, teste nem corrida); T12 e T13 e o código do Warden; `merge.rs`, `heads.rs`, `verify.rs`; fora do Linux. O auditor é o mesmo modelo, não uma revisão independente.
+- **Fica**: ADR de rotação (P-39 e P-40, decisão do dono, §4); correções baratas P-41 a P-43 em PRs de código separados, cada um com confirmação; etapa 4 (`VALIDACAO.md`, experimentos do §10 que dependem de você); etapa 5 (decisão "fonte única").
+
 ### 2026-11-18 — Sessão 103 (Fase 4, etapa 1 e 2: modelo de ameaças)
 
 - **Pedido**: planejar a Fase 4 (veio de "o que destrava o sync do Anchor"). Plan mode; plano aprovado em 5 etapas (modelo de ameaças, auditoria por área, roteiro dos experimentos do SPEC §10, decisão sobre "fonte única", fechamento). Decisão sua: o dispositivo perdido publicando na época antiga (T8) entra como **lacuna a desenhar num ADR futuro**, não se resolve na Fase 4.
