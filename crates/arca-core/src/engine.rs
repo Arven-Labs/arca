@@ -1196,17 +1196,7 @@ impl<S: BlobStore> Engine<S> {
             touched.push((root, existed));
         }
 
-        let result = self.restore_files(&manifest, &enabled, &touched).await;
-        if result.is_err() {
-            for (root, existed) in touched {
-                let _ = run(move || {
-                    cleanup(&root, existed);
-                    Ok(())
-                })
-                .await;
-            }
-        }
-        result
+        self.restore_files(&manifest, &enabled, &touched).await
     }
 
     /// Busca o blob da entrada, decifra e confere `size` e `sha256` do texto claro.
@@ -1227,16 +1217,48 @@ impl<S: BlobStore> Engine<S> {
         Ok(plain)
     }
 
+    /// Cria as raízes, trava-as (P-43) e grava os arquivos. Se falha, desfaz **só o que criou**
+    /// (arquivos, pastas e raízes que não existiam), ainda com a trava: o que a pessoa pôs na
+    /// pasta depois da conferência de "vazia" nunca é apagado.
     async fn restore_files(
         &self,
         manifest: &Manifest,
         enabled: &[(Class, &Path)],
         touched: &[(PathBuf, bool)],
     ) -> Result<Restored, EngineError> {
-        for (root, _) in touched {
-            let root = root.clone();
-            run(move || create_private_dir(&root).map_err(io_error)).await?;
+        let mut created = Created::default();
+        // as travas só caem no fim desta função, depois do desfazer
+        let mut locks: Vec<FolderLock> = Vec::new();
+        let result = async {
+            for (root, existed) in touched {
+                if !existed {
+                    created.roots.push(root.clone());
+                }
+                let root = root.clone();
+                run(move || create_private_dir(&root).map_err(io_error)).await?;
+            }
+            let roots: Vec<PathBuf> = touched.iter().map(|(root, _)| root.clone()).collect();
+            locks = run(move || lock_roots(&roots)).await?;
+            self.write_entries(manifest, enabled, &mut created).await
         }
+        .await;
+        if result.is_err() {
+            let _ = run(move || {
+                undo_restore(&created);
+                Ok(())
+            })
+            .await;
+        }
+        drop(locks);
+        result
+    }
+
+    async fn write_entries(
+        &self,
+        manifest: &Manifest,
+        enabled: &[(Class, &Path)],
+        created: &mut Created,
+    ) -> Result<Restored, EngineError> {
         let mut files = 0;
         for entry in &manifest.files {
             let Some((_, root)) = enabled.iter().find(|(class, _)| *class == entry.class) else {
@@ -1247,13 +1269,11 @@ impl<S: BlobStore> Engine<S> {
             }
             let plain = self.plain_blob(entry).await?;
             let dest = safe_join(root, &entry.path)?;
-            run(move || {
-                if let Some(parent) = dest.parent() {
-                    create_private_dir(parent).map_err(io_error)?;
-                }
-                write_atomic(&dest, &plain).map_err(io_error)
-            })
-            .await?;
+            let root = root.to_path_buf();
+            let (new_dirs, written) = run(move || Ok(place(&root, dest, &plain))).await?;
+            // as pastas entram na lista mesmo que a gravação tenha falhado
+            created.dirs.extend(new_dirs);
+            created.files.push(written?);
             files += 1;
         }
         Ok(Restored { files })
@@ -1642,25 +1662,69 @@ fn check_target(root: &Path) -> Result<bool, EngineError> {
     }
 }
 
-/// Desfaz uma restauração que falhou: apaga o que ela criou. Só roda em destinos que estavam
-/// vazios (ou inexistentes) quando começou, então tudo lá dentro é dela.
-fn cleanup(root: &Path, existed: bool) {
-    if !existed {
-        let _ = fs::remove_dir_all(root);
-        return;
+/// O que uma restauração criou, para desfazer só isso se ela falhar (P-43). A pasta de destino
+/// foi conferida como vazia no início, mas a restauração leva tempo e a pasta não está
+/// protegida de quem a edita: o que não está aqui nunca é apagado.
+#[derive(Default)]
+struct Created {
+    /// Raízes que não existiam.
+    roots: Vec<PathBuf>,
+    /// Pastas que não existiam, o pai antes do filho.
+    dirs: Vec<PathBuf>,
+    /// Arquivos gravados.
+    files: Vec<PathBuf>,
+}
+
+/// Desfaz uma restauração que falhou: arquivos, depois pastas do fundo para a raiz, depois as
+/// raízes criadas. Só remove pasta **vazia** (`remove_dir`): se a pessoa pôs algo dentro, a pasta
+/// e o conteúdo ficam.
+fn undo_restore(created: &Created) {
+    for file in &created.files {
+        let _ = fs::remove_file(file);
     }
-    let Ok(entries) = fs::read_dir(root) else {
-        return;
+    for dir in created.dirs.iter().rev() {
+        let _ = fs::remove_dir(dir);
+    }
+    for root in &created.roots {
+        let _ = fs::remove_dir(root);
+    }
+}
+
+/// As pastas entre `root` (exclusive) e `parent` (inclusive) que não existem agora, o pai antes
+/// do filho.
+fn missing_ancestors(root: &Path, parent: &Path) -> Vec<PathBuf> {
+    let mut missing = Vec::new();
+    let mut current = parent;
+    while current != root && fs::symlink_metadata(current).is_err() {
+        missing.push(current.to_path_buf());
+        match current.parent() {
+            Some(up) => current = up,
+            None => break,
+        }
+    }
+    missing.reverse();
+    missing
+}
+
+/// Cria as pastas que faltam e grava `plain` em `dest`. Devolve as pastas criadas (mesmo se a
+/// gravação falhar) e o resultado da gravação.
+fn place(root: &Path, dest: PathBuf, plain: &[u8]) -> (Vec<PathBuf>, Result<PathBuf, EngineError>) {
+    let Some(parent) = dest.parent() else {
+        return (
+            Vec::new(),
+            write_atomic(&dest, plain)
+                .map(|()| dest.clone())
+                .map_err(io_error),
+        );
     };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let is_dir = entry.file_type().is_ok_and(|t| t.is_dir());
-        let _ = if is_dir {
-            fs::remove_dir_all(&path)
-        } else {
-            fs::remove_file(&path)
-        };
+    let new_dirs = missing_ancestors(root, parent);
+    if let Err(e) = create_private_dir(parent) {
+        return (new_dirs, Err(io_error(e)));
     }
+    let written = write_atomic(&dest, plain)
+        .map(|()| dest.clone())
+        .map_err(io_error);
+    (new_dirs, written)
 }
 
 /// `root` + `rel` (separador `/`), recusando qualquer componente que possa sair da raiz.
