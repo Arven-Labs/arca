@@ -121,10 +121,8 @@ impl<S: BlobStore> Engine<S> {
             }
         }
 
-        report.clean = report.rejected.is_empty()
-            && report.missing.is_empty()
-            && report.corrupt.is_empty()
-            && report.unreadable.is_empty();
+        report.clean =
+            report.missing.is_empty() && report.corrupt.is_empty() && report.unreadable.is_empty();
         Ok(report)
     }
 
