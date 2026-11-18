@@ -2,6 +2,13 @@
 
 Mais recente no topo.
 
+### 2026-11-18 — Sessão 102 (fechamento da Fase 3, sem GC)
+
+- **Pedido**: "vamos terminar a fase 3". Plan mode. Decisões suas: **fechar sem GC** (descartados: implementar o GC agora; só a integração no Warden); a integração no Warden é **fase do Warden**; gatilho de reavaliação **custo medido ≥ US$ 0,50/mês** (descartados: US$ 1/mês; só por tamanho, 20 GB).
+- **Feito**: só docs. ADR 0017 (novo), P-05 e P-06 e P-38 atualizados em `PENDING.md`, Fase 3 "Feita" no `OVERVIEW.md`.
+- **Não verificado**: o tamanho real do Vault e o custo de `list`/`has`/GET em B2 (continuam sem medida); a conta "US$ 0,50 ≈ 80 GB" é aritmética minha sobre o preço lido em 2026-10-31, não medida.
+- **Fica**: no Warden, agendar `verify`, guardar `next_offset`, cofre da chave S3, medir o Vault real, subir o `rev` do `arca-core` (de `1d8c38e`); na arca, P-31 (1), P-29, P-30, P-09, P-22, P-25, P-32 a P-36, P-38 e a Fase 4.
+
 ### 2026-11-17 — Sessão 101 (Fase 3, fatia 3: `verify` e `verify_restore`)
 
 - **Pedido**: "segue" (fatia 3 da Fase 3). Plan mode. Decisões suas: modos **Presença e Amostra**; teste de restauração **sem gravar em disco**; **o consumidor agenda** (descartados: só completa, só presença; restaurar em pasta temporária; agendador na arca). Confirmou também `clean == false` com manifest rejeitado e ids no relatório.
