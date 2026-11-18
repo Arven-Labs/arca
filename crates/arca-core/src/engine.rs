@@ -1686,7 +1686,7 @@ fn undo_restore(created: &Created) {
         let _ = fs::remove_dir(dir);
     }
     for root in &created.roots {
-        let _ = fs::remove_dir(root);
+        let _ = fs::remove_dir_all(root);
     }
 }
 
