@@ -146,6 +146,16 @@ Roots { vault, config, secret: Option<PathBuf> }   // classe sem pasta = desliga
   - **Custo por requisição:** o `handle` hasheia o objeto inteiro (até 256 MiB, ~0,7 s) na thread que o chama e mantém o corpo todo em memória (cerca de 2× o tamanho num `PUT`). Rodar o `handle` fora do executor que serve os outros pedidos (`spawn_blocking` ou pool próprio), com **semáforo de concorrência por dono e global**, e cota de objetos e de bytes por dono. Sem isso, um dispositivo aprovado derruba o hub (I-1, I-2 e I-3 da auditoria; P-35 itens 9 e 10).
 - **Limites** em P-35 (hub real não testado, TLS real só por falha, `aws-lc-rs`, `localhost` pelo resolvedor).
 
+### 4.4 Verificação de integridade e teste de restauração (Fase 3, fatia 3)
+
+**Implementado** em `arca-core::engine::verify`, como métodos do `Engine` (servem qualquer `BlobStore`: disco, hub, S3). Só leitura; o núcleo não agenda (quem chama no tempo é o consumidor). O relatório e os erros só trazem ids, nunca caminho ou nome de arquivo.
+
+- `Engine::verify(VerifyMode) -> VerifyReport`. Abre todos os manifests legíveis (histórico inteiro) e junta os blobs distintos que eles citam. Três degraus de custo e de prova: **`has`** (o nome existe; um provedor hostil pode mentir), **`verified_get`** (os bytes cifrados têm o hash do id), e, em `verify_restore`, a tag e o hash do texto claro.
+  - `Presence`: `list` + um `has` por blob citado. Não baixa blob, então **não vê** objeto com os bytes trocados.
+  - `Sample { max_blobs, offset }`: presença, mais `verified_get` de uma janela de até `max_blobs` blobs, a partir de `offset` na lista ordenada por hash, **sem dar a volta dentro da rodada**. `next_offset` encadeia as rodadas: com o Vault parado, ⌈N/`max_blobs`⌉ rodadas leem tudo uma vez. `offset` maior que N dá a volta (módulo N). Se o Vault muda entre rodadas, a garantia de cobertura não vale.
+  - `VerifyReport`: `manifests_ok`, `rejected`, `referenced_blobs`, `missing`, `corrupt`, `unreadable`, `sampled`, `next_offset`, `clean`. **`clean == false` não é sucesso**: há manifest rejeitado, blob ausente, corrompido ou que não pôde ser conferido. `Unavailable` ao listar ou abrir os manifests é `Err` (tentar de novo); numa checagem de blob vira `unreadable` e a rodada segue.
+- `Engine::verify_restore(&ObjectId) -> RestoreCheck { files, bytes }`: baixa, decifra e confere `size` e `sha256` do texto claro de cada entrada (respeitando os filtros), um blob por vez, em memória (`Zeroizing`), **sem gravar nada em disco** (o texto claro de `secret` não toca o disco). Baixa o Vault inteiro: uso raro. Não prova o passo de escrita no sistema de arquivos (esse é do `restore`, com testes próprios). Primeiro erro aborta: `MissingObject`, `Store(Corrupt)`, `Integrity`.
+
 ## 5. Envelope e manifest
 
 ### 5.1 Envelope (igual para blob e manifest)

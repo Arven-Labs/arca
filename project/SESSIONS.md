@@ -2,6 +2,15 @@
 
 Mais recente no topo.
 
+### 2026-11-17 — Sessão 101 (Fase 3, fatia 3: `verify` e `verify_restore`)
+
+- **Pedido**: "segue" (fatia 3 da Fase 3). Plan mode. Decisões suas: modos **Presença e Amostra**; teste de restauração **sem gravar em disco**; **o consumidor agenda** (descartados: só completa, só presença; restaurar em pasta temporária; agendador na arca). Confirmou também `clean == false` com manifest rejeitado e ids no relatório.
+- **Decisão minha, a confirmar**: a Amostra é uma **janela determinística** (`offset` na lista ordenada por hash, sem dar a volta dentro da rodada, `next_offset` encadeia), não sorteio: cobertura garantida em ⌈N/k⌉ rodadas com o Vault parado e teste determinístico. O campo é `clean`, não `complete` (também vale `false` com blob ausente ou corrompido).
+- **Feito ([arca#155](https://github.com/Arven-Labs/arca/pull/155))**: `engine/verify.rs` (submódulo de `engine`, para ler `load`, `plain_blob` e `read_manifest` sem mudar visibilidade): `Engine::verify(VerifyMode)` e `Engine::verify_restore`. Contrato em `SPEC-TECNICA.md` §4.4. Cenário 1 de `s3_e2e.rs` estendido (Presença, Amostra e `verify_restore` limpos no Garage; depois o blob de 5 MB é sobrescrito e a Amostra o acusa e o `verify_restore` falha com `Corrupt`).
+- **Testes (CI)**: o primeiro push (esboço com `unimplemented!`) caiu no clippy por import sem uso, antes dos testes (`-D warnings`); corrigido. **Vermelho antes**: 599 testes, 584 passaram, **15 falharam**, todos no `unimplemented!`, mais o cenário 1 do Garage (run 44185455375). **Verde depois**: 599 passaram, e 8 `real_s3_*` no Garage (run 44186133241). **Quebras de propósito** (arca#156 a #160, fechados): janela com um blob a mais derrubou 2; presença sem acusar ausente derrubou 1; amostra ignorando `Corrupt` derrubou 2 (e o cenário do Garage); `verify_restore` só com o hash cifrado derrubou 3; `rejected` fora do `clean` derrubou 1. Todas compilaram limpas e caíram nos testes.
+- **Não verificado**: custo real em B2 (`has` por blob e GET da Amostra com um Vault de tamanho real; o ADR 0011 e o 0007 pedem medir); `verify` contra um hub; que a Presença não prova nada contra um provedor que mente em `has` (só a Amostra e o `verify_restore` provam); o passo de escrita no sistema de arquivos no teste de restauração (fica no `restore`). Nada rodado localmente além de `cargo fmt --check`.
+- **Fica**: integração no Warden (chamar `verify` em loop próprio, guardar o `next_offset`, mostrar `clean`; e a configuração e o cofre da chave S3), retenção (P-05, decide com o tamanho real do Vault); P-31 (1), P-29, P-30, P-09, P-22, P-25, P-32 a P-36, P-38. Warden: subir o `rev` do `arca-core` (de `1d8c38e`).
+
 ### 2026-11-17 — Sessão 100 (Fase 3, fatia 2: push, pull e restauração direto do S3, provados no Garage)
 
 - **Pedido**: "vamos continuar no resto da fase 3". Plan mode. Decisões suas: fatia 2 = só provar o round-trip (descartados: `verify` já; fatias 2 e 3 juntas); `verify` fica para a fatia 3; isolamento por **1 bucket novo por cenário no CI** (descartados: campo `prefix` no `S3Config`; só push/pull sem `Engine<S3Store>`).
