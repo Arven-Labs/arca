@@ -3274,6 +3274,9 @@ mod tests {
         forged: Vec<([u8; 32], Vec<u8>)>,
         failing: Vec<[u8; 32]>,
         manifest_gets: Vec<[u8; 32]>,
+        /// Na primeira leitura de um blob, grava este arquivo (a pessoa mexendo na pasta durante
+        /// uma restauração). Só roda uma vez.
+        drop_in: Option<(PathBuf, Vec<u8>)>,
     }
 
     impl LaggedList {
@@ -3313,6 +3316,11 @@ mod tests {
             self.script.lock().unwrap().failing.push(id.hash);
         }
 
+        /// Na primeira leitura de um blob, grava `bytes` em `path`.
+        fn drop_file_on_first_blob_get(&self, path: &Path, bytes: &[u8]) {
+            self.script.lock().unwrap().drop_in = Some((path.to_path_buf(), bytes.to_vec()));
+        }
+
         fn gets_of(&self, id: &ObjectId) -> usize {
             let script = self.script.lock().unwrap();
             script
@@ -3332,6 +3340,11 @@ mod tests {
                 let mut script = self.script.lock().unwrap();
                 if id.kind == ObjectKind::Manifest {
                     script.manifest_gets.push(id.hash);
+                }
+                if id.kind == ObjectKind::Blob {
+                    if let Some((path, bytes)) = script.drop_in.take() {
+                        fs::write(path, bytes).unwrap();
+                    }
                 }
                 if script.failing.contains(&id.hash) {
                     return Err(StoreError::Unavailable(std::io::ErrorKind::Other));
@@ -5814,6 +5827,67 @@ mod tests {
             0,
             "e a que já existia volta vazia"
         );
+    }
+
+    /// P-43: a restauração baixa blob por blob e pode levar minutos. Um arquivo que a pessoa
+    /// criou na pasta depois da conferência de "vazia" não é dela para apagar quando falha.
+    #[tokio::test]
+    async fn a_failed_restore_never_deletes_a_file_the_user_created_in_the_target() {
+        for existed in [false, true] {
+            let rig = Rig::new();
+            let vault = rig.dir("vault");
+            write(&vault, "a/x.md", b"1");
+            write(&vault, "b.md", b"2");
+            let id = snapshot_tree(&rig, &vault).await;
+            let tip = rig.engine("pc").heads().await.unwrap().tips.remove(0);
+            let last = &tip.manifest.files[1];
+            let lag = LaggedList::new(&rig.store);
+            lag.fail_get(&ObjectId {
+                kind: ObjectKind::Blob,
+                hash: last.blob.0,
+            });
+
+            let target = if existed {
+                rig.dir("ja-existia-vazia")
+            } else {
+                rig.tmp.path().join("nova")
+            };
+            // o blob do primeiro arquivo é lido depois de a pasta existir: a pessoa cria um arquivo
+            lag.drop_file_on_first_blob_get(&target.join("dono.txt"), b"nao mexa");
+            let eng = Engine::new(lag.clone(), keys(1), "pc").unwrap();
+
+            assert!(eng.restore(&id, &vault_only(&target)).await.is_err());
+            assert_eq!(
+                tree(&target),
+                BTreeMap::from([("dono.txt".to_string(), b"nao mexa".to_vec())]),
+                "o arquivo da pessoa fica (pasta que já existia: {existed}) e o que a restauração \
+                 gravou some"
+            );
+        }
+    }
+
+    /// P-43: enquanto uma restauração roda, a raiz está travada; outra operação (aqui, a trava de
+    /// um `apply`) recebe `Busy`, e nada é escrito.
+    #[tokio::test]
+    async fn a_restore_into_a_locked_root_is_busy_and_writes_nothing() {
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        write(&vault, "a.md", b"1");
+        let id = snapshot_tree(&rig, &vault).await;
+        let target = rig.dir("vazia");
+
+        let held = lock_roots(std::slice::from_ref(&target)).unwrap();
+        assert_eq!(
+            rig.engine("pc").restore(&id, &vault_only(&target)).await,
+            Err(EngineError::Busy)
+        );
+        assert_eq!(fs::read_dir(&target).unwrap().count(), 0);
+        drop(held);
+        rig.engine("pc")
+            .restore(&id, &vault_only(&target))
+            .await
+            .unwrap();
+        assert_eq!(tree(&target), tree(&vault));
     }
 
     #[tokio::test]
