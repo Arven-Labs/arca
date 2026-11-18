@@ -496,6 +496,49 @@ mod tests {
         }
     }
 
+    /// P-42: os nomes dos arquivos de trabalho do próprio arca (diário, temporários do `apply` e
+    /// do `write_atomic`, original guardado) nunca entram num manifest, nem como arquivo nem como
+    /// pasta, em qualquer posição do caminho.
+    #[test]
+    fn work_file_names_are_rejected_in_any_component() {
+        for p in [
+            ".arca-apply-journal",
+            ".arca-new-0",
+            ".arca-old-12",
+            ".tmp-0123456789abcdef",
+            ".arca-kept-0123456789abcdef",
+            "a/.arca-new-3/b.md",
+            ".arca-old-7/x",
+            "dir/sub/.tmp-ffffffffffffffff",
+            "dir/.arca-apply-journal/x",
+        ] {
+            assert_eq!(
+                validate_path(p),
+                Err(Error::InvalidPath("reserved name")),
+                "should reject {p:?}"
+            );
+        }
+    }
+
+    /// Quase-nomes continuam válidos: só o formato exato dos arquivos de trabalho é reservado.
+    #[test]
+    fn names_that_only_look_like_work_files_are_accepted() {
+        for p in [
+            ".arca-new-",
+            ".arca-new-1x",
+            ".arca-old",
+            ".tmp-notes",
+            ".tmp-0123456789abcde",
+            ".tmp-0123456789ABCDEF",
+            "a.arca-new-0",
+            ".arca-new-0.md",
+            ".arca-apply-journal.md",
+            "dir/.arca-new-x/file.md",
+        ] {
+            assert_eq!(validate_path(p), Ok(()), "should accept {p:?}");
+        }
+    }
+
     #[test]
     fn path_error_never_repeats_the_path() {
         let err = validate_path("segredo/../nome-secreto.md").unwrap_err();
