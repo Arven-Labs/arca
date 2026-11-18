@@ -55,6 +55,14 @@ impl Roots {
         .collect()
     }
 
+    /// A pasta da classe, se ela está ligada.
+    fn root_of(&self, class: Class) -> Option<&Path> {
+        self.enabled()
+            .into_iter()
+            .find(|(c, _)| *c == class)
+            .map(|(_, root)| root)
+    }
+
     fn is_enabled(&self, class: Class) -> bool {
         self.enabled().iter().any(|(c, _)| *c == class)
     }
@@ -788,7 +796,10 @@ impl<S: BlobStore> Engine<S> {
         let mut files: Vec<FileEntry> = carried.into_iter().cloned().collect();
         let mut new_blobs = 0;
         for candidate in candidates {
-            let Some(data) = read_file(&candidate, &mut skipped).await? else {
+            let root = roots
+                .root_of(candidate.class)
+                .ok_or(EngineError::Io(io::ErrorKind::InvalidInput))?;
+            let Some(data) = read_file(&candidate, root, &mut skipped).await? else {
                 continue;
             };
             let sha256 = Hash32(Sha256::digest(data.as_slice()).into());
@@ -1608,6 +1619,7 @@ fn io_error(e: io::Error) -> EngineError {
 /// `skipped` em vez de abortar o snapshot.
 async fn read_file(
     candidate: &Candidate,
+    _root: &Path,
     skipped: &mut Vec<Skipped>,
 ) -> Result<Option<Zeroizing<Vec<u8>>>, EngineError> {
     let abs = candidate.abs.clone();
@@ -5689,6 +5701,125 @@ mod tests {
         assert!(skipped
             .iter()
             .all(|s| s.class == Class::Vault && !s.reason.is_empty()));
+    }
+
+    // ---------- snapshot: leitura sem seguir link, com teto antes de ler (P-41) ----------
+    //
+    // O candidato é montado à mão, como o `scan` o viu; o disco já está diferente (a troca
+    // acontece entre a varredura e a leitura).
+
+    const NOT_REGULAR: &str = "not a regular file or too large";
+
+    fn seen_by_scan(root: &Path, rel: &str) -> Candidate {
+        Candidate {
+            class: Class::Vault,
+            path: rel.to_string(),
+            abs: root.join(rel),
+            len: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn read_file_returns_a_regular_file_whole() {
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        write(&vault, "sub/a.md", b"conteudo");
+        let mut skipped = Vec::new();
+        let data = read_file(&seen_by_scan(&vault, "sub/a.md"), &vault, &mut skipped)
+            .await
+            .unwrap();
+        assert_eq!(
+            data.as_deref().map(|d| d.as_slice()),
+            Some(&b"conteudo"[..])
+        );
+        assert!(skipped.is_empty());
+    }
+
+    #[tokio::test]
+    async fn read_file_skips_a_file_that_vanished_after_the_scan() {
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        let mut skipped = Vec::new();
+        let data = read_file(&seen_by_scan(&vault, "a.md"), &vault, &mut skipped)
+            .await
+            .unwrap();
+        assert!(data.is_none());
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].reason, "file disappeared");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_file_never_follows_a_link_put_in_place_of_the_file() {
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        let outside = rig.dir("fora");
+        write(&outside, "id_ed25519", b"chave privada");
+        std::os::unix::fs::symlink(outside.join("id_ed25519"), vault.join("a.md")).unwrap();
+        let mut skipped = Vec::new();
+        let data = read_file(&seen_by_scan(&vault, "a.md"), &vault, &mut skipped)
+            .await
+            .unwrap();
+        assert!(data.is_none(), "leu o alvo do link: {data:?}");
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].reason, NOT_REGULAR);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_file_never_follows_a_link_put_in_place_of_a_parent_folder() {
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        let outside = rig.dir("fora");
+        write(&outside, "a.md", b"segredo de fora da raiz");
+        std::os::unix::fs::symlink(&outside, vault.join("sub")).unwrap();
+        let mut skipped = Vec::new();
+        let data = read_file(&seen_by_scan(&vault, "sub/a.md"), &vault, &mut skipped)
+            .await
+            .unwrap();
+        assert!(data.is_none(), "leu fora da raiz: {data:?}");
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].reason, NOT_REGULAR);
+    }
+
+    /// Um FIFO no lugar do arquivo não pode travar a leitura nem entregar o que se escreve nele.
+    /// A thread que escreve fica solta de propósito: com o `read_file` certo ninguém lê o FIFO.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_file_skips_a_fifo_instead_of_blocking_or_reading_it() {
+        use rustix::fs::{mknodat, FileType, Mode, CWD};
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        let fifo = vault.join("a.md");
+        mknodat(CWD, &fifo, FileType::Fifo, Mode::RUSR | Mode::WUSR, 0).unwrap();
+        std::thread::spawn(move || {
+            let _ = fs::write(fifo, b"x");
+        });
+        let mut skipped = Vec::new();
+        let data = read_file(&seen_by_scan(&vault, "a.md"), &vault, &mut skipped)
+            .await
+            .unwrap();
+        assert!(data.is_none(), "leu o FIFO: {data:?}");
+        assert_eq!(skipped[0].reason, NOT_REGULAR);
+    }
+
+    /// O arquivo cresceu depois da varredura: o teto vale antes de ler, não depois. (Guarda de
+    /// regressão: o `fs::read` antigo já devolvia "file too large", só que depois de ler tudo.)
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_file_skips_a_file_that_grew_past_the_cap_after_the_scan() {
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        fs::File::create(vault.join("a.md"))
+            .unwrap()
+            .set_len(MAX_FILE_BYTES + 1)
+            .unwrap();
+        let mut skipped = Vec::new();
+        let data = read_file(&seen_by_scan(&vault, "a.md"), &vault, &mut skipped)
+            .await
+            .unwrap();
+        assert!(data.is_none());
+        assert_eq!(skipped.len(), 1);
     }
 
     #[tokio::test]
