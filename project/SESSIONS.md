@@ -2,6 +2,15 @@
 
 Mais recente no topo.
 
+### 2026-11-18 — Sessão 106 (P-41: o snapshot lê sem seguir link e com o teto antes de ler, [arca#166](https://github.com/Arven-Labs/arca/pull/166))
+
+- **Pedido**: "sim" à recomendação de começar pelo P-41 (a correção barata de maior impacto depois do P-43). Plan mode; plano aprovado, sem decisão nova sua: erro de leitura vira `skipped`, não aborta (assumido, como o `scan` faz com symlink).
+- **Feito**: `read_file` (`engine.rs`) passou a ler por `Folder::open_beneath` na pasta-pai e `read_limited(nome, MAX_FILE_BYTES)`; `Roots::root_of` entrega a raiz da classe. Só `engine.rs` (e os 3 docs). `scan.rs` e `Candidate` não mudaram.
+- **Testes primeiro**: 6 testes de `read_file` com o candidato montado à mão (simula a troca depois da varredura). Commit só com testes e a assinatura, no CI **antes** da correção: 604 passaram e **3 falharam** (link no lugar do arquivo, link na pasta-pai, FIFO; run 44420411611). Os outros 3 (teto, arquivo comum, arquivo sumido) são guarda de regressão e já passavam. **Depois**: `rust / test` com 607 passados, 0 falhas, clippy `-D warnings` limpo, `msrv`, `audit` e `s3-garage` verdes (run 44420921123).
+- **Quebra proposital** (leitura): voltar a `fs::read(root.join(path))` em PR de rascunho descartável (#167, fechado, branch apagada): 603 passaram, **4 falharam** (os 3 de cima e o do teto; run 44421487086). Revertida (nunca entrou na branch do PR).
+- **Não verificado**: a leitura contra uma raiz em NFS/FUSE; Windows (o `Folder` não-Unix lê por caminho, sem a garantia); a troca de verdade entre a varredura e a leitura (os testes montam o estado final, não a corrida); se o `read_to_end` do `read_limited` deixa cópia não zerada na memória (confiança baixa; o `apply` já o usa para a classe `secret`). O `cargo fmt --check` local passou, build e teste só no CI (ADR 0009).
+- **Fica**: o resto da "mesma classe" do P-41 (`save_conflict_losers`, `list` de perdedores, `kept`, `DeviceState::load`) e a decisão sobre o modelo "mesmo usuário"; P-42; ADR de rotação (P-39 e P-40); `VALIDACAO.md`.
+
 ### 2026-11-18 — Sessão 105 (P-43: `restore` só apaga o que criou, [arca#164](https://github.com/Arven-Labs/arca/pull/164))
 
 - **Pedido**: "vamos de 1" (a correção mais barata e concreta da Fase 4). Plan mode; decisões: registrar o que o restore criou e desfazer só isso, mais travar as raízes; `remove_dir` e não `remove_dir_all`.
