@@ -26,3 +26,6 @@ Duas pendências da Fase 1 mexiam no formato e na lógica de pontas e tinham de 
 - **Limite:** um dispositivo perdido, com a chave velha, continua podendo publicar na época antiga; esses manifests ficam em `superseded` e são ignorados, mas não impedidos (ADR 0006, Fase 4).
 - A rotação em si (gerar chave, snapshot completo da época nova) continua não implementada; este ADR só prepara o terreno nas pontas.
 - A ordem das classes é a do `derive(Ord)`: reordenar as variantes de `Class` muda o formato. O teste `files_are_ordered_by_class_then_path` protege.
+
+## Atualização (2026-11-18, Fase 4: ADR 0018)
+O limite da negação de serviço (época do cabeçalho não autenticada) era pior do que este ADR previa: o `Engine::pull` **gravava** o manifest de época diferente e o `NeedsNewKey` passava a valer para sempre (P-39). O [ADR 0018](0018-rotacao-e-epoca-desconhecida.md) muda **como** a regra "época mais nova que a das chaves" age, sem mudar o erro nem a regra de pontas: o `pull` não grava mais manifest de outra época (vai para o relatório) e o `NeedsNewKey { have, found }` passa a ser decidido pelo estado local do dispositivo, com reconhecimento por `(época, id)`. O que este ADR diz sobre `superseded`, `rejected` e `restore` de versão antiga continua valendo para o que a réplica já tem; depois de re-parear, `superseded` fica vazio.
