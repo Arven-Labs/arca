@@ -79,6 +79,21 @@ impl EpochKeys {
         }
     }
 
+    /// As chaves da época seguinte (`época + 1`), derivadas de `new_key` (ADR 0018, item 4).
+    /// Recusa a `VaultKey` que deriva, na época atual, as **mesmas subchaves** destas
+    /// (`KeyNotRotated`): "mesma chave, época + 1" manteria o acesso de quem a tem. Sem época
+    /// seguinte, `EpochOverflow`. Limite: reaproveitar uma chave de uma época **anterior** à
+    /// atual não é detectável (só se guarda a época atual).
+    pub fn next(&self, new_key: &VaultKey) -> Result<EpochKeys, Error> {
+        let epoch = self.epoch.checked_add(1).ok_or(Error::EpochOverflow)?;
+        let same_epoch = EpochKeys::derive(new_key, self.epoch);
+        // `|` e não `||`: as duas comparações rodam sempre, em tempo que não depende do conteúdo
+        if ct_eq(&same_epoch.blob, &self.blob) | ct_eq(&same_epoch.manifest, &self.manifest) {
+            return Err(Error::KeyNotRotated);
+        }
+        Ok(EpochKeys::derive(new_key, epoch))
+    }
+
     /// A época a que estas chaves pertencem.
     pub fn epoch(&self) -> u32 {
         self.epoch
@@ -90,6 +105,11 @@ impl EpochKeys {
             ObjectKind::Manifest => &self.manifest,
         }
     }
+}
+
+/// Igualdade de subchaves sem sair no primeiro byte diferente.
+fn ct_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 /// HKDF-SHA256 com `salt = "arca"` e `info = "arca/v1/<tipo>/<época>"` (época em decimal).
@@ -592,5 +612,57 @@ mod tests {
         assert_eq!(h.key_epoch, 7);
         assert_eq!(h.nonce, nonce);
         assert_eq!(body.len(), 2 + TAG_LEN);
+    }
+
+    // ---------- chave nova obrigatória (ADR 0018, item 4; P-48) ----------
+
+    fn other_vault_key() -> VaultKey {
+        VaultKey::from_bytes([9u8; 32])
+    }
+
+    #[test]
+    fn next_derives_the_following_epoch_from_the_new_key() {
+        let new = other_vault_key();
+        let next = keys(1).next(&new).unwrap();
+        let expected = EpochKeys::derive(&new, 2);
+        assert_eq!(next.epoch(), 2);
+        assert_eq!(&next.blob[..], &expected.blob[..]);
+        assert_eq!(&next.manifest[..], &expected.manifest[..]);
+    }
+
+    /// O que a regra existe para garantir: a época N + 1 do segredo novo não sai do antigo.
+    #[test]
+    fn the_next_epoch_of_the_new_key_is_not_what_the_old_key_derives_for_it() {
+        let next = keys(1).next(&other_vault_key()).unwrap();
+        let from_old = keys(2);
+        assert_ne!(&next.blob[..], &from_old.blob[..]);
+        assert_ne!(&next.manifest[..], &from_old.manifest[..]);
+    }
+
+    #[test]
+    fn next_refuses_the_vault_key_that_derives_the_same_subkeys() {
+        assert!(matches!(
+            keys(1).next(&test_vault_key()),
+            Err(Error::KeyNotRotated)
+        ));
+        assert!(matches!(
+            keys(7).next(&test_vault_key()),
+            Err(Error::KeyNotRotated)
+        ));
+    }
+
+    #[test]
+    fn next_accepts_a_key_that_differs_in_a_single_byte() {
+        let mut bytes = *test_vault_key().as_bytes();
+        bytes[31] ^= 1;
+        assert!(keys(1).next(&VaultKey::from_bytes(bytes)).is_ok());
+    }
+
+    #[test]
+    fn there_is_no_epoch_after_the_largest_one() {
+        assert!(matches!(
+            keys(u32::MAX).next(&other_vault_key()),
+            Err(Error::EpochOverflow)
+        ));
     }
 }

@@ -1423,6 +1423,53 @@ mod tests {
         assert!(rest.iter().all(|f| !first.contains(f)));
     }
 
+    /// Ponta a ponta da rotação (ADR 0018): quem rotaciona publica a época nova; o dispositivo
+    /// da chave velha a vê só como dica e bloqueia; o da chave nova segue e aplica.
+    #[tokio::test]
+    async fn a_rotation_reaches_the_old_key_as_a_block_and_the_new_key_as_the_vault() {
+        let tmp = TempDir::new();
+        let remote = disk(&tmp, "remoto");
+        let (a, b, base) = synced(&tmp, &remote, true).await;
+
+        let new_key = VaultKey::from_bytes([4u8; 32]);
+        let (_, rotated) = a.engine.begin_epoch(&new_key, &a.roots, 5).await.unwrap();
+        let rotated = match rotated {
+            Snapshot::Created { id, .. } => id,
+            other => panic!("esperava Created, veio {other:?}"),
+        };
+        replicate(&a.local, &remote).await.unwrap();
+
+        // chave velha: só uma dica não autenticada, que bloqueia e não grava nada
+        let report = b.engine.pull(&remote).await.unwrap();
+        assert_eq!(
+            report.foreign_epochs,
+            vec![ForeignEpoch {
+                epoch: 2,
+                id: rotated
+            }]
+        );
+        assert_eq!(b.local.has(&rotated).await, Ok(false));
+        assert_eq!(snapshot_of_b(&b).await, needs_new_key(2));
+
+        // chave nova: lê a época 2, e o histórico da 1 fica de fora (nunca é gravado)
+        let c_local = disk(&tmp, "c-store");
+        let c = Engine::new(c_local.clone(), EpochKeys::derive(&new_key, 2), "c").unwrap();
+        let c_vault = tmp.path().join("c-pastas/vault");
+        fs::create_dir_all(&c_vault).unwrap();
+        let report = c.pull(&remote).await.unwrap();
+        assert!(report
+            .foreign_epochs
+            .iter()
+            .any(|f| f.id == base && f.epoch == 1));
+        assert_eq!(c_local.has(&base).await, Ok(false));
+        let roots = Roots {
+            vault: Some(c_vault.clone()),
+            ..Roots::default()
+        };
+        c.apply(None, &rotated, &roots).await.unwrap();
+        assert_eq!(tree(&c_vault).get("x.md"), Some(&b"1".to_vec()));
+    }
+
     #[tokio::test]
     async fn the_raw_replicate_still_copies_a_manifest_of_another_epoch() {
         let tmp = TempDir::new();
