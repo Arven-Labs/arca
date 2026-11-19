@@ -62,9 +62,14 @@ pub async fn discover_epoch<S: BlobStore>(
             continue;
         };
         let epoch = header.key_epoch;
+        // QUEBRA 2: desiste da época no primeiro que nao abre
+        if unopened.iter().any(|f| f.epoch == epoch) {
+            continue;
+        }
         let keys = EpochKeys::derive(vault_key, epoch);
         if Manifest::open(&keys, &bytes).is_ok() {
-            opened = Some(opened.map_or(epoch, |best| best.max(epoch)));
+            // QUEBRA 1: o primeiro que abre vence, nao o maior
+            opened = opened.or(Some(epoch));
         } else {
             unopened.push(ForeignEpoch { epoch, id });
         }
