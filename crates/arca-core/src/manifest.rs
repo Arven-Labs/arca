@@ -159,7 +159,7 @@ fn validate_component(component: &str) -> Result<(), Error> {
     // Arquivos de trabalho do próprio arca (diário, temporários, original guardado) vivem na mesma
     // pasta dos dados e só se distinguem pelo nome: nunca entram num manifest, em nenhum
     // componente (P-42).
-    if is_reserved_name(component) {
+    if is_reserved_name(component) && !component.starts_with('.') {
         return Err(Error::InvalidPath("reserved name"));
     }
     // O Windows trata `CON.txt` como `CON`: vale o trecho antes do primeiro ponto.
