@@ -157,6 +157,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn takes_the_highest_when_several_epochs_open_with_the_same_key() {
+        let tmp = TempDir::new();
+        let store = store(&tmp);
+        // a mesma chave abre as três épocas (cada época deriva subchaves próprias): a maior vence,
+        // seja qual for a ordem em que o armazenamento lista
+        for epoch in [3, 0, 7, 5, 1] {
+            put_manifest(&store, &key(1), epoch, "pc").await;
+        }
+        let found = discover_epoch(&store, &key(1)).await.unwrap();
+        assert_eq!(found.epoch, 7);
+        assert!(found.newer.is_empty());
+    }
+
+    #[tokio::test]
     async fn the_new_key_of_a_rotated_vault_finds_the_new_epoch() {
         let tmp = TempDir::new();
         let store = store(&tmp);

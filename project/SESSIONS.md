@@ -2,6 +2,17 @@
 
 Mais recente no topo.
 
+### 2026-11-19 — Sessão 112 (P-49 fatia B: `discover_epoch`, [arca#177](https://github.com/Arven-Labs/arca/pull/177))
+
+- **Pedido**: "vamos de p49". Plan mode. O levantamento do Warden mostrou que o P-49 já estava fatiado lá (A1 feita, warden#185; A2, A3, B e C abertas); decisão sua: **começar pela B** (descobrir a época, no arca-core), pré-requisito da C. Descartadas: A2 (CLI, não avança a rotação), C inteira e decidir o desenho da C primeiro.
+- **Feito**: módulo novo `discover.rs`: `discover_epoch(&store, &VaultKey) -> Result<Discovery { epoch, newer }, DiscoverError>`. Função livre, passe único (um manifest lido por vez, o cabeçalho diz a época a tentar, só conta quem abre), equivalente a "da maior época para a menor, tentando todos". `Empty` (Vault nova) ≠ `NoneOpens` (chave errada ou só forjados); backend fora do ar é `Store`; objeto ilegível é pulado. Nota no ADR 0018; P-49 atualizado.
+- **Respondido**: o "não verificado" do P-49: o re-pareamento do Warden **não** aceita dispositivo que já tem chave (`run_offer` devolve `AlreadyHasKey`, `adopt_joined_material` recusa sobrescrever; o hub aceitaria, o bloqueio é do cliente).
+- **Testes primeiro**: 14 testes novos. CI **antes** (run 44617787322): **13 falharam** e 1 passou (`an_empty_storage…`, guarda: o esboço devolvia sempre `Empty`). **Depois** (run 44618368469): `rust` com 676 passados, 0 falhas, clippy `-D warnings`, `msrv`, `audit`, `s3-garage` e `guard` verdes.
+- **Quebra proposital** (chaves, §4): "o primeiro que abre vence" e "desiste da época no primeiro que não abre", em PR descartável (#178, fechado, branch apagada, run 44618966733): **3 falharam** (`a_forged_object_with_the_true_epoch…`, `the_old_key…reports_the_newer`, `the_largest_possible_epoch_works`). **Achado:** a primeira quebra só caiu num teste, porque em `takes_the_highest_epoch_that_opens` só um manifest abre (cada época usa chave diferente); acrescentei `takes_the_highest_when_several_epochs_open_with_the_same_key`.
+- **Erro meu no caminho**: contei 14 falhas no vermelho e eram 13 (corrigido acima).
+- **Não verificado**: hub ou S3 reais; Vault grande (custo de download, cada manifest vai até 64 MiB); backend hostil que esconde a época nova; Windows; o teste novo (o da mesma chave) só rodou no CI do commit seguinte. Só `cargo fmt --check` rodou local.
+- **Fica**: P-49 fatias A2, A3 e C no Warden (a C depende de 4 decisões, ver o P-49); P-42b; resto do P-41; P-43 a P-46; `VALIDACAO.md`; decisão sobre "fonte única"; faxina (P-47 e P-48 para Resolvidas).
+
 ### 2026-11-19 — Sessão 111 (P-48: chave nova obrigatória e `Engine::begin_epoch`, [arca#175](https://github.com/Arven-Labs/arca/pull/175))
 
 - **Pedido**: "pode ser, seguimos" (o P-48, depois do P-47b). Plan mode. Decisões suas: **conteúdo da pasta viva (`Roots`)**, como o `snapshot` (descartado: recifrar a ponta), e **`begin_epoch(&self)` com `S: Clone`** devolvendo `(Engine, Snapshot)` (descartado: consumir o `Engine`).
