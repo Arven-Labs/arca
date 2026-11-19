@@ -2,6 +2,16 @@
 
 Mais recente no topo.
 
+### 2026-11-18 — Sessão 107 (P-42: nome reservado recusado em qualquer componente do caminho, [arca#168](https://github.com/Arven-Labs/arca/pull/168))
+
+- **Pedido**: "pode ser o 42 dps o adr". Plan mode; decisões suas: barrar **no `validate_path`** (descartado: repetir a checagem em `restore`, `apply`, diário e scan) e **separar o Unicode Cf em P-42b** (ZWJ e ZWNJ são legítimos; descartados: fazer no mesmo PR com lista fixa, e não fazer).
+- **Feito**: `validate_component` (`manifest.rs`) recusa `is_reserved_name` com `InvalidPath("reserved name")`; um manifest com `.arca-apply-journal`, `.arca-new-N`, `.arca-old-N`, `.tmp-<hex>` ou `.arca-kept-*` em qualquer componente deixa de abrir, e `restore`, `apply`, diário e `scan` ficam cobertos. Duas linhas de código (um `use` e a checagem) e a dependência `manifest` → `apply` (ciclo legal em Rust, camada de formato chamando o `apply`). `format_version` segue 1.
+- **Testes primeiro**: 4 testes novos (manifest recusa; manifest aceita quase-nomes; `restore` recusa e deixa o destino vazio; `scan` pula pasta reservada) mais 2 existentes ajustados (diário com reservado no meio; teste do `apply` reescrito com o helper novo `put_forged_raw`, que forja manifest sem a validação do `seal`). No CI **antes** da correção: 606 passaram e **5 falharam** (run 44424715235). **Depois**: `rust / test` com 611 passados, 0 falhas, `msrv`, `audit` e `s3-garage` verdes (run 44425123074).
+- **Quebra proposital** (parsing de entrada externa): a checagem passou a nunca disparar (`&& !component.starts_with('.')`, e todo nome reservado começa com ponto), em PR de rascunho descartável (#169, fechado, branch apagada): 606 passaram, **os mesmos 5 falharam** (run 44425603210). Revertida (nunca entrou na branch do PR).
+- **Efeito que você deve saber**: o `scan` agora também pula arquivos **dentro** de pasta com nome reservado (antes entravam); aparecem em `skipped`. E um manifest já gravado com nome reservado passa a ser `rejected` e, como todo rejeitado, bloqueia o `snapshot` (`Diverged`); o `scan` sempre pulou esses nomes de arquivo, então só manifest forjado ou pasta com nome reservado é afetado.
+- **Não verificado**: a checagem do `apply` (`engine.rs:934`) e o `EngineError::ReservedName` agora **não são alcançáveis por manifest** (só por defesa na fronteira do disco), então não há teste de ponta a ponta para elas; o Warden (fixado em `1d8c38e`, não sobe o `rev` neste PR); Windows. O `cargo fmt --check` local passou, build e teste só no CI (ADR 0009).
+- **Fica**: P-42b (lista de Unicode de spoofing, decisão sua); resto da "mesma classe" do P-41; ADR de rotação (P-39 e P-40, é o que você pediu na sequência); `VALIDACAO.md`.
+
 ### 2026-11-18 — Sessão 106 (P-41: o snapshot lê sem seguir link e com o teto antes de ler, [arca#166](https://github.com/Arven-Labs/arca/pull/166))
 
 - **Pedido**: "sim" à recomendação de começar pelo P-41 (a correção barata de maior impacto depois do P-43). Plan mode; plano aprovado, sem decisão nova sua: erro de leitura vira `skipped`, não aborta (assumido, como o `scan` faz com symlink).
