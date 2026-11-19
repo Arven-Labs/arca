@@ -1,15 +1,43 @@
 //! Épocas estrangeiras já reconhecidas (ADR 0018, P-47a): o que a pessoa viu e decidiu ignorar.
 //!
-//! Esboço do commit de testes: a implementação vem no commit seguinte.
-#![allow(dead_code)]
+//! Um manifest de época **mais nova** que a das chaves do dispositivo não pode ser aberto e o
+//! cabeçalho não é autenticado: pode ser a rotação de verdade ou um objeto forjado por quem tem
+//! a chave velha. Enquanto houver um não reconhecido, o `Engine` recusa com `NeedsNewKey`. O
+//! reconhecimento é por `(época, id)`, nunca pela época sozinha: a próxima época é previsível, e
+//! um objeto forjado já reconhecido não pode esconder a rotação verdadeira, que tem ids novos.
+//!
+//! O arquivo é local, `0600`, ao lado do arquivo de estado (e não dentro dele: o estado diz até
+//! onde o dispositivo aceitou, e o `remember` o regrava a cada `snapshot`). **Corrupção nunca vale
+//! como "ninguém reconhecido"**, para não desligar o bloqueio por um arquivo estragado.
 
+use crate::disk::{create_private_dir, write_atomic};
 use crate::engine::EngineError;
 use crate::manifest::Hash32;
 use crate::object::ObjectId;
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
-/// Quantos reconhecimentos o arquivo guarda; passou disso, sai o mais antigo.
+const FOREIGN_VERSION: u8 = 1;
+/// Quantos reconhecimentos o arquivo guarda; passou disso, sai o mais antigo (nunca é erro).
 pub(crate) const MAX_ACKS: usize = 256;
+/// Com o teto de 256, o arquivo tem uns 25 KiB; acima disto não é nosso.
+const MAX_FOREIGN_BYTES: u64 = 64 * 1024;
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Ack {
+    epoch: u32,
+    id: Hash32,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ForeignFile {
+    version: u8,
+    acknowledged: Vec<Ack>,
+}
 
 /// Os `(época, id)` reconhecidos, do mais antigo para o mais novo.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -25,19 +53,73 @@ pub(crate) fn path(state: &Path) -> PathBuf {
 }
 
 impl ForeignAcks {
-    pub(crate) fn load(_state: &Path) -> Result<ForeignAcks, EngineError> {
-        Ok(ForeignAcks::default())
+    /// Lista vazia se o arquivo não existe. Ilegível, de versão desconhecida, com campo a mais,
+    /// grande demais, com mais do que o teto, link ou pasta no lugar: `CorruptState`.
+    pub(crate) fn load(state: &Path) -> Result<ForeignAcks, EngineError> {
+        let file = path(state);
+        // `symlink_metadata`: um link no lugar do arquivo não é seguido, vale como corrupção
+        let meta = match fs::symlink_metadata(&file) {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(ForeignAcks::default()),
+            Err(e) => return Err(EngineError::Io(e.kind())),
+        };
+        if !meta.is_file() || meta.len() > MAX_FOREIGN_BYTES {
+            return Err(EngineError::CorruptState);
+        }
+        let bytes = fs::read(&file).map_err(|e| EngineError::Io(e.kind()))?;
+        let parsed: ForeignFile =
+            serde_json::from_slice(&bytes).map_err(|_| EngineError::CorruptState)?;
+        if parsed.version != FOREIGN_VERSION || parsed.acknowledged.len() > MAX_ACKS {
+            return Err(EngineError::CorruptState);
+        }
+        Ok(ForeignAcks {
+            entries: parsed
+                .acknowledged
+                .iter()
+                .map(|a| (a.epoch, a.id))
+                .collect(),
+        })
     }
 
-    pub(crate) fn save(&self, _state: &Path) -> Result<(), EngineError> {
-        Ok(())
+    /// Grava de forma atômica (`0600`; a pasta, se faltar, `0700`).
+    pub(crate) fn save(&self, state: &Path) -> Result<(), EngineError> {
+        let file = path(state);
+        let body = ForeignFile {
+            version: FOREIGN_VERSION,
+            acknowledged: self
+                .entries
+                .iter()
+                .map(|(epoch, id)| Ack {
+                    epoch: *epoch,
+                    id: *id,
+                })
+                .collect(),
+        };
+        let json = serde_json::to_vec(&body).map_err(|_| EngineError::CorruptState)?;
+        if let Some(parent) = file.parent() {
+            create_private_dir(parent).map_err(|e| EngineError::Io(e.kind()))?;
+        }
+        write_atomic(&file, &json).map_err(|e| EngineError::Io(e.kind()))
     }
 
-    pub(crate) fn contains(&self, _epoch: u32, _id: &ObjectId) -> bool {
-        false
+    /// O par `(época, id)` foi reconhecido? Só o par: nem a época nem o id sozinhos bastam.
+    pub(crate) fn contains(&self, epoch: u32, id: &ObjectId) -> bool {
+        self.entries
+            .iter()
+            .any(|(e, hash)| *e == epoch && hash.0 == id.hash)
     }
 
-    pub(crate) fn add(&mut self, _epoch: u32, _id: &ObjectId) {}
+    /// Reconhece o par (sem repetir). Passou do teto, sai o mais antigo.
+    pub(crate) fn add(&mut self, epoch: u32, id: &ObjectId) {
+        if self.contains(epoch, id) {
+            return;
+        }
+        self.entries.push((epoch, Hash32(id.hash)));
+        if self.entries.len() > MAX_ACKS {
+            let extra = self.entries.len() - MAX_ACKS;
+            self.entries.drain(..extra);
+        }
+    }
 }
 
 #[cfg(test)]

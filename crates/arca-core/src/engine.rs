@@ -14,6 +14,7 @@ use crate::dirfd::{Folder, FolderLock, OpenError};
 use crate::disk::{create_private_dir, write_atomic};
 use crate::envelope::Header;
 use crate::error::Error;
+use crate::foreign::ForeignAcks;
 use crate::heads::{tips, Head};
 use crate::journal::{recover_all, ApplyGroup, Journal, Phase};
 use crate::kept::{self, KeptOriginal};
@@ -184,6 +185,16 @@ enum Read {
     Unreadable(EngineError),
     /// Cabeçalho de outra época: não é aberto aqui.
     OtherEpoch(u32),
+}
+
+/// O que `Engine::scan_manifests` achou no armazenamento, sem política.
+struct Scanned {
+    readable: Vec<(ObjectId, Manifest)>,
+    rejected: Vec<Rejected>,
+    /// `(id, época do cabeçalho)` dos que este dispositivo não abriu por serem de outra época.
+    others: Vec<(ObjectId, u32)>,
+    /// Há manifest da época das chaves (aberto ou ilegível).
+    mine_seen: bool,
 }
 
 /// Resultado de `Engine::load`: o grafo legível e o que ficou de fora.
@@ -375,10 +386,10 @@ impl<S: BlobStore> Engine<S> {
         })
     }
 
-    /// Lê todos os manifests e os classifica (ver `heads`). `readable` é o grafo inteiro da
-    /// época que conta, não só as pontas.
-    async fn load(&self) -> Result<Loaded, EngineError> {
-        let mine = self.keys.epoch();
+    /// Lê todos os manifests e separa os que abrem com as chaves do dispositivo, os ilegíveis da
+    /// época dele e os de outra época (só o cabeçalho em claro). Sem política: quem decide o que
+    /// fazer com as outras épocas é `load`.
+    async fn scan_manifests(&self) -> Result<Scanned, EngineError> {
         let mut readable = Vec::new();
         let mut rejected = Vec::new();
         // (id, época do cabeçalho) dos que este dispositivo não abriu
@@ -400,10 +411,39 @@ impl<S: BlobStore> Engine<S> {
                 Err(error) => rejected.push(Rejected { id, error }),
             }
         }
-        let newest_other = others.iter().map(|(_, epoch)| *epoch).max();
-        if let Some(found) = newest_other.filter(|epoch| *epoch > mine) {
-            return Err(EngineError::NeedsNewKey { have: mine, found });
+        Ok(Scanned {
+            readable,
+            rejected,
+            others,
+            mine_seen,
+        })
+    }
+
+    /// Lê todos os manifests e os classifica (ver `heads`). `readable` é o grafo inteiro da
+    /// época que conta, não só as pontas. Manifest de época **mais nova** que a das chaves, que
+    /// a pessoa ainda não reconheceu (`acknowledge_foreign`, ADR 0018), é `NeedsNewKey`; o
+    /// reconhecido é ignorado (nem `superseded`, nem `rejected`).
+    async fn load(&self) -> Result<Loaded, EngineError> {
+        let mine = self.keys.epoch();
+        let Scanned {
+            readable,
+            mut rejected,
+            mut others,
+            mine_seen,
+        } = self.scan_manifests().await?;
+        if others.iter().any(|(_, epoch)| *epoch > mine) {
+            let acked = self.load_acks().await?;
+            let found = others
+                .iter()
+                .filter(|(id, epoch)| *epoch > mine && !acked.contains(*epoch, id))
+                .map(|(_, epoch)| *epoch)
+                .max();
+            if let Some(found) = found {
+                return Err(EngineError::NeedsNewKey { have: mine, found });
+            }
+            others.retain(|(_, epoch)| *epoch <= mine);
         }
+        let newest_other = others.iter().map(|(_, epoch)| *epoch).max();
         // Daqui em diante nenhuma época em `others` passa da minha. Se há manifest meu (aberto
         // ou ilegível na minha época), a minha é a maior; senão, a maior de `others` conta e,
         // sem as chaves dela, é `rejected` com `WrongKeyEpoch`, como antes do P-24.
@@ -429,19 +469,55 @@ impl<S: BlobStore> Engine<S> {
         })
     }
 
-    /// Os manifests de época mais nova que o dispositivo ainda **não reconhecidos**, em ordem
-    /// `(época, hash)`. Esboço: a implementação vem no commit seguinte.
+    /// Os manifests de época mais nova que a das chaves do dispositivo e **ainda não
+    /// reconhecidos**, em ordem `(época, hash)` (ADR 0018). Enquanto houver algum, `heads`,
+    /// `snapshot`, `merge` e `apply` recusam com `NeedsNewKey`. Só lê: não pede a trava do estado.
     pub async fn foreign_epochs(&self) -> Result<Vec<ForeignEpoch>, EngineError> {
-        Ok(Vec::new())
+        let mine = self.keys.epoch();
+        let Scanned { others, .. } = self.scan_manifests().await?;
+        if !others.iter().any(|(_, epoch)| *epoch > mine) {
+            return Ok(Vec::new());
+        }
+        let acked = self.load_acks().await?;
+        let mut pending: Vec<ForeignEpoch> = others
+            .into_iter()
+            .filter(|(id, epoch)| *epoch > mine && !acked.contains(*epoch, id))
+            .map(|(id, epoch)| ForeignEpoch { epoch, id })
+            .collect();
+        pending.sort_by_key(|f| (f.epoch, f.id.hash));
+        Ok(pending)
     }
 
-    /// Reconhece `acknowledged` (o que a pessoa viu em `foreign_epochs`). Esboço: a implementação
-    /// vem no commit seguinte.
+    /// Reconhece `acknowledged`: o que a pessoa **viu** em `foreign_epochs`, par a par
+    /// `(época, id)` (ADR 0018). O consumidor deve mostrar a lista antes de chamar. Não apaga
+    /// nada. Guarda os 256 mais recentes (passou, sai o mais antigo, que bloqueia de novo se
+    /// ainda existir). Sem `with_state` não há onde gravar: `NoState`. Estado ocupado por outra
+    /// operação: `Busy`.
     pub async fn acknowledge_foreign(
         &self,
-        _acknowledged: &[ForeignEpoch],
+        acknowledged: &[ForeignEpoch],
     ) -> Result<(), EngineError> {
-        Ok(())
+        let Some(path) = self.state.clone() else {
+            return Err(EngineError::NoState);
+        };
+        let _state_lock = self.lock_state().await?;
+        let pairs: Vec<(u32, ObjectId)> = acknowledged.iter().map(|f| (f.epoch, f.id)).collect();
+        run(move || {
+            let mut acks = ForeignAcks::load(&path)?;
+            for (epoch, id) in &pairs {
+                acks.add(*epoch, id);
+            }
+            acks.save(&path)
+        })
+        .await
+    }
+
+    /// Os reconhecidos (ADR 0018); vazio sem estado ligado ou sem arquivo.
+    async fn load_acks(&self) -> Result<ForeignAcks, EngineError> {
+        let Some(path) = self.state.clone() else {
+            return Ok(ForeignAcks::default());
+        };
+        run(move || ForeignAcks::load(&path)).await
     }
 
     /// Com o estado ligado, garante que o último manifest aceito esteja no grafo (P-31 item 2).
