@@ -10,6 +10,7 @@ pub mod disk;
 pub mod engine;
 pub mod envelope;
 pub mod error;
+mod foreign;
 pub mod heads;
 #[cfg(feature = "hub")]
 pub mod hub;
