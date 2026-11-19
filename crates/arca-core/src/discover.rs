@@ -2,9 +2,12 @@
 //!
 //! A frase BIP-39 e o pareamento entregam só a `VaultKey`; a época se descobre, não se transporta.
 
-use crate::crypto::VaultKey;
+use crate::crypto::{EpochKeys, VaultKey};
 use crate::engine::ForeignEpoch;
-use crate::store::{BlobStore, StoreError};
+use crate::envelope::Header;
+use crate::manifest::Manifest;
+use crate::object::ObjectKind;
+use crate::store::{verified_get, BlobStore, StoreError};
 
 /// A época em que a chave abre, e as épocas mais novas que ela não abre.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,20 +35,51 @@ pub enum DiscoverError {
 }
 
 /// Acha a maior época em que algum manifest de `store` abre com `vault_key`.
+///
+/// O cabeçalho (em claro, não autenticado) diz a época a tentar; só conta quem **abre**. Por
+/// isso um objeto forjado, de qualquer época, não vence nem rebaixa a escolha: o resultado é o
+/// mesmo de "da maior época para a menor, tentando todos os manifests de cada uma" (ADR 0018,
+/// item 7), mas cada manifest é lido uma vez e um de cada vez. Sem teto de épocas: o custo é o
+/// download dos manifests. Objeto ilegível (hash que não bate, ausente, cabeçalho inválido) é
+/// pulado; backend fora do ar aborta.
 pub async fn discover_epoch<S: BlobStore>(
-    _store: &S,
-    _vault_key: &VaultKey,
+    store: &S,
+    vault_key: &VaultKey,
 ) -> Result<Discovery, DiscoverError> {
-    Err(DiscoverError::Empty)
+    let ids = store.list(ObjectKind::Manifest).await?;
+    if ids.is_empty() {
+        return Err(DiscoverError::Empty);
+    }
+    let mut opened: Option<u32> = None;
+    let mut unopened: Vec<ForeignEpoch> = Vec::new();
+    for id in ids {
+        let bytes = match verified_get(store, &id).await {
+            Ok(Some(bytes)) => bytes,
+            Err(e @ StoreError::Unavailable(_)) => return Err(e.into()),
+            Ok(None) | Err(_) => continue,
+        };
+        let Ok((header, _)) = Header::decode(&bytes) else {
+            continue;
+        };
+        let epoch = header.key_epoch;
+        let keys = EpochKeys::derive(vault_key, epoch);
+        if Manifest::open(&keys, &bytes).is_ok() {
+            opened = Some(opened.map_or(epoch, |best| best.max(epoch)));
+        } else {
+            unopened.push(ForeignEpoch { epoch, id });
+        }
+    }
+    let epoch = opened.ok_or(DiscoverError::NoneOpens)?;
+    let mut newer: Vec<ForeignEpoch> = unopened.into_iter().filter(|f| f.epoch > epoch).collect();
+    newer.sort_by_key(|f| (f.epoch, f.id.hash));
+    Ok(Discovery { epoch, newer })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::EpochKeys;
     use crate::disk::DiskStore;
-    use crate::manifest::Manifest;
-    use crate::object::{ObjectId, ObjectKind};
+    use crate::object::ObjectId;
     use crate::store::Capabilities;
     use crate::testutil::TempDir;
     use crate::FORMAT_VERSION;
