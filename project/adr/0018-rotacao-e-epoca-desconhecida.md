@@ -64,3 +64,11 @@ Decisões do dono ao implementar o item 2 e fechar o "em aberto" acima:
 4. **`pull` devolve `EngineError`** (era `StoreError`) por tomar a trava do estado (`Busy`) e gravar a pendência (`CorruptState`, `Io`). Quebra de assinatura pública; o Warden ainda não chama (P-49).
 5. **Efeito colateral:** o `.foreign` agora é lido em toda operação (guarda a pendência), então um arquivo corrompido falha fechado sempre, não só com época mais nova no disco como no 47a.
 6. **Limite novo:** sem estado, se o remoto esconder o objeto depois do primeiro `pull` e o processo reiniciar, o bloqueio some.
+
+## Atualização (2026-11-19, P-48: `EpochKeys::next` e `Engine::begin_epoch`)
+Itens 4 e 5 implementados. Decisões do dono: o conteúdo do snapshot da época nova vem da **pasta viva** (`Roots`), com o mesmo miolo do `snapshot` (descartado: decifrar e recifrar a ponta, que perderia os filtros por classe e foge do texto do item 5), e `begin_epoch(&self)` exige `S: Clone` e devolve `(Engine, Snapshot)` (descartado: consumir o `Engine`, que o perde em caso de erro). O que só o código mostrou:
+1. **A retomada vem do desenho, não de um caso especial.** O `Engine` novo (chaves da época N + 1) enxerga o manifest da tentativa anterior como "o dele"; o antigo o enxergaria como época mais nova e daria `NeedsNewKey`. Por isso as pré-condições da época velha só rodam quando o novo ainda não tem manifest (`own.is_empty()`); com manifest, ele é a `prev` (uma ponta só, senão `Diverged`).
+2. **O `guard` (rollback) não roda no caminho de retomada:** o estado guarda uma ponta da época velha e, sem pontas na nova, `satisfied` daria `Rollback`. A guarda da época velha já rodou na primeira tentativa.
+3. **Objeto ilegível da época nova não veta a rotação** (o item 5 já dizia que o forjado convive sem efeito): só os manifests que abrem com a chave nova contam. Objeto de época mais nova **não reconhecido** continua dando `NeedsNewKey` (item 3).
+4. **Uma trava só:** o `lock_state` é um `flock` em arquivo reaberto, então o `snapshot` do `Engine` novo por dentro do `begin_epoch` daria `Busy` contra o próprio processo; daí a extração de `build_snapshot`.
+5. **Limite herdado:** reaproveitar uma `VaultKey` de uma época **anterior** à atual não é detectável (o `Engine` só tem as chaves da atual).
