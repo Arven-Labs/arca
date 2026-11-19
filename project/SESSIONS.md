@@ -2,6 +2,16 @@
 
 Mais recente no topo.
 
+### 2026-11-18 — Sessão 109 (P-47a: reconhecimento de época estrangeira por `(época, id)`, [arca#171](https://github.com/Arven-Labs/arca/pull/171))
+
+- **Pedido**: "podemos seguir sim" (o P-47, que fecha a negação de serviço da época forjada). Plan mode. Decisões suas: **fatiar em dois PRs** (47a reconhecimento, 47b `pull`; descartado: um PR só, porque o 47b sozinho abriria uma janela em que o `pull` só reportaria a época nova, a opção que você já tinha descartado) e **guardar o reconhecimento em arquivo separado `<estado>.foreign`** (descartado: `DeviceState` v2 como no ADR 0018).
+- **Feito**: `foreign.rs` novo (`ForeignAcks`, `0600`, `write_atomic`, teto de 64 KiB e de 256 reconhecidos, corrupção nunca vale como vazio); `Engine::load` separado em `scan_manifests` (sem política) e `load` (política), com o reconhecido ignorado e `NeedsNewKey` só se sobrar um não reconhecido; `Engine::foreign_epochs()` e `acknowledge_foreign(&[ForeignEpoch])`; `EngineError::NoState`. O `pull` não mudou. Nota de atualização no ADR 0018 e parágrafo na `SPEC-TECNICA.md` §6.
+- **Testes primeiro**: 17 testes novos (9 de motor e 8 unitários de `foreign.rs`) com o esboço mínimo da API, no CI **antes** da implementação: 613 passaram e **15 falharam** (run 44432738995; os 2 que passaram são guardas: arquivo ausente e caminho do arquivo). **Depois**: `rust / test` com 628 passados, 0 falhas, clippy `-D warnings` limpo, `msrv`, `audit` e `s3-garage` verdes (run 44433353836).
+- **Quebra proposital** (chaves, §4): `contains` passou a comparar só a época, em PR de rascunho descartável (#172, fechado, branch apagada): 623 passaram, **5 falharam** (`a_new_manifest_of_the_same_foreign_epoch_blocks_again`, `acknowledging_another_id_or_another_epoch_does_not_unblock`, o teto no motor e no unitário, e o round-trip por par; run 44433820473). Revertida (nunca entrou na branch do PR).
+- **Dois erros meus no caminho**: no resumo do commit de testes escrevi "10 testes de motor" e eram 9 (os totais batem); e um `let mine` ficou sem uso em `scan_manifests`, que o clippy `-D warnings` do CI teria barrado, e tirei antes de empurrar (sem compilar local, ADR 0009).
+- **Não verificado**: o `pull` ainda grava objetos estrangeiros (47b); nenhum consumidor chama `acknowledge_foreign` (o Warden é P-49), então o bloqueio com reconhecimento ainda não tem tela; o comportamento com estado em NFS ou FUSE; Windows. O `cargo fmt --check` local passou, build e teste só no CI.
+- **Fica**: **47b** (o `pull` para de gravar, classifica mesmo com blob corrompido, cache negativo, pendência persistida; e **decidir o fail-closed sem `with_state`**, que o ADR 0018 supõe e o 47b desfaz); P-48; P-49 (Warden); P-42b; resto do P-41; `VALIDACAO.md`.
+
 ### 2026-11-18 — Sessão 108 (ADR 0018: rotação de chave e época desconhecida, P-39 e P-40)
 
 - **Pedido**: "pode ser o 42 dps o adr" (o P-42 foi a Sessão 107). Plan mode e a skill `decisao-arquitetural`. Decisões suas: época mais nova e ilegível vista no `pull` **descarta, reporta e bloqueia até reconhecer** (descartadas: só reportar; manter como está) e o dispositivo perdido é **risco aceito no núcleo, com o corte nos backends exigido do Warden** (descartado: portão de época no hub).

@@ -14,6 +14,7 @@ use crate::dirfd::{Folder, FolderLock, OpenError};
 use crate::disk::{create_private_dir, write_atomic};
 use crate::envelope::Header;
 use crate::error::Error;
+use crate::foreign::ForeignAcks;
 use crate::heads::{tips, Head};
 use crate::journal::{recover_all, ApplyGroup, Journal, Phase};
 use crate::kept::{self, KeptOriginal};
@@ -113,6 +114,10 @@ pub enum EngineError {
     /// O arquivo de estado local existe mas não é válido. Nunca vale como "sem estado".
     #[error("the device state file is corrupt")]
     CorruptState,
+    /// A operação precisa guardar uma decisão ao lado do estado local (ADR 0018) e o `Engine`
+    /// não tem `with_state`: não há onde gravá-la.
+    #[error("no device state file is configured; this operation needs one")]
+    NoState,
     /// Uma entrada do manifest tem nome de temporário da arca (`.arca-new-*`, `.arca-old-*`,
     /// `.tmp-*`): o `apply` recusa em vez de colidir com os próprios arquivos de trabalho.
     #[error("a manifest entry uses a name reserved for temporary files")]
@@ -180,6 +185,16 @@ enum Read {
     Unreadable(EngineError),
     /// Cabeçalho de outra época: não é aberto aqui.
     OtherEpoch(u32),
+}
+
+/// O que `Engine::scan_manifests` achou no armazenamento, sem política.
+struct Scanned {
+    readable: Vec<(ObjectId, Manifest)>,
+    rejected: Vec<Rejected>,
+    /// `(id, época do cabeçalho)` dos que este dispositivo não abriu por serem de outra época.
+    others: Vec<(ObjectId, u32)>,
+    /// Há manifest da época das chaves (aberto ou ilegível).
+    mine_seen: bool,
 }
 
 /// Resultado de `Engine::load`: o grafo legível e o que ficou de fora.
@@ -275,6 +290,15 @@ pub struct Restored {
 /// Decide se uma entrada de manifest que veio de fora pode ser aplicada (`with_entry_filter`).
 pub type EntryFilter = fn(&FileEntry) -> bool;
 
+/// Um manifest de época **mais nova** que a das chaves do dispositivo, que ele não consegue
+/// abrir e que a pessoa ainda não reconheceu (ADR 0018). O cabeçalho é em claro e não é
+/// autenticado: pode ser a rotação de verdade ou um objeto forjado por quem tem a chave velha.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ForeignEpoch {
+    pub epoch: u32,
+    pub id: ObjectId,
+}
+
 pub struct Engine<S> {
     store: S,
     keys: EpochKeys,
@@ -362,10 +386,10 @@ impl<S: BlobStore> Engine<S> {
         })
     }
 
-    /// Lê todos os manifests e os classifica (ver `heads`). `readable` é o grafo inteiro da
-    /// época que conta, não só as pontas.
-    async fn load(&self) -> Result<Loaded, EngineError> {
-        let mine = self.keys.epoch();
+    /// Lê todos os manifests e separa os que abrem com as chaves do dispositivo, os ilegíveis da
+    /// época dele e os de outra época (só o cabeçalho em claro). Sem política: quem decide o que
+    /// fazer com as outras épocas é `load`.
+    async fn scan_manifests(&self) -> Result<Scanned, EngineError> {
         let mut readable = Vec::new();
         let mut rejected = Vec::new();
         // (id, época do cabeçalho) dos que este dispositivo não abriu
@@ -387,10 +411,39 @@ impl<S: BlobStore> Engine<S> {
                 Err(error) => rejected.push(Rejected { id, error }),
             }
         }
-        let newest_other = others.iter().map(|(_, epoch)| *epoch).max();
-        if let Some(found) = newest_other.filter(|epoch| *epoch > mine) {
-            return Err(EngineError::NeedsNewKey { have: mine, found });
+        Ok(Scanned {
+            readable,
+            rejected,
+            others,
+            mine_seen,
+        })
+    }
+
+    /// Lê todos os manifests e os classifica (ver `heads`). `readable` é o grafo inteiro da
+    /// época que conta, não só as pontas. Manifest de época **mais nova** que a das chaves, que
+    /// a pessoa ainda não reconheceu (`acknowledge_foreign`, ADR 0018), é `NeedsNewKey`; o
+    /// reconhecido é ignorado (nem `superseded`, nem `rejected`).
+    async fn load(&self) -> Result<Loaded, EngineError> {
+        let mine = self.keys.epoch();
+        let Scanned {
+            readable,
+            mut rejected,
+            mut others,
+            mine_seen,
+        } = self.scan_manifests().await?;
+        if others.iter().any(|(_, epoch)| *epoch > mine) {
+            let acked = self.load_acks().await?;
+            let found = others
+                .iter()
+                .filter(|(id, epoch)| *epoch > mine && !acked.contains(*epoch, id))
+                .map(|(_, epoch)| *epoch)
+                .max();
+            if let Some(found) = found {
+                return Err(EngineError::NeedsNewKey { have: mine, found });
+            }
+            others.retain(|(_, epoch)| *epoch <= mine);
         }
+        let newest_other = others.iter().map(|(_, epoch)| *epoch).max();
         // Daqui em diante nenhuma época em `others` passa da minha. Se há manifest meu (aberto
         // ou ilegível na minha época), a minha é a maior; senão, a maior de `others` conta e,
         // sem as chaves dela, é `rejected` com `WrongKeyEpoch`, como antes do P-24.
@@ -414,6 +467,57 @@ impl<S: BlobStore> Engine<S> {
             rejected,
             superseded,
         })
+    }
+
+    /// Os manifests de época mais nova que a das chaves do dispositivo e **ainda não
+    /// reconhecidos**, em ordem `(época, hash)` (ADR 0018). Enquanto houver algum, `heads`,
+    /// `snapshot`, `merge` e `apply` recusam com `NeedsNewKey`. Só lê: não pede a trava do estado.
+    pub async fn foreign_epochs(&self) -> Result<Vec<ForeignEpoch>, EngineError> {
+        let mine = self.keys.epoch();
+        let Scanned { others, .. } = self.scan_manifests().await?;
+        if !others.iter().any(|(_, epoch)| *epoch > mine) {
+            return Ok(Vec::new());
+        }
+        let acked = self.load_acks().await?;
+        let mut pending: Vec<ForeignEpoch> = others
+            .into_iter()
+            .filter(|(id, epoch)| *epoch > mine && !acked.contains(*epoch, id))
+            .map(|(id, epoch)| ForeignEpoch { epoch, id })
+            .collect();
+        pending.sort_by_key(|f| (f.epoch, f.id.hash));
+        Ok(pending)
+    }
+
+    /// Reconhece `acknowledged`: o que a pessoa **viu** em `foreign_epochs`, par a par
+    /// `(época, id)` (ADR 0018). O consumidor deve mostrar a lista antes de chamar. Não apaga
+    /// nada. Guarda os 256 mais recentes (passou, sai o mais antigo, que bloqueia de novo se
+    /// ainda existir). Sem `with_state` não há onde gravar: `NoState`. Estado ocupado por outra
+    /// operação: `Busy`.
+    pub async fn acknowledge_foreign(
+        &self,
+        acknowledged: &[ForeignEpoch],
+    ) -> Result<(), EngineError> {
+        let Some(path) = self.state.clone() else {
+            return Err(EngineError::NoState);
+        };
+        let _state_lock = self.lock_state().await?;
+        let pairs: Vec<(u32, ObjectId)> = acknowledged.iter().map(|f| (f.epoch, f.id)).collect();
+        run(move || {
+            let mut acks = ForeignAcks::load(&path)?;
+            for (epoch, id) in &pairs {
+                acks.add(*epoch, id);
+            }
+            acks.save(&path)
+        })
+        .await
+    }
+
+    /// Os reconhecidos (ADR 0018); vazio sem estado ligado ou sem arquivo.
+    async fn load_acks(&self) -> Result<ForeignAcks, EngineError> {
+        let Some(path) = self.state.clone() else {
+            return Ok(ForeignAcks::default());
+        };
+        run(move || ForeignAcks::load(&path)).await
     }
 
     /// Com o estado ligado, garante que o último manifest aceito esteja no grafo (P-31 item 2).
@@ -2328,6 +2432,185 @@ mod tests {
         assert_eq!(stale.snapshot(&vault_only(&vault), 3).await, Err(expected));
         assert_eq!(rig.count(ObjectKind::Manifest).await, before);
         assert_eq!(rig.count(ObjectKind::Blob).await, 1);
+    }
+
+    // ---------- épocas estrangeiras e reconhecimento (ADR 0018, P-47a) ----------
+
+    fn foreign(epoch: u32, id: ObjectId) -> ForeignEpoch {
+        ForeignEpoch { epoch, id }
+    }
+
+    fn needs_new_key() -> EngineError {
+        EngineError::NeedsNewKey { have: 1, found: 2 }
+    }
+
+    #[tokio::test]
+    async fn foreign_epochs_lists_only_manifests_of_a_newer_epoch() {
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        let (_, new) = rotated(&rig, &vault).await;
+
+        assert_eq!(
+            rig.engine("pc").foreign_epochs().await.unwrap(),
+            [foreign(2, new)]
+        );
+        // com a chave da época 2 não há nada estrangeiro: a época 1 é histórico, a 2 é a dele
+        assert!(engine_at(&rig, 2)
+            .foreign_epochs()
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_acknowledged_foreign_epoch_stops_blocking_and_is_ignored() {
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        let (old, _) = rotated(&rig, &vault).await;
+        let stale = guarded(&rig, "pc", &state_path(&rig));
+        assert_eq!(stale.heads().await, Err(needs_new_key()));
+
+        let seen = stale.foreign_epochs().await.unwrap();
+        assert_eq!(seen.len(), 1);
+        stale.acknowledge_foreign(&seen).await.unwrap();
+
+        let heads = stale.heads().await.unwrap();
+        assert_eq!(ids_of(&heads), [old]);
+        // o objeto reconhecido não vira `rejected` nem `superseded`: é só ignorado
+        assert!(heads.rejected.is_empty() && heads.superseded.is_empty());
+        assert!(stale.foreign_epochs().await.unwrap().is_empty());
+
+        write(&vault, "b.md", b"2");
+        let (id, ..) = created(stale.snapshot(&vault_only(&vault), 3).await.unwrap());
+        assert_ne!(id, old);
+        assert_eq!(ids_of(&stale.heads().await.unwrap()), [id]);
+    }
+
+    /// A próxima época é previsível: reconhecer só pela época deixaria um objeto forjado
+    /// esconder a rotação de verdade. Com o id, um manifest novo da mesma época bloqueia de novo.
+    #[tokio::test]
+    async fn a_new_manifest_of_the_same_foreign_epoch_blocks_again() {
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        let (_, new) = rotated(&rig, &vault).await;
+        let stale = guarded(&rig, "pc", &state_path(&rig));
+        let seen = stale.foreign_epochs().await.unwrap();
+        stale.acknowledge_foreign(&seen).await.unwrap();
+        stale.heads().await.unwrap();
+
+        let later = put_epoch_manifest(&rig, 2, Some(new), 2).await;
+        assert_eq!(stale.heads().await, Err(needs_new_key()));
+        assert_eq!(stale.foreign_epochs().await.unwrap(), [foreign(2, later)]);
+    }
+
+    #[tokio::test]
+    async fn acknowledging_another_id_or_another_epoch_does_not_unblock() {
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        let (old, new) = rotated(&rig, &vault).await;
+        let stale = guarded(&rig, "pc", &state_path(&rig));
+
+        stale
+            .acknowledge_foreign(&[foreign(2, old), foreign(3, new)])
+            .await
+            .unwrap();
+        assert_eq!(stale.heads().await, Err(needs_new_key()));
+        assert_eq!(stale.foreign_epochs().await.unwrap(), [foreign(2, new)]);
+    }
+
+    #[tokio::test]
+    async fn without_a_state_file_there_is_nowhere_to_acknowledge() {
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        rotated(&rig, &vault).await;
+        let stale = rig.engine("pc");
+        let seen = stale.foreign_epochs().await.unwrap();
+        assert_eq!(seen.len(), 1);
+
+        assert_eq!(
+            stale.acknowledge_foreign(&seen).await,
+            Err(EngineError::NoState)
+        );
+        assert_eq!(stale.heads().await, Err(needs_new_key()));
+    }
+
+    /// O reconhecimento é de arquivo, não de memória; e o `snapshot` (que regrava o estado do
+    /// dispositivo a cada vez) não o apaga.
+    #[tokio::test]
+    async fn the_acknowledgement_survives_a_restart_and_a_state_write() {
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        rotated(&rig, &vault).await;
+        let path = state_path(&rig);
+        let first = guarded(&rig, "pc", &path);
+        let seen = first.foreign_epochs().await.unwrap();
+        first.acknowledge_foreign(&seen).await.unwrap();
+
+        let second = guarded(&rig, "pc", &path);
+        second.heads().await.unwrap();
+        write(&vault, "b.md", b"2");
+        created(second.snapshot(&vault_only(&vault), 3).await.unwrap());
+        assert!(fs::metadata(crate::foreign::path(&path)).is_ok());
+
+        let third = guarded(&rig, "pc", &path);
+        third.heads().await.unwrap();
+        assert!(third.foreign_epochs().await.unwrap().is_empty());
+    }
+
+    /// Passou do teto, sai o mais antigo: nunca é erro, e o que saiu bloqueia de novo.
+    #[tokio::test]
+    async fn past_the_cap_the_oldest_acknowledgements_leave_without_an_error() {
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        rotated(&rig, &vault).await;
+        for counter in 2..=300u64 {
+            put_epoch_manifest(&rig, 2, None, counter).await;
+        }
+        let stale = guarded(&rig, "pc", &state_path(&rig));
+        let all = stale.foreign_epochs().await.unwrap();
+        assert_eq!(all.len(), 300);
+
+        stale.acknowledge_foreign(&all).await.unwrap();
+        assert_eq!(stale.foreign_epochs().await.unwrap(), &all[..44]);
+        assert_eq!(stale.heads().await, Err(needs_new_key()));
+    }
+
+    #[tokio::test]
+    async fn a_corrupt_acknowledgement_file_fails_closed_only_when_it_is_needed() {
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        write(&vault, "a.md", b"1");
+        let path = state_path(&rig);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(crate::foreign::path(&path), b"lixo").unwrap();
+        let stale = guarded(&rig, "pc", &path);
+        // sem época mais nova o arquivo nem é lido: o Vault saudável segue funcionando
+        created(stale.snapshot(&vault_only(&vault), 1).await.unwrap());
+        stale.heads().await.unwrap();
+
+        // com época mais nova ele é lido, e corrompido nunca vale como "ninguém reconhecido"
+        put_epoch_manifest(&rig, 2, None, 1).await;
+        assert_eq!(stale.heads().await, Err(EngineError::CorruptState));
+    }
+
+    #[tokio::test]
+    async fn acknowledging_is_busy_while_another_process_holds_the_state() {
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        rotated(&rig, &vault).await;
+        let path = state_path(&rig);
+        let stale = guarded(&rig, "pc", &path);
+        let seen = stale.foreign_epochs().await.unwrap();
+
+        let held = state_busy(&path);
+        assert_eq!(
+            stale.acknowledge_foreign(&seen).await,
+            Err(EngineError::Busy)
+        );
+        assert!(fs::metadata(crate::foreign::path(&path)).is_err());
+        drop(held);
+        stale.acknowledge_foreign(&seen).await.unwrap();
+        stale.heads().await.unwrap();
     }
 
     /// A chave velha ainda lê o passado: restaurar uma versão da época 1 funciona depois da
@@ -6395,6 +6678,7 @@ mod tests {
             EngineError::ConflictCopyName,
             EngineError::LocalChanges,
             EngineError::ReservedName,
+            EngineError::NoState,
             EngineError::OriginalKept,
             EngineError::UnsafeConflictsDir,
             EngineError::Rollback,
