@@ -2,6 +2,17 @@
 
 Mais recente no topo.
 
+### 2026-11-19 — Sessão 110 (P-47b: o `pull` não grava época estrangeira, [arca#173](https://github.com/Arven-Labs/arca/pull/173))
+
+- **Pedido**: "vamos de P-47b". Plan mode. Decisões suas: **sem `with_state`, pendência em memória no `Engine`** (descartados: sem bloqueio sem estado; `pull` continuar gravando), **cache negativo em memória** (descartado: persistir) e **`pull` devolve `EngineError`** (descartado: manter `StoreError`).
+- **Feito**: `replicate_filtered` ganhou o veredito `Accept | Forged | Foreign(época)` e o cache (`known`); `ReplicateReport::foreign_epochs`; com blob retido, os manifests são só classificados (`classify_foreign`), nada é gravado. `foreign.rs`: campo `pending` (opcional, o arquivo do 47a segue válido), `acknowledge`, `add_pending` (cheio devolve `false`), `drop_pending_up_to`. `engine.rs`: `pull` toma a trava do estado, anota a pendência (`note_foreign`), `unacknowledged` junta a pendência ao que o scan local vê (cura réplica já contaminada), `acknowledge_foreign` funciona sem estado (memória). `seen.rs` novo (cache de 4096 ids).
+- **Achado ao escrever os testes**: se o excedente das 256 pendências entrasse no cache negativo, ele nunca voltaria a bloquear (o bloqueio sumiria em silêncio). Regra: só entra no cache o que coube; teste `past_the_pending_cap_the_rest_comes_back_in_the_next_pull`.
+- **Testes primeiro**: 18 testes novos. CI **antes** da implementação (run 44525873911): 631 passaram e **10 falharam** (7 de `pull`, 3 de `seen`); 3 testes novos passaram por o esboço ainda gravar o objeto (restart, 2º `pull`, limpeza sozinha): fracos antes, e acrescentei `the_block_after_a_pull_comes_from_the_pending_and_not_from_the_local_store`. **Depois** (run 44526983580): `rust` com 646 passados, 0 falhas, clippy `-D warnings`, `msrv`, `audit` e `s3-garage` verdes.
+- **Quebra proposital** (chaves, §4): `ForeignAcks::contains` só pela época e `add_pending` cheio devolvendo `true`, em PR de rascunho descartável (#174, fechado, branch apagada): **8 falharam** (3 de motor, 3 de `foreign`, 2 de `pull`; run 44528060701). A primeira tentativa não compilou (`id` sem uso sob `-D warnings`) e foi refeita. Revertida (nunca entrou na branch do PR).
+- **Dois testes antigos mudaram de contrato**: o do 47a "sem estado não há onde reconhecer" (`NoState`) virou "sem estado o reconhecimento vale só no `Engine`"; e o "`.foreign` corrompido só falha quando precisa" virou "falha sempre", porque o arquivo agora guarda a pendência.
+- **Não verificado**: nenhum consumidor chama `pull`/`acknowledge_foreign` (Warden é o P-49); o comportamento com um hub ou S3 reais escondendo o objeto depois do primeiro `pull`; NFS/FUSE; Windows. Só `cargo fmt --check` rodou local.
+- **Fica**: P-48 (`begin_epoch`); P-49 (Warden); P-42b; resto do P-41; P-43 a P-46; `VALIDACAO.md`; decisão sobre "fonte única".
+
 ### 2026-11-18 — Sessão 109 (P-47a: reconhecimento de época estrangeira por `(época, id)`, [arca#171](https://github.com/Arven-Labs/arca/pull/171))
 
 - **Pedido**: "podemos seguir sim" (o P-47, que fecha a negação de serviço da época forjada). Plan mode. Decisões suas: **fatiar em dois PRs** (47a reconhecimento, 47b `pull`; descartado: um PR só, porque o 47b sozinho abriria uma janela em que o `pull` só reportaria a época nova, a opção que você já tinha descartado) e **guardar o reconhecimento em arquivo separado `<estado>.foreign`** (descartado: `DeviceState` v2 como no ADR 0018).
