@@ -112,6 +112,7 @@ impl ForeignAcks {
 
     /// O par `(época, id)` foi reconhecido? Só o par: nem a época nem o id sozinhos bastam.
     pub(crate) fn contains(&self, epoch: u32, id: &ObjectId) -> bool {
+        let _ = id;
         self.entries.iter().any(|(e, _)| *e == epoch)
     }
 
