@@ -1897,15 +1897,31 @@ mod tests {
 
     /// Grava no armazenamento um manifest derivado da ponta atual, depois de `edit`.
     async fn put_forged(rig: &Rig, edit: impl FnOnce(&mut Manifest)) -> ObjectId {
+        let m = forged_from_tip(rig, edit).await;
+        let sealed = m.seal(&keys(1)).unwrap();
+        rig.store.put(&sealed.id, &sealed.bytes).await.unwrap();
+        sealed.id
+    }
+
+    /// Como `put_forged`, mas **sem** a validação do `Manifest::seal`: serializa e cifra direto,
+    /// como faria quem tem a chave e publica o que `validate` recusa.
+    async fn put_forged_raw(rig: &Rig, edit: impl FnOnce(&mut Manifest)) -> ObjectId {
+        let m = forged_from_tip(rig, edit).await;
+        let json = serde_json::to_vec(&m).unwrap();
+        let sealed = seal(&keys(1), ObjectKind::Manifest, &json).unwrap();
+        rig.store.put(&sealed.id, &sealed.bytes).await.unwrap();
+        sealed.id
+    }
+
+    /// O manifest da ponta atual, filho dela, depois de `edit`.
+    async fn forged_from_tip(rig: &Rig, edit: impl FnOnce(&mut Manifest)) -> Manifest {
         let heads = rig.engine("pc").heads().await.unwrap();
         let tip = heads.tips.last().unwrap();
         let mut m = tip.manifest.clone();
         m.base_version = Some(Hash32(tip.id.hash));
         m.counter += 1;
         edit(&mut m);
-        let sealed = m.seal(&keys(1)).unwrap();
-        rig.store.put(&sealed.id, &sealed.bytes).await.unwrap();
-        sealed.id
+        m
     }
 
     /// Backend que recusa gravar manifests (para provar que o manifest vai por último).
@@ -4848,11 +4864,13 @@ mod tests {
     // ---------- aplicar: blob ruim e falha no commit ----------
 
     /// Um manifest autenticado com uma entrada chamada `.arca-old-0` colidiria com os
-    /// temporários do próprio `apply`: recusa clara, antes de tocar no disco.
+    /// temporários do próprio `apply`: recusa clara, antes de tocar no disco. Desde o P-42 quem
+    /// recusa é o `validate_path` ao abrir o manifest (o `seal` já não o produz, por isso o
+    /// `put_forged_raw`); a checagem do `apply` fica como defesa na fronteira do disco.
     #[tokio::test]
     async fn an_entry_named_like_an_arca_temporary_is_refused_before_touching_anything() {
         let h = hist().await;
-        let forged = put_forged(&h.rig, |m| {
+        let forged = put_forged_raw(&h.rig, |m| {
             m.files.push(FileEntry {
                 path: ".arca-old-0".to_string(),
                 class: Class::Vault,
@@ -4870,8 +4888,44 @@ mod tests {
             .engine("pc")
             .apply(Some(&h.v1), &forged, &vault_only(&h.target))
             .await;
-        assert_eq!(result, Err(EngineError::ReservedName));
+        assert_eq!(
+            result,
+            Err(EngineError::Object(Error::InvalidPath("reserved name")))
+        );
         assert_eq!(tree(&h.target), before);
+    }
+
+    /// P-42: o `restore` de um manifest autenticado com `.arca-apply-journal` gravava um diário
+    /// falso na pasta do usuário (e o próximo `apply` ou `snapshot` dava `Interrupted` para
+    /// sempre). A entrada aponta para um blob de verdade, então só o nome a denuncia. O nome
+    /// reservado vale em qualquer componente: nome do arquivo e nome de pasta.
+    #[tokio::test]
+    async fn a_reserved_name_in_any_component_is_never_restored() {
+        let h = hist().await;
+        for reserved in [
+            ".arca-apply-journal",
+            ".arca-new-3/c.md",
+            "sub/.tmp-0123456789abcdef",
+        ] {
+            let forged = put_forged_raw(&h.rig, |m| {
+                m.files[0].path = reserved.to_string();
+                m.files
+                    .sort_by(|a, b| (a.class, &a.path).cmp(&(b.class, &b.path)));
+            })
+            .await;
+            let target = h.rig.dir("restaurado");
+            let result = h
+                .rig
+                .engine("pc")
+                .restore(&forged, &vault_only(&target))
+                .await;
+            assert_eq!(
+                result.err(),
+                Some(EngineError::Object(Error::InvalidPath("reserved name"))),
+                "{reserved}"
+            );
+            assert!(tree(&target).is_empty(), "{reserved}: {:?}", tree(&target));
+        }
     }
 
     /// Se o desfazer não pôde devolver o original porque a pessoa recriou o arquivo, o erro

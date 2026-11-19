@@ -1352,6 +1352,8 @@ mod tests {
             vec!["a", "a"],
             vec!["a/.arca-new-1"],
             vec![".arca-apply-journal"],
+            // nome reservado no meio do caminho (P-42)
+            vec![".arca-new-1/sub"],
             vec![""],
         ] {
             let dir = TempDir::new();

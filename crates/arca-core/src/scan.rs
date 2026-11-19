@@ -156,6 +156,27 @@ mod tests {
         );
     }
 
+    /// P-42: um arquivo comum dentro de uma pasta com nome reservado também fica de fora (o nome
+    /// da pasta colidiria com o temporário do `apply`, ou com o diário, na restauração).
+    #[test]
+    fn a_folder_with_a_reserved_name_is_skipped_with_its_files() {
+        let tmp = TempDir::new();
+        write(tmp.path(), "ok.md", b"1");
+        write(tmp.path(), ".arca-new-1/x.md", b"2");
+        write(tmp.path(), "sub/.tmp-0123456789abcdef/y.md", b"3");
+        // pasta que só parece reservada: entra
+        write(tmp.path(), ".arca-new-x/z.md", b"4");
+        let scan = scan_class(Class::Vault, tmp.path()).unwrap();
+        assert_eq!(paths(&scan), [".arca-new-x/z.md", "ok.md"]);
+        assert_eq!(
+            reasons(&scan),
+            [
+                (".arca-new-1/x.md", "reserved name"),
+                ("sub/.tmp-0123456789abcdef/y.md", "reserved name"),
+            ]
+        );
+    }
+
     fn paths(scan: &Scan) -> Vec<&str> {
         scan.candidates.iter().map(|c| c.path.as_str()).collect()
     }
