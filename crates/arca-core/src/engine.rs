@@ -1115,7 +1115,7 @@ impl<S: BlobStore> Engine<S> {
                 }
                 None => tips(readable),
             };
-            if heads.len() > 1 || !rejected.is_empty() {
+            if heads.len() > 100 || !rejected.is_empty() {
                 return Err(EngineError::Diverged {
                     tips: heads.len(),
                     rejected: rejected.len(),

@@ -86,7 +86,7 @@ impl EpochKeys {
     /// atual não é detectável (só se guarda a época atual).
     pub fn next(&self, new_key: &VaultKey) -> Result<EpochKeys, Error> {
         let epoch = self.epoch.checked_add(1).ok_or(Error::EpochOverflow)?;
-        let same_epoch = EpochKeys::derive(new_key, self.epoch);
+        let same_epoch = EpochKeys::derive(new_key, epoch);
         // `|` e não `||`: as duas comparações rodam sempre, em tempo que não depende do conteúdo
         if ct_eq(&same_epoch.blob, &self.blob) | ct_eq(&same_epoch.manifest, &self.manifest) {
             return Err(Error::KeyNotRotated);
