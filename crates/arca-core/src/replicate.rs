@@ -6,6 +6,7 @@
 //! P-32. Quem agenda (segundo plano, retry) é o consumidor; o núcleo não cria tarefas.
 
 use crate::backend::Backend;
+use crate::engine::ForeignEpoch;
 use crate::envelope::Header;
 use crate::object::{ObjectId, ObjectKind};
 use crate::store::{verified_get, BlobStore, StoreError};
@@ -37,6 +38,11 @@ pub struct ReplicateReport {
     /// entregue; sem a chave não dá para saber qual manifest o cita). **`Ok` com isto ligado
     /// não é sucesso**: a rodada ficou incompleta e o consumidor não deve marcar "replicado".
     pub manifests_withheld: bool,
+    /// Manifests de **outra época** (maior ou menor) que o dispositivo não abre, classificados
+    /// pelo cabeçalho em claro nesta rodada: **nunca gravados** (ADR 0018, item 2) e, mesmo com
+    /// blobs retidos, ainda classificados. O cabeçalho não é autenticado: é dica, não fato.
+    /// Em ordem `(época, hash)`. O `replicate` cru não classifica e deixa isto vazio.
+    pub foreign_epochs: Vec<ForeignEpoch>,
 }
 
 /// Em quantos locais um objeto está (ADR 0007: aviso abaixo de 2).
@@ -59,16 +65,30 @@ pub(crate) async fn replicate<A: BlobStore, B: BlobStore>(
     from: &A,
     to: &B,
 ) -> Result<ReplicateReport, StoreError> {
-    replicate_filtered(from, to, |_| true).await
+    replicate_filtered(from, to, |_| false, |_| Verdict::Accept).await
 }
 
-/// Como `replicate`, mas só grava um manifest se `accept_manifest(bytes)` aceitar (os bytes já
-/// são um envelope de manifest com o hash certo). Um recusado vai para `forged`, não é gravado
-/// e não retém os demais. `Engine::pull` usa isto com a chave do dispositivo (P-32).
+/// O que `Engine::pull` decide de um manifest de `from` (os bytes já são um envelope de manifest
+/// com o hash certo).
+pub(crate) enum Verdict {
+    /// Abre com as chaves do dispositivo: é gravado.
+    Accept,
+    /// Da época do dispositivo e não abre (forjado, corrompido, de outro Vault): não é gravado e
+    /// vai para `forged`; não retém os demais (P-32).
+    Forged,
+    /// De outra época (a do cabeçalho): não dá para verificar, nunca é gravado e vai para
+    /// `foreign_epochs` (ADR 0018, item 2).
+    Foreign(u32),
+}
+
+/// Como `replicate`, mas só grava um manifest que `classify` aceitar. `known(id)` diz que o id
+/// já foi classificado antes como de outra época (cache negativo): nem é baixado de novo.
+/// `Engine::pull` usa isto com a chave do dispositivo (P-32, P-47b).
 pub(crate) async fn replicate_filtered<A: BlobStore, B: BlobStore>(
     from: &A,
     to: &B,
-    accept_manifest: impl Fn(&[u8]) -> bool,
+    known: impl Fn(&ObjectId) -> bool,
+    classify: impl Fn(&[u8]) -> Verdict,
 ) -> Result<ReplicateReport, StoreError> {
     let mut report = ReplicateReport::default();
     // Os manifests são listados ANTES de copiar os blobs: um manifest que a origem publicar
@@ -83,11 +103,13 @@ pub(crate) async fn replicate_filtered<A: BlobStore, B: BlobStore>(
         let blob_gap = !(report.corrupt.is_empty()
             && report.missing.is_empty()
             && report.unreadable.is_empty());
+        let have: HashSet<ObjectId> = to.list(kind).await?.into_iter().collect();
         if kind == ObjectKind::Manifest && blob_gap {
             report.manifests_withheld = true;
+            // nada é gravado, mas uma rotação não pode ficar escondida atrás de um blob ruim
+            classify_foreign(from, ids, &have, &known, &classify, &mut report).await;
             break;
         }
-        let have: HashSet<ObjectId> = to.list(kind).await?.into_iter().collect();
         let mut seen = HashSet::new();
         for id in ids {
             // a origem não é confiável: id repetido na lista não multiplica leitura nem escrita
@@ -98,17 +120,29 @@ pub(crate) async fn replicate_filtered<A: BlobStore, B: BlobStore>(
                 report.already += 1;
                 continue;
             }
+            if kind == ObjectKind::Manifest && known(&id) {
+                continue;
+            }
             match verified_get(from, &id).await {
                 Ok(Some(bytes)) => {
                     // o cabeçalho é em claro: dá para barrar lixo sem chave. Um cabeçalho
-                    // forjado com corpo aleatório só o `accept_manifest` (com chave) barra.
+                    // forjado com corpo aleatório só o `classify` (com chave) barra.
                     if !is_envelope_of(kind, &bytes) {
                         report.malformed.push(id);
                         continue;
                     }
-                    if kind == ObjectKind::Manifest && !accept_manifest(&bytes) {
-                        report.forged.push(id);
-                        continue;
+                    if kind == ObjectKind::Manifest {
+                        match classify(&bytes) {
+                            Verdict::Accept => {}
+                            Verdict::Forged => {
+                                report.forged.push(id);
+                                continue;
+                            }
+                            Verdict::Foreign(epoch) => {
+                                report.foreign_epochs.push(ForeignEpoch { epoch, id });
+                                continue;
+                            }
+                        }
                     }
                     to.put(&id, &bytes).await?;
                     report.copied += 1;
@@ -124,7 +158,34 @@ pub(crate) async fn replicate_filtered<A: BlobStore, B: BlobStore>(
             }
         }
     }
+    report.foreign_epochs.sort_by_key(|f| (f.epoch, f.id.hash));
     Ok(report)
+}
+
+/// Com os manifests retidos (blob pulado), só lê os que o destino não tem e anota os de outra
+/// época. Falha de leitura de um manifest é ignorada: aqui nada é gravado nem acusado.
+async fn classify_foreign<A: BlobStore>(
+    from: &A,
+    ids: Vec<ObjectId>,
+    have: &HashSet<ObjectId>,
+    known: &impl Fn(&ObjectId) -> bool,
+    classify: &impl Fn(&[u8]) -> Verdict,
+    report: &mut ReplicateReport,
+) {
+    let mut seen = HashSet::new();
+    for id in ids {
+        if !seen.insert(id) || have.contains(&id) || known(&id) {
+            continue;
+        }
+        let Ok(Some(bytes)) = verified_get(from, &id).await else {
+            continue;
+        };
+        if is_envelope_of(ObjectKind::Manifest, &bytes) {
+            if let Verdict::Foreign(epoch) = classify(&bytes) {
+                report.foreign_epochs.push(ForeignEpoch { epoch, id });
+            }
+        }
+    }
 }
 
 /// O objeto começa com um cabeçalho de envelope válido e do tipo esperado.
@@ -211,12 +272,15 @@ mod tests {
         fail_get: Option<ObjectId>,
         fail_list: bool,
         deletes: Arc<Mutex<usize>>,
+        /// Ids pedidos em `get`, na ordem (para provar o que o `pull` não baixa de novo).
+        gets: Arc<Mutex<Vec<ObjectId>>>,
     }
 
     impl Probe {
         fn new(inner: Backend) -> Probe {
             Probe {
                 inner,
+                gets: Arc::new(Mutex::new(Vec::new())),
                 puts: Arc::new(Mutex::new(Vec::new())),
                 fail_put: None,
                 fail_put_nth: None,
@@ -237,6 +301,7 @@ mod tests {
             self.inner.put(id, bytes).await
         }
         async fn get(&self, id: &ObjectId) -> Result<Option<Vec<u8>>, StoreError> {
+            self.gets.lock().unwrap().push(*id);
             if self.fail_get == Some(*id) {
                 return Err(StoreError::Unavailable(io::ErrorKind::PermissionDenied));
             }
@@ -290,7 +355,8 @@ mod tests {
                 unreadable: vec![],
                 malformed: vec![],
                 forged: vec![],
-                manifests_withheld: false
+                manifests_withheld: false,
+                foreign_epochs: vec![]
             }
         );
         assert_eq!(count(&to, ObjectKind::Blob).await, 3);
@@ -307,7 +373,8 @@ mod tests {
                 unreadable: vec![],
                 malformed: vec![],
                 forged: vec![],
-                manifests_withheld: false
+                manifests_withheld: false,
+                foreign_epochs: vec![]
             }
         );
     }
@@ -1064,40 +1131,308 @@ mod tests {
         assert_eq!(second.forged, vec![forged.0]);
     }
 
-    /// Sem a chave da outra época não há como autenticar: o manifest passa como no
-    /// `replicate`. Documenta o limite (um cabeçalho forjado de época maior ainda dá
-    /// `NeedsNewKey`; o de época menor vira histórico, salvo num dispositivo sem manifest da
-    /// própria época, onde vira `rejected`: limite herdado do ADR 0013).
-    #[tokio::test]
-    async fn a_manifest_of_another_epoch_cannot_be_verified_and_is_copied() {
-        let tmp = TempDir::new();
-        let remote = disk(&tmp, "remoto");
-        let local = disk(&tmp, "novo");
-        let keys2 = EpochKeys::derive(&VaultKey::from_bytes([3u8; 32]), 2);
-        let engine = Engine::new(local.clone(), keys2, "pc").unwrap();
+    // ---------- época estrangeira no pull (ADR 0018, P-47b) ----------
 
-        let old = sample_manifest(1).seal(&keys()).unwrap();
-        remote.put(&old.id, &old.bytes).await.unwrap();
+    /// Manifest de `epoch` que o dispositivo não abre: cabeçalho em claro com a época dada e
+    /// corpo que `tag` torna único (ids distintos). Não é autenticável sem a chave dela.
+    fn header_of_epoch(epoch: u32, tag: &[u8]) -> (ObjectId, Vec<u8>) {
         let header = Header {
             format_version: FORMAT_VERSION as u16,
             alg: Alg::XChaCha20Poly1305,
             kind: ObjectKind::Manifest,
-            key_epoch: 3,
+            key_epoch: epoch,
             nonce: [7u8; NONCE_LEN],
         };
-        let mut newer = header.encode().to_vec();
-        newer.extend_from_slice(b"nao da para verificar");
-        let newer_id = ObjectId::of(ObjectKind::Manifest, &newer);
-        remote.put(&newer_id, &newer).await.unwrap();
+        let mut bytes = header.encode().to_vec();
+        bytes.extend_from_slice(b"nao da para verificar ");
+        bytes.extend_from_slice(tag);
+        (ObjectId::of(ObjectKind::Manifest, &bytes), bytes)
+    }
+
+    fn at(epoch: u32, (id, _): &(ObjectId, Vec<u8>)) -> ForeignEpoch {
+        ForeignEpoch { epoch, id: *id }
+    }
+
+    fn sorted(mut list: Vec<ForeignEpoch>) -> Vec<ForeignEpoch> {
+        list.sort_by_key(|f| (f.epoch, f.id.hash));
+        list
+    }
+
+    fn state_of(tmp: &TempDir, name: &str) -> PathBuf {
+        tmp.path().join(format!("{name}-estado.json"))
+    }
+
+    fn needs_new_key(found: u32) -> Result<(), EngineError> {
+        Err(EngineError::NeedsNewKey { have: 1, found })
+    }
+
+    /// Cria um Vault em `a`, publica em `remote` e faz `b` puxar e aplicar a base: `b` fica com
+    /// a pasta igual e pronto para um `snapshot`.
+    async fn synced(
+        tmp: &TempDir,
+        remote: &Backend,
+        b_with_state: bool,
+    ) -> (Device, Device, ObjectId) {
+        let (a, b) = (
+            Device::new(tmp, "a", false),
+            Device::new(tmp, "b", b_with_state),
+        );
+        let base = publish_base(&a, remote).await;
+        b.engine.pull(remote).await.unwrap();
+        b.engine.apply(None, &base, &b.roots).await.unwrap();
+        (a, b, base)
+    }
+
+    async fn snapshot_of_b(b: &Device) -> Result<(), EngineError> {
+        write(&b.vault, "novo.md", b"conteudo novo");
+        b.engine.snapshot(&b.roots, 9).await.map(|_| ())
+    }
+
+    #[tokio::test]
+    async fn pull_never_writes_a_manifest_of_another_epoch_and_reports_it_by_epoch_and_id() {
+        let tmp = TempDir::new();
+        let remote = disk(&tmp, "remoto");
+        let (a, b) = (Device::new(&tmp, "a", false), Device::new(&tmp, "b", true));
+        let base = publish_base(&a, &remote).await;
+        let (older, newer, newest) = (
+            header_of_epoch(0, b"velho"),
+            header_of_epoch(2, b"novo"),
+            header_of_epoch(3, b"novissimo"),
+        );
+        put_all(&remote, &[older.clone(), newer.clone(), newest.clone()]).await;
+
+        let report = b.engine.pull(&remote).await.unwrap();
+        assert_eq!(
+            report.foreign_epochs,
+            sorted(vec![at(0, &older), at(2, &newer), at(3, &newest)])
+        );
+        assert!(report.forged.is_empty() && !report.manifests_withheld);
+        for (id, _) in [&older, &newer, &newest] {
+            assert_eq!(b.local.has(id).await, Ok(false));
+        }
+        assert_eq!(b.local.has(&base).await, Ok(true));
+    }
+
+    #[tokio::test]
+    async fn an_older_epoch_manifest_is_reported_but_never_blocks_a_device_of_a_newer_epoch() {
+        let tmp = TempDir::new();
+        let remote = disk(&tmp, "remoto");
+        let local = disk(&tmp, "novo");
+        let keys2 = EpochKeys::derive(&VaultKey::from_bytes([3u8; 32]), 2);
+        let engine = Engine::new(local.clone(), keys2, "pc")
+            .unwrap()
+            .with_state(state_of(&tmp, "pc"));
+        let old = sample_manifest(1).seal(&keys()).unwrap();
+        remote.put(&old.id, &old.bytes).await.unwrap();
 
         let report = engine.pull(&remote).await.unwrap();
-        assert!(report.forged.is_empty());
-        assert_eq!(local.has(&old.id).await, Ok(true));
-        assert_eq!(local.has(&newer_id).await, Ok(true));
-        assert!(matches!(
-            engine.heads().await,
-            Err(EngineError::NeedsNewKey { have: 2, found: 3 })
+        assert_eq!(
+            report.foreign_epochs,
+            vec![ForeignEpoch {
+                epoch: 1,
+                id: old.id
+            }]
+        );
+        assert_eq!(local.has(&old.id).await, Ok(false));
+        assert_eq!(engine.foreign_epochs().await, Ok(vec![]));
+        assert!(engine.heads().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_corrupt_blob_does_not_hide_a_newer_epoch_and_nothing_is_written() {
+        let tmp = TempDir::new();
+        let remote = disk(&tmp, "remoto");
+        let (a, b) = (Device::new(&tmp, "a", false), Device::new(&tmp, "b", true));
+        let base = publish_base(&a, &remote).await;
+        let newer = header_of_epoch(2, b"rotacao");
+        remote.put(&newer.0, &newer.1).await.unwrap();
+        let bad = object(ObjectKind::Blob, b"ruim");
+        remote.put(&bad.0, &bad.1).await.unwrap();
+        corrupt_on_disk(&tmp, "remoto", &bad.0);
+
+        let report = b.engine.pull(&remote).await.unwrap();
+        assert_eq!(report.corrupt, vec![bad.0]);
+        assert!(report.manifests_withheld);
+        assert_eq!(report.foreign_epochs, vec![at(2, &newer)]);
+        assert_eq!(b.local.has(&base).await, Ok(false));
+        assert_eq!(b.local.has(&newer.0).await, Ok(false));
+        assert_eq!(b.engine.foreign_epochs().await, Ok(vec![at(2, &newer)]));
+    }
+
+    #[tokio::test]
+    async fn the_block_after_a_pull_comes_from_the_pending_and_not_from_the_local_store() {
+        let tmp = TempDir::new();
+        let remote = disk(&tmp, "remoto");
+        let (_a, b, _base) = synced(&tmp, &remote, true).await;
+        let newer = header_of_epoch(2, b"rotacao");
+        remote.put(&newer.0, &newer.1).await.unwrap();
+        b.engine.pull(&remote).await.unwrap();
+        assert_eq!(b.local.has(&newer.0).await, Ok(false));
+        assert_eq!(snapshot_of_b(&b).await, needs_new_key(2));
+    }
+
+    #[tokio::test]
+    async fn a_newer_epoch_seen_by_pull_blocks_the_snapshot_and_survives_a_restart() {
+        let tmp = TempDir::new();
+        let remote = disk(&tmp, "remoto");
+        let (_a, b, _base) = synced(&tmp, &remote, true).await;
+        let newer = header_of_epoch(2, b"rotacao");
+        remote.put(&newer.0, &newer.1).await.unwrap();
+
+        b.engine.pull(&remote).await.unwrap();
+        assert_eq!(snapshot_of_b(&b).await, needs_new_key(2));
+        assert_eq!(b.engine.foreign_epochs().await, Ok(vec![at(2, &newer)]));
+
+        // o processo reinicia: novo `Engine` sobre o mesmo armazenamento e o mesmo estado
+        let again = Engine::new(b.local.clone(), keys(), "b")
+            .unwrap()
+            .with_state(state_of(&tmp, "b"));
+        assert_eq!(again.foreign_epochs().await, Ok(vec![at(2, &newer)]));
+        assert_eq!(
+            again.snapshot(&b.roots, 10).await.map(|_| ()),
+            needs_new_key(2)
+        );
+    }
+
+    #[tokio::test]
+    async fn acknowledging_releases_the_block_and_a_new_id_of_the_same_epoch_blocks_again() {
+        let tmp = TempDir::new();
+        let remote = disk(&tmp, "remoto");
+        let (_a, b, _base) = synced(&tmp, &remote, true).await;
+        let first = header_of_epoch(2, b"forjado");
+        remote.put(&first.0, &first.1).await.unwrap();
+        b.engine.pull(&remote).await.unwrap();
+        b.engine
+            .acknowledge_foreign(&[at(2, &first)])
+            .await
+            .unwrap();
+        assert_eq!(b.engine.foreign_epochs().await, Ok(vec![]));
+        snapshot_of_b(&b).await.unwrap();
+
+        // a rotação de verdade tem outro id, na mesma época previsível
+        let real = header_of_epoch(2, b"rotacao de verdade");
+        remote.put(&real.0, &real.1).await.unwrap();
+        let report = b.engine.pull(&remote).await.unwrap();
+        assert_eq!(report.foreign_epochs, vec![at(2, &real)]);
+        assert_eq!(b.engine.foreign_epochs().await, Ok(vec![at(2, &real)]));
+        assert_eq!(
+            b.engine.snapshot(&b.roots, 11).await.map(|_| ()),
+            needs_new_key(2)
+        );
+    }
+
+    #[tokio::test]
+    async fn without_state_the_pending_epoch_lives_in_the_engine_and_acknowledging_works() {
+        let tmp = TempDir::new();
+        let remote = disk(&tmp, "remoto");
+        let (_a, b, _base) = synced(&tmp, &remote, false).await;
+        let newer = header_of_epoch(2, b"rotacao");
+        remote.put(&newer.0, &newer.1).await.unwrap();
+
+        b.engine.pull(&remote).await.unwrap();
+        assert_eq!(b.engine.foreign_epochs().await, Ok(vec![at(2, &newer)]));
+        assert_eq!(snapshot_of_b(&b).await, needs_new_key(2));
+
+        b.engine
+            .acknowledge_foreign(&[at(2, &newer)])
+            .await
+            .unwrap();
+        assert_eq!(b.engine.foreign_epochs().await, Ok(vec![]));
+        snapshot_of_b(&b).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_second_pull_does_not_download_a_foreign_manifest_again() {
+        let tmp = TempDir::new();
+        let remote = disk(&tmp, "remoto");
+        let (_a, b, _base) = synced(&tmp, &remote, true).await;
+        let newer = header_of_epoch(2, b"rotacao");
+        remote.put(&newer.0, &newer.1).await.unwrap();
+        let probe = Probe::new(remote.clone());
+
+        b.engine.pull(&probe).await.unwrap();
+        assert!(probe.gets.lock().unwrap().contains(&newer.0));
+        probe.gets.lock().unwrap().clear();
+
+        b.engine.pull(&probe).await.unwrap();
+        assert!(!probe.gets.lock().unwrap().contains(&newer.0));
+        // continua pendente: o cache só poupa a banda, não esconde a rotação
+        assert_eq!(b.engine.foreign_epochs().await, Ok(vec![at(2, &newer)]));
+    }
+
+    #[tokio::test]
+    async fn the_pending_clears_by_itself_when_the_device_reaches_the_epoch() {
+        let tmp = TempDir::new();
+        let remote = disk(&tmp, "remoto");
+        let (_a, b, _base) = synced(&tmp, &remote, true).await;
+        let newer = header_of_epoch(2, b"rotacao");
+        remote.put(&newer.0, &newer.1).await.unwrap();
+        b.engine.pull(&remote).await.unwrap();
+        assert_eq!(b.engine.foreign_epochs().await, Ok(vec![at(2, &newer)]));
+
+        // depois de re-parear, o dispositivo tem as chaves da época 2 e o mesmo arquivo de estado
+        let keys2 = EpochKeys::derive(&VaultKey::from_bytes([4u8; 32]), 2);
+        let repaired = Engine::new(b.local.clone(), keys2, "b")
+            .unwrap()
+            .with_state(state_of(&tmp, "b"));
+        assert_eq!(repaired.foreign_epochs().await, Ok(vec![]));
+        assert!(!matches!(
+            repaired.heads().await,
+            Err(EngineError::NeedsNewKey { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn pull_is_busy_while_another_process_holds_the_state_and_writes_nothing() {
+        let tmp = TempDir::new();
+        let remote = disk(&tmp, "remoto");
+        let (a, b) = (Device::new(&tmp, "a", false), Device::new(&tmp, "b", true));
+        publish_base(&a, &remote).await;
+        let held = crate::state::lock(&state_of(&tmp, "b")).unwrap();
+
+        assert_eq!(
+            b.engine.pull(&remote).await.map(|_| ()),
+            Err(EngineError::Busy)
+        );
+        assert_eq!(count(&b.local, ObjectKind::Manifest).await, 0);
+        drop(held);
+        b.engine.pull(&remote).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn past_the_pending_cap_the_rest_comes_back_in_the_next_pull() {
+        let tmp = TempDir::new();
+        let remote = disk(&tmp, "remoto");
+        let (_a, b, _base) = synced(&tmp, &remote, true).await;
+        let planted: Vec<_> = (0..300u32)
+            .map(|n| header_of_epoch(2, format!("forjado {n}").as_bytes()))
+            .collect();
+        put_all(&remote, &planted).await;
+
+        // nunca `CorruptState`, e o bloqueio continua
+        b.engine.pull(&remote).await.unwrap();
+        let first = b.engine.foreign_epochs().await.unwrap();
+        assert_eq!(first.len(), 256);
+        assert_eq!(snapshot_of_b(&b).await, needs_new_key(2));
+
+        // reconhecidos os 256, os 44 que não couberam não podem ter ficado "vistos"
+        b.engine.acknowledge_foreign(&first).await.unwrap();
+        b.engine.pull(&remote).await.unwrap();
+        let rest = b.engine.foreign_epochs().await.unwrap();
+        assert_eq!(rest.len(), 44);
+        assert!(rest.iter().all(|f| !first.contains(f)));
+    }
+
+    #[tokio::test]
+    async fn the_raw_replicate_still_copies_a_manifest_of_another_epoch() {
+        let tmp = TempDir::new();
+        let (remote, local) = (disk(&tmp, "remoto"), disk(&tmp, "local"));
+        let newer = header_of_epoch(2, b"rotacao");
+        remote.put(&newer.0, &newer.1).await.unwrap();
+
+        let report = replicate(&remote, &local).await.unwrap();
+        assert!(report.foreign_epochs.is_empty());
+        assert_eq!(local.has(&newer.0).await, Ok(true));
     }
 
     #[tokio::test]
