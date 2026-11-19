@@ -65,16 +65,30 @@ pub(crate) async fn replicate<A: BlobStore, B: BlobStore>(
     from: &A,
     to: &B,
 ) -> Result<ReplicateReport, StoreError> {
-    replicate_filtered(from, to, |_| true).await
+    replicate_filtered(from, to, |_| false, |_| Verdict::Accept).await
 }
 
-/// Como `replicate`, mas só grava um manifest se `accept_manifest(bytes)` aceitar (os bytes já
-/// são um envelope de manifest com o hash certo). Um recusado vai para `forged`, não é gravado
-/// e não retém os demais. `Engine::pull` usa isto com a chave do dispositivo (P-32).
+/// O que `Engine::pull` decide de um manifest de `from` (os bytes já são um envelope de manifest
+/// com o hash certo).
+pub(crate) enum Verdict {
+    /// Abre com as chaves do dispositivo: é gravado.
+    Accept,
+    /// Da época do dispositivo e não abre (forjado, corrompido, de outro Vault): não é gravado e
+    /// vai para `forged`; não retém os demais (P-32).
+    Forged,
+    /// De outra época (a do cabeçalho): não dá para verificar, nunca é gravado e vai para
+    /// `foreign_epochs` (ADR 0018, item 2).
+    Foreign(u32),
+}
+
+/// Como `replicate`, mas só grava um manifest que `classify` aceitar. `known(id)` diz que o id
+/// já foi classificado antes como de outra época (cache negativo): nem é baixado de novo.
+/// `Engine::pull` usa isto com a chave do dispositivo (P-32, P-47b).
 pub(crate) async fn replicate_filtered<A: BlobStore, B: BlobStore>(
     from: &A,
     to: &B,
-    accept_manifest: impl Fn(&[u8]) -> bool,
+    known: impl Fn(&ObjectId) -> bool,
+    classify: impl Fn(&[u8]) -> Verdict,
 ) -> Result<ReplicateReport, StoreError> {
     let mut report = ReplicateReport::default();
     // Os manifests são listados ANTES de copiar os blobs: um manifest que a origem publicar
@@ -89,11 +103,13 @@ pub(crate) async fn replicate_filtered<A: BlobStore, B: BlobStore>(
         let blob_gap = !(report.corrupt.is_empty()
             && report.missing.is_empty()
             && report.unreadable.is_empty());
+        let have: HashSet<ObjectId> = to.list(kind).await?.into_iter().collect();
         if kind == ObjectKind::Manifest && blob_gap {
             report.manifests_withheld = true;
+            // nada é gravado, mas uma rotação não pode ficar escondida atrás de um blob ruim
+            classify_foreign(from, ids, &have, &known, &classify, &mut report).await;
             break;
         }
-        let have: HashSet<ObjectId> = to.list(kind).await?.into_iter().collect();
         let mut seen = HashSet::new();
         for id in ids {
             // a origem não é confiável: id repetido na lista não multiplica leitura nem escrita
@@ -104,17 +120,29 @@ pub(crate) async fn replicate_filtered<A: BlobStore, B: BlobStore>(
                 report.already += 1;
                 continue;
             }
+            if kind == ObjectKind::Manifest && known(&id) {
+                continue;
+            }
             match verified_get(from, &id).await {
                 Ok(Some(bytes)) => {
                     // o cabeçalho é em claro: dá para barrar lixo sem chave. Um cabeçalho
-                    // forjado com corpo aleatório só o `accept_manifest` (com chave) barra.
+                    // forjado com corpo aleatório só o `classify` (com chave) barra.
                     if !is_envelope_of(kind, &bytes) {
                         report.malformed.push(id);
                         continue;
                     }
-                    if kind == ObjectKind::Manifest && !accept_manifest(&bytes) {
-                        report.forged.push(id);
-                        continue;
+                    if kind == ObjectKind::Manifest {
+                        match classify(&bytes) {
+                            Verdict::Accept => {}
+                            Verdict::Forged => {
+                                report.forged.push(id);
+                                continue;
+                            }
+                            Verdict::Foreign(epoch) => {
+                                report.foreign_epochs.push(ForeignEpoch { epoch, id });
+                                continue;
+                            }
+                        }
                     }
                     to.put(&id, &bytes).await?;
                     report.copied += 1;
@@ -130,7 +158,34 @@ pub(crate) async fn replicate_filtered<A: BlobStore, B: BlobStore>(
             }
         }
     }
+    report.foreign_epochs.sort_by_key(|f| (f.epoch, f.id.hash));
     Ok(report)
+}
+
+/// Com os manifests retidos (blob pulado), só lê os que o destino não tem e anota os de outra
+/// época. Falha de leitura de um manifest é ignorada: aqui nada é gravado nem acusado.
+async fn classify_foreign<A: BlobStore>(
+    from: &A,
+    ids: Vec<ObjectId>,
+    have: &HashSet<ObjectId>,
+    known: &impl Fn(&ObjectId) -> bool,
+    classify: &impl Fn(&[u8]) -> Verdict,
+    report: &mut ReplicateReport,
+) {
+    let mut seen = HashSet::new();
+    for id in ids {
+        if !seen.insert(id) || have.contains(&id) || known(&id) {
+            continue;
+        }
+        let Ok(Some(bytes)) = verified_get(from, &id).await else {
+            continue;
+        };
+        if is_envelope_of(ObjectKind::Manifest, &bytes) {
+            if let Verdict::Foreign(epoch) = classify(&bytes) {
+                report.foreign_epochs.push(ForeignEpoch { epoch, id });
+            }
+        }
+    }
 }
 
 /// O objeto começa com um cabeçalho de envelope válido e do tipo esperado.
@@ -1202,6 +1257,18 @@ mod tests {
         assert_eq!(b.local.has(&base).await, Ok(false));
         assert_eq!(b.local.has(&newer.0).await, Ok(false));
         assert_eq!(b.engine.foreign_epochs().await, Ok(vec![at(2, &newer)]));
+    }
+
+    #[tokio::test]
+    async fn the_block_after_a_pull_comes_from_the_pending_and_not_from_the_local_store() {
+        let tmp = TempDir::new();
+        let remote = disk(&tmp, "remoto");
+        let (_a, b, _base) = synced(&tmp, &remote, true).await;
+        let newer = header_of_epoch(2, b"rotacao");
+        remote.put(&newer.0, &newer.1).await.unwrap();
+        b.engine.pull(&remote).await.unwrap();
+        assert_eq!(b.local.has(&newer.0).await, Ok(false));
+        assert_eq!(snapshot_of_b(&b).await, needs_new_key(2));
     }
 
     #[tokio::test]

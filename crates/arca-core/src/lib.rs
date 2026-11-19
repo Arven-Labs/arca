@@ -29,8 +29,6 @@ pub mod s3;
 #[cfg(all(test, feature = "s3"))]
 mod s3_e2e;
 pub mod scan;
-// esboço do P-47b: o `allow` sai quando o `pull` passar a usar o cache
-#[allow(dead_code)]
 mod seen;
 pub mod server;
 pub mod state;

@@ -24,11 +24,22 @@ impl Seen {
         }
     }
 
-    pub(crate) fn contains(&self, _id: &ObjectId) -> bool {
-        false
+    pub(crate) fn contains(&self, id: &ObjectId) -> bool {
+        self.set.contains(id)
     }
 
-    pub(crate) fn insert(&mut self, _id: ObjectId) {}
+    /// Lembra `id`. Já lembrado: nada muda (não ocupa outro lugar nem renova a posição).
+    pub(crate) fn insert(&mut self, id: ObjectId) {
+        if !self.set.insert(id) {
+            return;
+        }
+        self.order.push_back(id);
+        if self.order.len() > self.cap {
+            if let Some(oldest) = self.order.pop_front() {
+                self.set.remove(&oldest);
+            }
+        }
+    }
 }
 
 #[cfg(test)]

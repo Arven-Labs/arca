@@ -37,12 +37,17 @@ struct Ack {
 struct ForeignFile {
     version: u8,
     acknowledged: Vec<Ack>,
+    /// Vistos pelo `pull` e ainda não reconhecidos (P-47b). Ausente nos arquivos do 47a.
+    #[serde(default)]
+    pending: Vec<Ack>,
 }
 
-/// Os `(época, id)` reconhecidos, do mais antigo para o mais novo.
+/// Os `(época, id)` reconhecidos, do mais antigo para o mais novo, e os pendentes (vistos pelo
+/// `pull`, ainda não reconhecidos). Sem `with_state` vive só na memória do `Engine`.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct ForeignAcks {
     entries: Vec<(u32, Hash32)>,
+    pending: Vec<(u32, Hash32)>,
 }
 
 /// O arquivo de reconhecidos: `<nome do estado>.foreign`, ao lado dele.
@@ -69,31 +74,34 @@ impl ForeignAcks {
         let bytes = fs::read(&file).map_err(|e| EngineError::Io(e.kind()))?;
         let parsed: ForeignFile =
             serde_json::from_slice(&bytes).map_err(|_| EngineError::CorruptState)?;
-        if parsed.version != FOREIGN_VERSION || parsed.acknowledged.len() > MAX_ACKS {
+        if parsed.version != FOREIGN_VERSION
+            || parsed.acknowledged.len() > MAX_ACKS
+            || parsed.pending.len() > MAX_ACKS
+        {
             return Err(EngineError::CorruptState);
         }
+        let pairs = |list: &[Ack]| list.iter().map(|a| (a.epoch, a.id)).collect();
         Ok(ForeignAcks {
-            entries: parsed
-                .acknowledged
-                .iter()
-                .map(|a| (a.epoch, a.id))
-                .collect(),
+            entries: pairs(&parsed.acknowledged),
+            pending: pairs(&parsed.pending),
         })
     }
 
     /// Grava de forma atômica (`0600`; a pasta, se faltar, `0700`).
     pub(crate) fn save(&self, state: &Path) -> Result<(), EngineError> {
         let file = path(state);
-        let body = ForeignFile {
-            version: FOREIGN_VERSION,
-            acknowledged: self
-                .entries
-                .iter()
+        let acks = |list: &[(u32, Hash32)]| {
+            list.iter()
                 .map(|(epoch, id)| Ack {
                     epoch: *epoch,
                     id: *id,
                 })
-                .collect(),
+                .collect()
+        };
+        let body = ForeignFile {
+            version: FOREIGN_VERSION,
+            acknowledged: acks(&self.entries),
+            pending: acks(&self.pending),
         };
         let json = serde_json::to_vec(&body).map_err(|_| EngineError::CorruptState)?;
         if let Some(parent) = file.parent() {
@@ -119,6 +127,48 @@ impl ForeignAcks {
             let extra = self.entries.len() - MAX_ACKS;
             self.entries.drain(..extra);
         }
+    }
+
+    /// Reconhece o par e o tira dos pendentes.
+    pub(crate) fn acknowledge(&mut self, epoch: u32, id: &ObjectId) {
+        self.add(epoch, id);
+        self.pending
+            .retain(|(e, hash)| !(*e == epoch && hash.0 == id.hash));
+    }
+
+    /// Anota um par visto pelo `pull` e ainda não reconhecido. `false` se **não coube** (teto de
+    /// `MAX_ACKS`): o chamador não deve dá-lo como visto, para a próxima rodada trazê-lo de
+    /// volta (nunca vira erro, e nunca desliga o bloqueio dos que já estão anotados). `true` se
+    /// anotou ou se o par já estava anotado ou reconhecido.
+    pub(crate) fn add_pending(&mut self, epoch: u32, id: &ObjectId) -> bool {
+        if self.contains(epoch, id) || self.pending_contains(epoch, id) {
+            return true;
+        }
+        if self.pending.len() >= MAX_ACKS {
+            return false;
+        }
+        self.pending.push((epoch, Hash32(id.hash)));
+        true
+    }
+
+    fn pending_contains(&self, epoch: u32, id: &ObjectId) -> bool {
+        self.pending
+            .iter()
+            .any(|(e, hash)| *e == epoch && hash.0 == id.hash)
+    }
+
+    /// Tira os pendentes de época `<= mine`: o dispositivo já a alcançou (re-pareou).
+    pub(crate) fn drop_pending_up_to(&mut self, mine: u32) {
+        self.pending.retain(|(epoch, _)| *epoch > mine);
+    }
+
+    /// Os pendentes de época **maior** que `mine`, ainda não reconhecidos.
+    pub(crate) fn pending_above(&self, mine: u32) -> Vec<(u32, Hash32)> {
+        self.pending
+            .iter()
+            .filter(|(epoch, _)| *epoch > mine)
+            .copied()
+            .collect()
     }
 }
 
@@ -272,5 +322,66 @@ mod tests {
         let state = state_in(&tmp);
         fs::create_dir(path(&state)).unwrap();
         assert_eq!(ForeignAcks::load(&state), Err(EngineError::CorruptState));
+    }
+
+    #[test]
+    fn a_file_written_by_the_47a_without_pending_still_loads_with_none() {
+        let tmp = TempDir::new();
+        let state = state_in(&tmp);
+        fs::write(path(&state), r#"{"version":1,"acknowledged":[]}"#).unwrap();
+        assert_eq!(ForeignAcks::load(&state).unwrap(), ForeignAcks::default());
+    }
+
+    #[test]
+    fn the_pending_round_trips_and_acknowledging_moves_it_to_the_acknowledged() {
+        let tmp = TempDir::new();
+        let state = state_in(&tmp);
+        let mut acks = ForeignAcks::default();
+        assert!(acks.add_pending(2, &id(1)));
+        assert!(acks.add_pending(3, &id(2)));
+        acks.save(&state).unwrap();
+        let mut loaded = ForeignAcks::load(&state).unwrap();
+        assert_eq!(loaded, acks);
+        assert_eq!(loaded.pending_above(1).len(), 2);
+
+        loaded.acknowledge(2, &id(1));
+        assert!(loaded.contains(2, &id(1)));
+        assert_eq!(loaded.pending_above(1), vec![(3, Hash32([2; 32]))]);
+        // época e id juntos: reconhecer (2, id 2) não tira o pendente (3, id 2)
+        loaded.acknowledge(2, &id(2));
+        assert_eq!(loaded.pending_above(1).len(), 1);
+    }
+
+    #[test]
+    fn pending_past_the_cap_is_refused_without_error_and_keeps_the_ones_already_noted() {
+        let mut acks = ForeignAcks::default();
+        for n in 0..MAX_ACKS {
+            let mut hash = [0u8; 32];
+            hash[..8].copy_from_slice(&(n as u64).to_le_bytes());
+            let id = ObjectId {
+                kind: ObjectKind::Manifest,
+                hash,
+            };
+            assert!(acks.add_pending(2, &id));
+        }
+        assert!(!acks.add_pending(2, &id(0xFF)));
+        assert_eq!(acks.pending_above(1).len(), MAX_ACKS);
+        // já anotado ou reconhecido continua "cabendo"
+        assert!(acks.add_pending(
+            2,
+            &ObjectId {
+                kind: ObjectKind::Manifest,
+                hash: [0u8; 32]
+            }
+        ));
+    }
+
+    #[test]
+    fn pending_at_or_below_the_device_epoch_is_dropped() {
+        let mut acks = ForeignAcks::default();
+        acks.add_pending(2, &id(1));
+        acks.add_pending(3, &id(2));
+        acks.drop_pending_up_to(2);
+        assert_eq!(acks.pending_above(0), vec![(3, Hash32([2; 32]))]);
     }
 }
