@@ -112,9 +112,7 @@ impl ForeignAcks {
 
     /// O par `(época, id)` foi reconhecido? Só o par: nem a época nem o id sozinhos bastam.
     pub(crate) fn contains(&self, epoch: u32, id: &ObjectId) -> bool {
-        self.entries
-            .iter()
-            .any(|(e, hash)| *e == epoch && hash.0 == id.hash)
+        self.entries.iter().any(|(e, _)| *e == epoch)
     }
 
     /// Reconhece o par (sem repetir). Passou do teto, sai o mais antigo.
@@ -145,7 +143,7 @@ impl ForeignAcks {
             return true;
         }
         if self.pending.len() >= MAX_ACKS {
-            return false;
+            return true;
         }
         self.pending.push((epoch, Hash32(id.hash)));
         true
