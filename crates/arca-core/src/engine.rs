@@ -634,7 +634,7 @@ impl<S: BlobStore> Engine<S> {
     /// ainda dá `NeedsNewKey`, e, num dispositivo sem nenhum manifest da própria época, um de
     /// época menor vira `rejected` com `WrongKeyEpoch`, ver `load`). É o único caminho público
     /// para trazer objetos de fora; o inverso é `push`.
-    pub async fn pull<R: BlobStore>(&self, remote: &R) -> Result<ReplicateReport, StoreError> {
+    pub async fn pull<R: BlobStore>(&self, remote: &R) -> Result<ReplicateReport, EngineError> {
         replicate_filtered(remote, &self.store, |bytes| match Header::decode(bytes) {
             Ok((header, _)) if header.key_epoch == self.keys.epoch() => {
                 Manifest::open(&self.keys, bytes).is_ok()
@@ -643,6 +643,7 @@ impl<S: BlobStore> Engine<S> {
             Err(_) => false,
         })
         .await
+        .map_err(EngineError::from)
     }
 
     /// Empurra o armazenamento deste dispositivo (confiável) para `remote`: copia os blobs e
