@@ -79,6 +79,11 @@ impl EpochKeys {
         }
     }
 
+    /// As chaves da época seguinte, derivadas de `new_key` (ADR 0018, item 4). Esboço do P-48.
+    pub fn next(&self, _new_key: &VaultKey) -> Result<EpochKeys, Error> {
+        Err(Error::KeyNotRotated)
+    }
+
     /// A época a que estas chaves pertencem.
     pub fn epoch(&self) -> u32 {
         self.epoch
@@ -592,5 +597,57 @@ mod tests {
         assert_eq!(h.key_epoch, 7);
         assert_eq!(h.nonce, nonce);
         assert_eq!(body.len(), 2 + TAG_LEN);
+    }
+
+    // ---------- chave nova obrigatória (ADR 0018, item 4; P-48) ----------
+
+    fn other_vault_key() -> VaultKey {
+        VaultKey::from_bytes([9u8; 32])
+    }
+
+    #[test]
+    fn next_derives_the_following_epoch_from_the_new_key() {
+        let new = other_vault_key();
+        let next = keys(1).next(&new).unwrap();
+        let expected = EpochKeys::derive(&new, 2);
+        assert_eq!(next.epoch(), 2);
+        assert_eq!(&next.blob[..], &expected.blob[..]);
+        assert_eq!(&next.manifest[..], &expected.manifest[..]);
+    }
+
+    /// O que a regra existe para garantir: a época N + 1 do segredo novo não sai do antigo.
+    #[test]
+    fn the_next_epoch_of_the_new_key_is_not_what_the_old_key_derives_for_it() {
+        let next = keys(1).next(&other_vault_key()).unwrap();
+        let from_old = keys(2);
+        assert_ne!(&next.blob[..], &from_old.blob[..]);
+        assert_ne!(&next.manifest[..], &from_old.manifest[..]);
+    }
+
+    #[test]
+    fn next_refuses_the_vault_key_that_derives_the_same_subkeys() {
+        assert!(matches!(
+            keys(1).next(&test_vault_key()),
+            Err(Error::KeyNotRotated)
+        ));
+        assert!(matches!(
+            keys(7).next(&test_vault_key()),
+            Err(Error::KeyNotRotated)
+        ));
+    }
+
+    #[test]
+    fn next_accepts_a_key_that_differs_in_a_single_byte() {
+        let mut bytes = *test_vault_key().as_bytes();
+        bytes[31] ^= 1;
+        assert!(keys(1).next(&VaultKey::from_bytes(bytes)).is_ok());
+    }
+
+    #[test]
+    fn there_is_no_epoch_after_the_largest_one() {
+        assert!(matches!(
+            keys(u32::MAX).next(&other_vault_key()),
+            Err(Error::EpochOverflow)
+        ));
     }
 }

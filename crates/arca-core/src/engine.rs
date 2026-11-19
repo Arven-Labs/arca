@@ -9,7 +9,7 @@ use crate::apply::{
     commit, finish, is_reserved_name, lock_roots, missing_dirs, plan, stage, undo_all, Item, Kind,
     Planned, Undo,
 };
-use crate::crypto::{open, seal, EpochKeys};
+use crate::crypto::{open, seal, EpochKeys, VaultKey};
 use crate::dirfd::{Folder, FolderLock, OpenError};
 use crate::disk::{create_private_dir, write_atomic};
 use crate::envelope::Header;
@@ -1048,6 +1048,19 @@ impl<S: BlobStore> Engine<S> {
             new_blobs,
             skipped,
         })
+    }
+
+    /// Inicia a época seguinte com `new_key` (ADR 0018, itens 4 e 5). Esboço do P-48.
+    pub async fn begin_epoch(
+        &self,
+        _new_key: &VaultKey,
+        _roots: &Roots,
+        _now: u64,
+    ) -> Result<(Engine<S>, Snapshot), EngineError>
+    where
+        S: Clone,
+    {
+        Err(EngineError::Object(Error::KeyNotRotated))
     }
 
     /// Leva a pasta viva do estado `from` (o manifest que ela reflete; `None` = nenhum) ao de
@@ -7639,5 +7652,288 @@ mod tests {
 
         let (_, manifest, _, _) = created(engine.snapshot(&vault_only(&vault), 2).await.unwrap());
         assert_eq!(file_paths(&manifest), ["v.md", "s.json"]);
+    }
+
+    // ---------- begin_epoch (ADR 0018, itens 4 e 5; P-48) ----------
+
+    fn new_key() -> VaultKey {
+        VaultKey::from_bytes([4u8; 32])
+    }
+
+    fn new_keys(epoch: u32) -> EpochKeys {
+        EpochKeys::derive(&new_key(), epoch)
+    }
+
+    /// Um Vault da época 1 com `a.md` e `b.md`, e o id da ponta.
+    async fn old_vault(rig: &Rig) -> (PathBuf, ObjectId) {
+        let vault = rig.dir("vault");
+        write(&vault, "a.md", b"1");
+        write(&vault, "b.md", b"2");
+        let (head, ..) = created(
+            rig.engine("pc")
+                .snapshot(&vault_only(&vault), 1)
+                .await
+                .unwrap(),
+        );
+        (vault, head)
+    }
+
+    async fn stored(rig: &Rig) -> (usize, usize) {
+        (
+            rig.count(ObjectKind::Blob).await,
+            rig.count(ObjectKind::Manifest).await,
+        )
+    }
+
+    #[tokio::test]
+    async fn begin_epoch_publishes_a_full_snapshot_that_only_the_new_key_opens() {
+        let rig = Rig::new();
+        let (vault, old_head) = old_vault(&rig).await;
+        let old = rig.store.get(&old_head).await.unwrap().unwrap();
+        let old_manifest = Manifest::open(&keys(1), &old).unwrap();
+
+        let (next, snap) = rig
+            .engine("pc")
+            .begin_epoch(&new_key(), &vault_only(&vault), 5)
+            .await
+            .unwrap();
+        let (id, manifest, new_blobs, _) = created(snap);
+
+        assert_eq!(manifest.key_epoch, 2);
+        assert_eq!(manifest.base_version, None);
+        assert_eq!(manifest.counter, 1);
+        assert_eq!(file_paths(&manifest), ["a.md", "b.md"]);
+        assert_eq!(new_blobs, 2);
+        let bytes = rig.store.get(&id).await.unwrap().unwrap();
+        assert_eq!(Manifest::open(&new_keys(2), &bytes), Ok(manifest.clone()));
+        assert!(Manifest::open(&keys(1), &bytes).is_err());
+        // a época nova não cita blob da anterior: todos recifrados, com ids novos
+        for file in &manifest.files {
+            assert!(old_manifest.files.iter().all(|o| o.blob != file.blob));
+        }
+        let heads = next.heads().await.unwrap();
+        assert_eq!(heads.tips.iter().map(|t| t.id).collect::<Vec<_>>(), [id]);
+        assert_eq!(next.keys.epoch(), 2);
+    }
+
+    #[tokio::test]
+    async fn begin_epoch_refuses_the_same_vault_key_and_writes_nothing() {
+        let rig = Rig::new();
+        let (vault, _) = old_vault(&rig).await;
+        let before = stored(&rig).await;
+
+        let same = VaultKey::from_bytes([3u8; 32]);
+        let refused = rig
+            .engine("pc")
+            .begin_epoch(&same, &vault_only(&vault), 5)
+            .await;
+        assert_eq!(
+            refused.map(|_| ()),
+            Err(EngineError::Object(Error::KeyNotRotated))
+        );
+        assert_eq!(stored(&rig).await, before);
+    }
+
+    #[tokio::test]
+    async fn begin_epoch_refuses_when_there_is_no_next_epoch() {
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        write(&vault, "a.md", b"1");
+        let top = Engine::new(rig.store.clone(), keys(u32::MAX), "pc").unwrap();
+        assert_eq!(
+            top.begin_epoch(&new_key(), &vault_only(&vault), 5)
+                .await
+                .map(|_| ()),
+            Err(EngineError::Object(Error::EpochOverflow))
+        );
+        assert_eq!(stored(&rig).await, (0, 0));
+    }
+
+    #[tokio::test]
+    async fn begin_epoch_keeps_the_snapshot_preconditions_and_writes_nothing() {
+        // duas pontas
+        let rig = Rig::new();
+        let (vault, _) = old_vault(&rig).await;
+        put_epoch_manifest(&rig, 1, None, 1).await;
+        let before = stored(&rig).await;
+        assert_eq!(
+            rig.engine("pc")
+                .begin_epoch(&new_key(), &vault_only(&vault), 5)
+                .await
+                .map(|_| ()),
+            Err(EngineError::Diverged {
+                tips: 2,
+                rejected: 0
+            })
+        );
+        assert_eq!(stored(&rig).await, before);
+
+        // apply interrompido
+        let h = hist().await;
+        interrupt_apply(&h.target);
+        let before = stored(&h.rig).await;
+        assert_eq!(
+            h.rig
+                .engine("pc")
+                .begin_epoch(&new_key(), &vault_only(&h.target), 9)
+                .await
+                .map(|_| ()),
+            Err(EngineError::Interrupted)
+        );
+        assert_eq!(stored(&h.rig).await, before);
+    }
+
+    #[tokio::test]
+    async fn begin_epoch_refuses_a_store_that_went_back_in_time() {
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        write(&vault, "a.md", b"1");
+        let path = state_path(&rig);
+        let engine = guarded(&rig, "pc", &path);
+        let (head, ..) = created(engine.snapshot(&vault_only(&vault), 1).await.unwrap());
+        rig.store.delete(&head).await.unwrap();
+        let before = stored(&rig).await;
+
+        assert_eq!(
+            engine
+                .begin_epoch(&new_key(), &vault_only(&vault), 5)
+                .await
+                .map(|_| ()),
+            Err(EngineError::Rollback)
+        );
+        assert_eq!(stored(&rig).await, before);
+    }
+
+    #[tokio::test]
+    async fn begin_epoch_waits_for_a_newer_epoch_the_person_has_not_acknowledged() {
+        let rig = Rig::new();
+        let (vault, _) = old_vault(&rig).await;
+        // alguém já rotacionou com outra chave: o objeto da época 2 não abre com a nossa
+        let theirs = put_epoch_manifest(&rig, 2, None, 1).await;
+        let before = stored(&rig).await;
+        let engine = rig.engine("pc");
+        assert_eq!(
+            engine
+                .begin_epoch(&new_key(), &vault_only(&vault), 5)
+                .await
+                .map(|_| ()),
+            Err(EngineError::NeedsNewKey { have: 1, found: 2 })
+        );
+        assert_eq!(stored(&rig).await, before);
+
+        // reconhecido como forjado, ele convive sem vetar a rotação (nunca abre com a chave nova)
+        engine
+            .acknowledge_foreign(&[ForeignEpoch {
+                epoch: 2,
+                id: theirs,
+            }])
+            .await
+            .unwrap();
+        let (next, snap) = engine
+            .begin_epoch(&new_key(), &vault_only(&vault), 5)
+            .await
+            .unwrap();
+        let (id, ..) = created(snap);
+        let heads = next.heads().await.unwrap();
+        assert_eq!(heads.tips.iter().map(|t| t.id).collect::<Vec<_>>(), [id]);
+    }
+
+    #[tokio::test]
+    async fn begin_epoch_moves_the_state_to_the_new_epoch() {
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        write(&vault, "a.md", b"1");
+        let path = state_path(&rig);
+        let engine = guarded(&rig, "pc", &path);
+        created(engine.snapshot(&vault_only(&vault), 1).await.unwrap());
+
+        let (next, snap) = engine
+            .begin_epoch(&new_key(), &vault_only(&vault), 5)
+            .await
+            .unwrap();
+        let (id, ..) = created(snap);
+        assert_eq!(saved(&path), Some(accepted(&id, 2)));
+        // o engine novo usa o mesmo estado e não dá `Rollback`
+        write(&vault, "b.md", b"2");
+        created(next.snapshot(&vault_only(&vault), 6).await.unwrap());
+    }
+
+    /// A tentativa caiu depois de gravar o manifest e antes de gravar o estado: repetir com a
+    /// mesma chave adota o manifest que já existe, em vez de publicar outro.
+    #[tokio::test]
+    async fn begin_epoch_is_resumable_and_adopts_the_manifest_already_published() {
+        let rig = Rig::new();
+        let (vault, _) = old_vault(&rig).await;
+        let (_, first) = rig
+            .engine("pc")
+            .begin_epoch(&new_key(), &vault_only(&vault), 5)
+            .await
+            .unwrap();
+        let (first_id, ..) = created(first);
+        let before = stored(&rig).await;
+
+        let path = state_path(&rig);
+        let retried = rig.engine("pc").with_state(&path);
+        let (_, snap) = retried
+            .begin_epoch(&new_key(), &vault_only(&vault), 6)
+            .await
+            .unwrap();
+        match snap {
+            Snapshot::Unchanged { head, .. } => assert_eq!(head, first_id),
+            other => panic!("esperava Unchanged, veio {other:?}"),
+        }
+        assert_eq!(stored(&rig).await, before);
+        assert_eq!(saved(&path), Some(accepted(&first_id, 2)));
+    }
+
+    #[tokio::test]
+    async fn a_retry_after_the_folder_changed_builds_on_the_manifest_already_published() {
+        let rig = Rig::new();
+        let (vault, _) = old_vault(&rig).await;
+        let (_, first) = rig
+            .engine("pc")
+            .begin_epoch(&new_key(), &vault_only(&vault), 5)
+            .await
+            .unwrap();
+        let (first_id, ..) = created(first);
+        write(&vault, "c.md", b"3");
+
+        let (_, snap) = rig
+            .engine("pc")
+            .begin_epoch(&new_key(), &vault_only(&vault), 6)
+            .await
+            .unwrap();
+        let (_, manifest, ..) = created(snap);
+        assert_eq!(manifest.key_epoch, 2);
+        assert_eq!(manifest.counter, 2);
+        assert_eq!(manifest.base_version, Some(Hash32(first_id.hash)));
+    }
+
+    #[tokio::test]
+    async fn the_new_engine_keeps_the_device_name_the_state_and_the_scan_filters() {
+        fn no_skip(path: &str) -> bool {
+            path != "skip.md"
+        }
+        let rig = Rig::new();
+        let vault = rig.dir("vault");
+        write(&vault, "a.md", b"1");
+        let path = state_path(&rig);
+        let engine = rig
+            .engine("meu-pc")
+            .with_state(&path)
+            .with_scan_filter(Class::Vault, no_skip);
+        created(engine.snapshot(&vault_only(&vault), 1).await.unwrap());
+
+        let (next, snap) = engine
+            .begin_epoch(&new_key(), &vault_only(&vault), 5)
+            .await
+            .unwrap();
+        let (_, manifest, ..) = created(snap);
+        assert_eq!(manifest.device, "meu-pc");
+        write(&vault, "skip.md", b"x");
+        write(&vault, "ok.md", b"y");
+        let (_, later, ..) = created(next.snapshot(&vault_only(&vault), 6).await.unwrap());
+        assert_eq!(file_paths(&later), ["a.md", "ok.md"]);
+        assert_eq!(saved(&path).map(|s| s.key_epoch), Some(2));
     }
 }

@@ -34,6 +34,13 @@ pub enum Error {
     /// O sistema operacional não forneceu bytes aleatórios; nunca se usa um nonce fraco.
     #[error("operating system random number generator failed")]
     Random,
+    /// A chave nova deriva as mesmas subchaves da época atual: rotacionar com a mesma chave
+    /// mantém o acesso de quem a tem (ADR 0018, item 4). Sem detalhe de propósito.
+    #[error("the new vault key derives the same subkeys as the current epoch")]
+    KeyNotRotated,
+    /// A época atual é a maior possível: não há época seguinte.
+    #[error("key epoch overflow: there is no next epoch")]
+    EpochOverflow,
     /// Nome de objeto fora do formato `<kind>/<64 hex minúsculos>`.
     #[error("invalid object id")]
     InvalidObjectId,
