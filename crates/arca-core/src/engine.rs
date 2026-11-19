@@ -937,6 +937,20 @@ impl<S: BlobStore> Engine<S> {
             });
         }
         let prev = heads.into_iter().next();
+        self.build_snapshot(prev, roots, now, allow_empty).await
+    }
+
+    /// O miolo do `snapshot`: varre as pastas, envia os blobs que mudaram em relação a `prev` e
+    /// grava o manifest novo (com as chaves deste `Engine`), por último. Quem chama já tem a
+    /// trava do estado e já checou as pré-condições (`ensure_not_interrupted`, `guard`,
+    /// divergência): é o que o `begin_epoch` reaproveita com `prev` da época nova.
+    async fn build_snapshot(
+        &self,
+        prev: Option<Head>,
+        roots: &Roots,
+        now: u64,
+        allow_empty: &[Class],
+    ) -> Result<Snapshot, EngineError> {
         let prev_files: &[FileEntry] = prev.as_ref().map_or(&[], |h| &h.manifest.files);
 
         // 1. varrer as classes ligadas (nada é lido nem enviado ainda)
@@ -1050,17 +1064,78 @@ impl<S: BlobStore> Engine<S> {
         })
     }
 
-    /// Inicia a época seguinte com `new_key` (ADR 0018, itens 4 e 5). Esboço do P-48.
+    /// Inicia a época seguinte com `new_key` (ADR 0018, itens 4 e 5): publica um snapshot
+    /// **completo** da pasta viva (`base_version = null`, todos os blobs recifrados) com as
+    /// chaves da época atual + 1 e devolve um `Engine` novo com elas (as chaves de um `Engine`
+    /// são imutáveis). `new_key` tem de derivar subchaves **diferentes** das atuais
+    /// (`KeyNotRotated`); sem época seguinte, `EpochOverflow`. Pré-condições do `snapshot`:
+    /// `Rollback`, `Diverged` (mais de uma ponta ou manifest ilegível), `Interrupted`, e nenhuma
+    /// época mais nova sem reconhecer (`NeedsNewKey`). O estado, se ligado, passa para a época
+    /// nova. **Retomável:** se uma tentativa anterior já publicou o manifest da época nova e
+    /// caiu antes de gravar o estado, repetir com a mesma chave o adota (`Unchanged`) em vez de
+    /// publicar outro; se a pasta mudou, o manifest novo vem sobre ele. O `Engine` antigo não
+    /// deve mais ser usado depois do sucesso (ele vê a época nova como `NeedsNewKey`).
     pub async fn begin_epoch(
         &self,
-        _new_key: &VaultKey,
-        _roots: &Roots,
-        _now: u64,
+        new_key: &VaultKey,
+        roots: &Roots,
+        now: u64,
     ) -> Result<(Engine<S>, Snapshot), EngineError>
     where
         S: Clone,
     {
-        Err(EngineError::Object(Error::KeyNotRotated))
+        let next = Engine {
+            store: self.store.clone(),
+            keys: self.keys.next(new_key)?,
+            device: self.device.clone(),
+            state: self.state.clone(),
+            filters: self.filters.clone(),
+            scan_filters: self.scan_filters.clone(),
+            foreign_memory: Mutex::new(ForeignAcks::default()),
+            foreign_seen: Mutex::new(Seen::new(MAX_SEEN)),
+        };
+        // uma trava só: pedi-la de novo (pelo `snapshot` do `next`) daria `Busy` contra mim mesmo
+        let _state_lock = self.lock_state().await?;
+        ensure_not_interrupted(roots)?;
+
+        // manifests da época nova que abrem com a chave nova (tentativa anterior que caiu)
+        let Loaded { readable: own, .. } = next.load().await?;
+        let prev = if own.is_empty() {
+            // as pré-condições do `snapshot`, com as chaves e o estado da época atual
+            let state = self.load_state().await?;
+            let loaded = self.load().await?;
+            let Loaded {
+                readable, rejected, ..
+            } = self.with_accepted(loaded, state.as_ref()).await?;
+            let heads = match &state {
+                Some(_) => {
+                    let heads = tips(readable.clone());
+                    guard(state.as_ref(), &readable, &heads)?;
+                    heads
+                }
+                None => tips(readable),
+            };
+            if heads.len() > 1 || !rejected.is_empty() {
+                return Err(EngineError::Diverged {
+                    tips: heads.len(),
+                    rejected: rejected.len(),
+                });
+            }
+            None
+        } else {
+            // O `guard` não roda: o estado guarda uma ponta da época velha e `satisfied` sem
+            // pontas dá `Rollback`. Objeto ilegível da época nova (forjado) não veta a rotação.
+            let heads = tips(own);
+            if heads.len() > 1 {
+                return Err(EngineError::Diverged {
+                    tips: heads.len(),
+                    rejected: 0,
+                });
+            }
+            heads.into_iter().next()
+        };
+        let snapshot = next.build_snapshot(prev, roots, now, &[]).await?;
+        Ok((next, snapshot))
     }
 
     /// Leva a pasta viva do estado `from` (o manifest que ela reflete; `None` = nenhum) ao de

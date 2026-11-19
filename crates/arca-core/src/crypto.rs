@@ -79,9 +79,19 @@ impl EpochKeys {
         }
     }
 
-    /// As chaves da época seguinte, derivadas de `new_key` (ADR 0018, item 4). Esboço do P-48.
-    pub fn next(&self, _new_key: &VaultKey) -> Result<EpochKeys, Error> {
-        Err(Error::KeyNotRotated)
+    /// As chaves da época seguinte (`época + 1`), derivadas de `new_key` (ADR 0018, item 4).
+    /// Recusa a `VaultKey` que deriva, na época atual, as **mesmas subchaves** destas
+    /// (`KeyNotRotated`): "mesma chave, época + 1" manteria o acesso de quem a tem. Sem época
+    /// seguinte, `EpochOverflow`. Limite: reaproveitar uma chave de uma época **anterior** à
+    /// atual não é detectável (só se guarda a época atual).
+    pub fn next(&self, new_key: &VaultKey) -> Result<EpochKeys, Error> {
+        let epoch = self.epoch.checked_add(1).ok_or(Error::EpochOverflow)?;
+        let same_epoch = EpochKeys::derive(new_key, self.epoch);
+        // `|` e não `||`: as duas comparações rodam sempre, em tempo que não depende do conteúdo
+        if ct_eq(&same_epoch.blob, &self.blob) | ct_eq(&same_epoch.manifest, &self.manifest) {
+            return Err(Error::KeyNotRotated);
+        }
+        Ok(EpochKeys::derive(new_key, epoch))
     }
 
     /// A época a que estas chaves pertencem.
@@ -95,6 +105,11 @@ impl EpochKeys {
             ObjectKind::Manifest => &self.manifest,
         }
     }
+}
+
+/// Igualdade de subchaves sem sair no primeiro byte diferente.
+fn ct_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 /// HKDF-SHA256 com `salt = "arca"` e `info = "arca/v1/<tipo>/<época>"` (época em decimal).
