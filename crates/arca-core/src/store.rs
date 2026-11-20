@@ -28,6 +28,14 @@ pub struct Capabilities {
     pub consistent_list: bool,
 }
 
+impl Capabilities {
+    /// Como `Capabilities` é `#[non_exhaustive]`, quem implementa `BlobStore` fora desta crate (ex.: um cliente
+    /// só de leitura do hub no Warden) não consegue montá-la com chaves: este construtor é o caminho.
+    pub const fn new(consistent_list: bool) -> Self {
+        Self { consistent_list }
+    }
+}
+
 /// Armazenamento de objetos imutáveis endereçados pelo hash dos bytes cifrados.
 ///
 /// Os métodos devolvem `impl Future + Send` (e não `async fn`) para que o contrato `Send`
@@ -78,6 +86,12 @@ mod tests {
     use crate::disk::DiskStore;
     use crate::testutil::TempDir;
     use std::future::ready;
+
+    #[test]
+    fn capabilities_new_keeps_the_flag() {
+        assert!(Capabilities::new(true).consistent_list);
+        assert!(!Capabilities::new(false).consistent_list);
+    }
 
     /// Backend que devolve o que lhe mandaram devolver, sem olhar o id.
     struct Liar(Option<Vec<u8>>);
