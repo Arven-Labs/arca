@@ -8,6 +8,10 @@ Camada local-first de armazenamento e sincronização, com criptografia no clien
 
 Rust 1.88 ou mais novo (`rust-version`, conferido pelo job `msrv` do CI).
 
+> **Para agentes de IA:** os comandos abaixo são para uma pessoa, no PC dela. Na VM de
+> desenvolvimento do agente só `cargo fmt --check` roda; `clippy`, `test` e qualquer build são
+> proibidos (ADR 0017 do workspace): teste só no GitHub (CI), build só no PC do dono, à mão.
+
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
