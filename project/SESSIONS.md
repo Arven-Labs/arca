@@ -2,6 +2,14 @@
 
 Mais recente no topo.
 
+### 2026-11-20 — Sessão 115 (`Capabilities::new`, [arca#181](https://github.com/Arven-Labs/arca/pull/181))
+
+- **Pedido**: terminar o que a queda da VM deixou pendente no Warden (P-49 C1, `discover_epoch` no pareamento). O código está no Warden (ver a entrada de 2026-11-20 no `SESSIONS.md` dele); aqui só entra o que o Warden precisou do arca.
+- **Achado**: `Capabilities` é `#[non_exhaustive]` e não tinha construtor, então nenhum `BlobStore` escrito fora do arca conseguia implementar `capabilities()`. O pareamento do Warden compila no mobile sem a feature `hub` do `arca-core` (que traz `aws-lc-rs`; o Android usa `ring`) e precisou de um leitor de manifests só de leitura próprio.
+- **Feito**: `Capabilities::new(consistent_list)` (`const fn`) em `store.rs` e o teste `capabilities_new_keeps_the_flag`. Nada mais mudou. `ObjectKind::as_str` continua privado (o Warden usa os nomes literais).
+- **CI**: `audit`, `guard`, `msrv`, `rust` e `s3-garage` verdes no commit `0216ad2`.
+- **Não verificado**: se vale oferecer no arca um leitor só de leitura do hub sem `aws-lc-rs`, em vez de o consumidor copiar o laço de `list`; ficou como pergunta no corpo do PR.
+
 ### 2026-11-20 — Sessão 114 (P-49: A3 feita no Warden; faxina do `PENDING.md`)
 
 - **Pedido**: "vamos de 1" (o P-49) na abertura da sessão; depois de mesclar o [warden#192](https://github.com/Arven-Labs/warden/pull/192), "pode fazer" para atualizar o registro aqui. Só docs, tarefa mecânica, sem plan mode. O código da sessão está todo no Warden (ver a entrada de 2026-11-20 no `SESSIONS.md` de lá).
