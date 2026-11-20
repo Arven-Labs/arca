@@ -2,6 +2,13 @@
 
 Mais recente no topo.
 
+### 2026-11-19 — Sessão 113 (nota no ADR 0018 apontando para o ADR 0002 do Warden)
+
+- **Pedido**: "vamos na nota do adr ent" (depois da D1 no Warden, warden#188). Só docs; tarefa mecânica, sem plan mode.
+- **Feito**: seção "Atualização (P-49 C)" no [ADR 0018](adr/0018-rotacao-e-epoca-desconhecida.md), com link para o [ADR 0002 do Warden](https://github.com/Arven-Labs/warden/blob/main/project/adr/0002-rotacao-de-chave-no-warden.md) (warden#187) e quatro pontos que mudam a leitura do 0018: o S3 (passo 2 do item 6) fica fora da fatia C do Warden; a revogação do token (passo 1) é declaração, não trava; a época vai junto da chave (`key_epoch`, warden#188) e a troca de chave semeia o estado com o hash confirmado (T15); sem recibo no pareamento. Nenhuma linha de código mudou.
+- **Não verificado**: nada foi executado; o texto repete o ADR 0002 do Warden, que o mesmo modelo redigiu e que não teve revisão independente.
+- **Fica**: a faxina (P-47 e P-48 para Resolvidas no `PENDING.md`); P-49: D2 (`begin_epoch` e o fluxo de rotação no Warden), "trocar chave" no pareamento, A2 e A3; P-42b; resto do P-41; P-43 a P-46; `VALIDACAO.md`; decisão sobre "fonte única".
+
 ### 2026-11-19 — Sessão 112 (P-49 fatia B: `discover_epoch`, [arca#177](https://github.com/Arven-Labs/arca/pull/177))
 
 - **Pedido**: "vamos de p49". Plan mode. O levantamento do Warden mostrou que o P-49 já estava fatiado lá (A1 feita, warden#185; A2, A3, B e C abertas); decisão sua: **começar pela B** (descobrir a época, no arca-core), pré-requisito da C. Descartadas: A2 (CLI, não avança a rotação), C inteira e decidir o desenho da C primeiro.
