@@ -2,6 +2,14 @@
 
 Mais recente no topo.
 
+### 2026-11-20 — Sessão 114 (P-49: A3 feita no Warden; faxina do `PENDING.md`)
+
+- **Pedido**: "vamos de 1" (o P-49) na abertura da sessão; depois de mesclar o [warden#192](https://github.com/Arven-Labs/warden/pull/192), "pode fazer" para atualizar o registro aqui. Só docs, tarefa mecânica, sem plan mode. O código da sessão está todo no Warden (ver a entrada de 2026-11-20 no `SESSIONS.md` de lá).
+- **Achado na abertura**: o P-49 deste `PENDING.md` estava defasado em relação ao Warden: não citava a D1 (warden#187 e #188), a D2 (warden#190) nem o ADR 0002 do Warden, e dava como abertas as decisões da C que o ADR já tinha tomado.
+- **Feito**: `PENDING.md`: P-47 e P-48 saíram de "Em aberto" para "Resolvidas" (a faxina que as Sessões 110 e 111 deixaram marcada), com sessões, PRs, runs do CI e quebras propositais mantidos e o texto antigo de especificação cortado (está no ADR 0018 e no git); o "decidir no 47b" que ficou no texto era o fail-closed sem estado, já resolvido pela decisão do dono (pendência em memória). P-49: estado de cada fatia (A1, B, D1, D2, A3 feitas; A2 e o resto da C abertas), a pergunta "o re-pareamento aceita quem já tem chave?" marcada como respondida na Sessão 112, e o que continua sem verificar.
+- **Não verificado**: o texto do P-49 repete o que o `SESSIONS.md` do Warden registra (não reli o código do Warden agora); nada foi executado; o CI deste PR não tinha rodado quando o texto foi escrito.
+- **Fica**: no Warden, A2 (CLI), o resto da C (`discover_epoch` no `adopt_joined_material`, "trocar chave", subir o `rev`) e as telas da rotação; aqui, P-42b, resto do P-41, P-43 a P-46, `VALIDACAO.md` e a decisão sobre "fonte única".
+
 ### 2026-11-19 — Sessão 113 (nota no ADR 0018 apontando para o ADR 0002 do Warden)
 
 - **Pedido**: "vamos na nota do adr ent" (depois da D1 no Warden, warden#188). Só docs; tarefa mecânica, sem plan mode.
