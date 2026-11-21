@@ -2,6 +2,15 @@
 
 Mais recente no topo.
 
+### 2026-11-21 — Sessão 117 (P-49 fatia A2: `/arca ack` e o aviso de época no CLI do Warden; só registro aqui)
+
+- **Pedido**: "vamos de p49", fatia A2 escolhida entre A2, ligar a troca de chave no CLI, telas e sugestões da auditoria da C2. Plan mode. O código está todo no Warden ([warden#200](https://github.com/Arven-Labs/warden/pull/200), pronto para mesclar, **não mesclado**; ver a entrada de 2026-11-21 no `SESSIONS.md` dele). Nada do arca-core mudou.
+- **Feito no Warden**: `/arca` lista as épocas mais novas pendentes e `/arca ack` as reconhece com "y" digitado, só os pares (época, id) vistos e ainda pendentes. Decisões suas: comando único; confirmação por "y".
+- **CI** (no repo do Warden): 11 testes novos falharam antes (run 44848166259), verde depois (44849487843 e, após a auditoria, 44850982681); quebra proposital (#201, descartado) fez 5 falharem (44850991127).
+- **Auditoria**: sem crítico; corrigidos o `/arca` que caía se a leitura das épocas falhasse e os textos. **Sem correção**: listar, cruzar e reconhecer são três chamadas com o lock solto (fechar pediria um `arca_acknowledge_seen` único no `warden-sync`); `/arca` pode esperar o `sync_lock`.
+- **Não verificado**: `cmd_arca_ack` num terminal real; nada rodou aqui, só docs.
+- **Fica**: ligar `run_grant_replacing` e `run_replace_key` no CLI, desktop e mobile; telas da rotação; sugestões das auditorias da C2 e da A2; P-42b; resto do P-41; P-43 a P-46; `VALIDACAO.md`; decisão sobre "fonte única".
+
 ### 2026-11-20 — Sessão 116 (P-49 fatia C2: o caminho "trocar chave" no Warden; só registro aqui)
 
 - **Pedido**: "vamos de p49", fatia C2 escolhida entre C2, telas e A2. Plan mode. O código está todo no Warden ([warden#197](https://github.com/Arven-Labs/warden/pull/197), **mesclado** pelo dono; ver a entrada de 2026-11-20 no `SESSIONS.md` dele). Aqui entra só o registro, em PR de docs: nada do arca-core mudou.
