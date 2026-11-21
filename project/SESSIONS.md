@@ -2,6 +2,15 @@
 
 Mais recente no topo.
 
+### 2026-11-21 — Sessão 118 (P-49: `/arca swap grant` e `/arca swap offer` no CLI do Warden; só registro aqui)
+
+- **Pedido**: "vamos continuar no p49"; fatia escolhida entre ligar a troca de chave no CLI, a corrida do `ack`, as sugestões da auditoria da C2 e as telas. Plan mode. O código está todo no Warden ([warden#202](https://github.com/Arven-Labs/warden/pull/202); ver a entrada de 2026-11-21 no `SESSIONS.md` dele). Nada do arca-core mudou.
+- **Feito no Warden**: os dois comandos ligam `run_grant_replacing` e `run_replace_key`; o `swap offer` confere o modo e as épocas pendentes, mostra as épocas e pede um "y" digitado antes de publicar a oferta; o aviso do `/arca` passou a apontar para `/arca swap offer` (o `/arca pair offer` recusa quem já tem chave). Decisões suas: grupo `swap` e a confirmação "y".
+- **CI** (no repo do Warden): 8 testes novos falharam antes (run 44855133566), verde depois (44856209674 e, após a auditoria, 44857386999 com `Rust` e `Browser`); quebra proposital (#203, descartado) fez 2 falharem (44857096138).
+- **Auditoria**: sem crítico; corrigidos só textos que mandavam para comando que falha, e o `HashMismatch` que virava falso alarme (o hub só guarda o primeiro manifest do outro dispositivo depois do `/arca sync` dele). **Sem correção**: `now_millis()` calculado antes da espera de até 10 min pelo grant (não conferi a tolerância no `warden-sync`); mensagens do desktop reaproveitadas em `hub_store_for`; texto de `arca_sync.rs:925` no `warden-sync`.
+- **Não verificado**: os laços de terminal (sem teste); o swap com hub e dois dispositivos reais; um swap parado no meio seguido de `/arca sync`. Nada rodou aqui, só docs.
+- **Fica**: o swap no desktop e no mobile; telas da rotação (`PendingRotation`); a corrida do `ack`; sugestões da auditoria da C2 e desta; P-42b; resto do P-41; P-43 a P-46; `VALIDACAO.md`; decisão sobre "fonte única".
+
 ### 2026-11-21 — Sessão 117 (P-49 fatia A2: `/arca ack` e o aviso de época no CLI do Warden; só registro aqui)
 
 - **Pedido**: "vamos de p49", fatia A2 escolhida entre A2, ligar a troca de chave no CLI, telas e sugestões da auditoria da C2. Plan mode. O código está todo no Warden ([warden#200](https://github.com/Arven-Labs/warden/pull/200), pronto para mesclar, **não mesclado**; ver a entrada de 2026-11-21 no `SESSIONS.md` dele). Nada do arca-core mudou.
