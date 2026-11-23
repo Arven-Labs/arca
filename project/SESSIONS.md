@@ -2,6 +2,13 @@
 
 Mais recente no topo.
 
+### 2026-11-23 — Sessão 125 (P-49, I3b: recusa x parada no meio na rotação; EM ANDAMENTO, só registro aqui)
+
+- **Pedido**: "vamos continuar no p49"; fatia escolhida por você: I3b. Plan mode. O `arca-core` não mudou (o `begin_epoch` já recusava época pendente sem gravar). O código está no Warden, [warden#229](https://github.com/Arven-Labs/warden/pull/229), rascunho, com o detalhe e o CI no `project/SESSIONS.md` dele.
+- **Estado**: `RotationError::Refused` e `NewerEpoch` e a classificação feitos, CI do Rust verde em `a7d07ae`. **Falta o codegen do FRB e o `gen-l10n` no seu PC**, depois CI, auditoria e mesclar. Sem encerrar o I3b no `PENDING.md` até mesclar.
+
+---
+
 ### 2026-11-23 — Sessão 124 (P-49: tela da rotação de chave no celular; só registro aqui)
 
 - **Pedido**: "vamos continuar p49"; fatia escolhida por você: as telas da rotação no celular. Plan mode. O código está todo no Warden ([warden#222](https://github.com/Arven-Labs/warden/pull/222), o `arca-core` não mudou); o detalhe, o CI e a auditoria estão no `project/SESSIONS.md` dele.
