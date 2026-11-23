@@ -2,6 +2,17 @@
 
 Mais recente no topo.
 
+### 2026-11-23 — Sessão 124 (P-49: tela da rotação de chave no celular; só registro aqui)
+
+- **Pedido**: "vamos continuar p49"; fatia escolhida por você: as telas da rotação no celular. Plan mode. O código está todo no Warden ([warden#222](https://github.com/Arven-Labs/warden/pull/222), o `arca-core` não mudou); o detalhe, o CI e a auditoria estão no `project/SESSIONS.md` dele.
+- **Decisões suas**: a frase fica na tela só com aviso (sem `FLAG_SECURE`, que vira pendência); `Failed` testado só pelo mapeamento de erro, sem dependência nova no `arca-core` e sem campo `partial`.
+- **Feito**: bridge `arca_rotation_begin/resume/confirm/cancel` (a chave fica no Rust, `confirm` a tira primeiro), a tela da rotação e o botão "Perdeu um dispositivo? Troque a chave" na tela do modo arca; confirmada a troca, o sync envia a época nova. "Retomar" com as mesmas 24 palavras depois de `Failed`.
+- **CI**: testes primeiro, bridge 13 falharam e 14 passam; Dart 20 falharam e a tela os faz passar; verde em `37c3eee` (analyze limpo, 469 testes, Rust e Android; o Android falhou uma vez com `429` do Maven Central e passou ao reexecutar). Quebra proposital: 5 de 6 mutações derrubaram o teste previsto; a F (trava do toque duplo no diálogo) sobreviveu e a trava foi removida.
+- **Auditoria** (`security-auditor`): sem crítico. Corrigidos I1, I2 e parte do I3. **Sem correção**: I3b (o `begin` não recusa com época pendente e `RotationError::Failed` mistura recusa com falha no meio), I4 (a retomada aceita qualquer frase BIP-39 de checksum válido), mais S1 a S6 (mensagem pós-rotação, rastro de `Failed`, zeroize, teclado, TalkBack, `FLAG_SECURE`).
+- **Não verificado**: aparelho ou hub reais, a rotação ponta a ponta, teclado Android, TalkBack, armv7, iOS.
+
+---
+
 ### 2026-11-23 — Sessão 123 (P-49: swap da chave no celular, fatia 2; só registro aqui)
 
 - **Pedido**: "vamos continuar no p49"; fatia escolhida por você entre swap no celular, telas da rotação no celular, as 2 decisões da Sessão 122 e o roteiro de validação. Plan mode. O código está todo no Warden ([warden#217](https://github.com/Arven-Labs/warden/pull/217), **mesclado em 2026-11-23 como `c3ab6de6`**; o CI da `main` do Warden desse commit ainda estava rodando ao escrever isto). Nada do arca-core mudou.
