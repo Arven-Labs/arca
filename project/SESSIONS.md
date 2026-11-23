@@ -5,7 +5,10 @@ Mais recente no topo.
 ### 2026-11-23 — Sessão 125 (P-49, I3b: recusa x parada no meio na rotação; EM ANDAMENTO, só registro aqui)
 
 - **Pedido**: "vamos continuar no p49"; fatia escolhida por você: I3b. Plan mode. O `arca-core` não mudou (o `begin_epoch` já recusava época pendente sem gravar). O código está no Warden, [warden#229](https://github.com/Arven-Labs/warden/pull/229), rascunho, com o detalhe e o CI no `project/SESSIONS.md` dele.
-- **Estado**: `RotationError::Refused` e `NewerEpoch` e a classificação feitos, CI do Rust verde em `a7d07ae`. **Falta o codegen do FRB e o `gen-l10n` no seu PC**, depois CI, auditoria e mesclar. Sem encerrar o I3b no `PENDING.md` até mesclar.
+- **Estado (atualizado no fim da sessão)**: `RotationError::Refused` e `NewerEpoch` e a classificação feitos; codegen do FRB e `gen-l10n` rodados por você no PC (`f5d10e4`); **CI verde em `fca47ec`** (5 jobs, tentativa 1; antes disso o run de `f5d10e4` caiu por `ENOTFOUND api.github.com` no `Changed areas` e por `429` do Maven Central no Android, e passou ao reexecutar). Pronto para mesclar, não mesclado.
+- **Auditoria** (`security-auditor`, só leitura): sem crítico. Nenhum erro classificado como recusa sai depois da primeira escrita do `begin_epoch` (conferido variante por variante). Corrigidos aqui: S1 (a retomada tratava erro fora do bridge como "nada foi alterado"; teste Dart falhou antes, 469 passam e 1 falha no run 45269408270) e S3 (teste de tabela do `rotation_error_of` e comentário corrigido). **Sem correção, no `PENDING.md`**: I1 (texto da retomada), S2, S4, S5; S6 (espaço no `.arb`) ignorado.
+- **Quebra proposital**: `NeedsNewKey` como `Failed` (#230, descartado) derrubou 1 teste; `StateNotSaved` como recusa (#231, descartado) derrubou o teste de tabela do S3 (130 passam, 1 falha). `KeyNotRotated` como `Failed` não foi feita.
+- **Não verificado**: a tela com os kinds novos em aparelho real; a rotação ponta a ponta com hub e dois dispositivos; `DiskStore::put` sem resíduo em erro (a auditoria não leu).
 
 ---
 
