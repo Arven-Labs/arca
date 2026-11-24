@@ -2,6 +2,19 @@
 
 Mais recente no topo.
 
+### 2026-11-24 — Sessão 129 (P-49, rodada 4, equipe de 1 worker: o Warden passa a usar a correção do `begin_epoch`, §4; só registro aqui)
+
+- **Pedido**: "prefiro equipe, manda bala nessa tarefa 1" (subir o `rev` do `arca-core` no Warden e classificar os erros novos). Plan mode. Você escolheu reusar os `Remedy` existentes (sem enum novo, sem `.arb`, sem codegen) e 1 worker + revisão + auditoria. O `arca-core` não mudou.
+- **Mesclado** (2026-11-24 20:14 UTC): [warden#257](https://github.com/Arven-Labs/warden/pull/257) (`b0a94b3f`, CI verde em `b0ea7153`, lido por run e `headSha`): `rev` do `arca-core` em `499628b`; `HeadNotAccepted` vira recusa com `SyncFirst`; `Integrity`, `MissingObject` e `Store(Corrupt)` da 1ª tentativa viram recusa com `NeedsRepair`; `ClassEmptied` da 1ª tentativa vira recusa sem remédio e na retomada continua parada com `Remedy::ClassEmptied`. O sinal de 1ª tentativa vem dos cabeçalhos de época dos manifests do store (`no_manifest_of_the_next_epoch`), não do `heads()`. [warden#253](https://github.com/Arven-Labs/warden/pull/253) (guarda interina) foi fechado sem mesclar.
+- **Controle**: PR de controle #258 (só testes e bump, sem a classificação) vermelho no run 45468590191 (`6425d44d`): 1 teste unitário e 4 dos 6 de integração falharam pela razão certa; a retomada e o caminho feliz passaram, como previsto. Fechado e branch apagada.
+- **O que a revisão e a auditoria pegaram (o worker e o CI não)**: (1) `first_attempt` errava para "1ª tentativa" quando `heads()` falhava ou a época fora reconhecida (`acknowledge`), o lado perigoso (a pessoa descartaria uma chave já publicada); (2) o texto de `HeadNotAccepted` sugeria que revogar o token protege, mas um manifest já puxado continua no store e o sync o aceita; (3) o teste de blob inválido abortava no 1º dano e escondia os outros. Corrigidos no commit `b0ea7153`, que **não passou por nova revisão** (só CI).
+- **Limites que ficam**: o prefixo "wrote nothing" do `Display` de `Refused` e do CLI contradiz os blobs órfãos que o piso do arca grava antes de recusar (sobem ao hub no próximo push; a correção é gravar o piso antes dos blobs, no `arca-core`); o celular mostra texto genérico para `HeadNotAccepted` (`SyncFirst`) e `ClassEmptied` da 1ª tentativa (`NeedsRepair`), e "sincronize primeiro" dispara o sync que o engine manda evitar; revogar o token não remove uma ponta forjada já puxada, e o auto-sync de 5 minutos do desktop pode aceitá-la antes da rotação; `Integrity` por teto (`MAX_FILE_BYTES`, `MAX_CARRIED_BYTES`) manda "reparar" sem ser disco danificado; `Object(_)` de blob com hash certo e chave errada continua "parada" mesmo sem ter publicado nada (DoS conhecido do ADR 0018, sem diagnóstico).
+- **Medição** (`equipe-medir.sh`, 19:05 a 20:14 UTC): RAM disponível 5482 a 5684 MB, swap 0, PSI 0, 2 processos `claude`. Sem sessão individual de comparação: não há controle medido. O worker levou ~33 min até o 1º retorno e ~70 min com a rodada de correções; o `guard-worker` não negou nada que eu tenha visto.
+- **Sobra**: o worktree `core-guarda-secret` do Warden (2 commits locais, PR fechado) continua; é você quem decide encerrá-lo.
+- **Não verificado**: o efeito da rotação em outro dispositivo; o `arca_replace_key` (não chama `begin_epoch`, é snapshot); o `Cargo.lock` do Warden segue com `url 2.5.8` (o arca subiu para 2.5.9 pelo RUSTSEC-2026-0592; alcance no Warden não medido).
+
+---
+
 ### 2026-11-24 — Sessão 128 (P-49, rodada 3: histórico do CLI e a correção do `begin_epoch` no `arca-core`, §4; só registro aqui, o código do CLI está no Warden)
 
 - **Pedido**: "pode seguir" (onda 2 do P-49). Equipe de 2 a 3 workers, prova de controle em paralelo, revisão adversarial e auditoria em cada PR.
