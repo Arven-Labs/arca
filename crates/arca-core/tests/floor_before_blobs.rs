@@ -27,6 +27,8 @@
 //! - (vii) o arquivo idêntico à ponta que muda **depois** da 1ª leitura: a entrada continua
 //!   descrevendo o blob existente (hash da 1ª leitura, que é o desse blob), nunca bytes que não
 //!   são os dele.
+//! - (viii) o arquivo idêntico à ponta que **some** depois da 1ª leitura continua listado, com a
+//!   entrada da ponta (decisão de desenho: não propaga remoção; o próximo ciclo o retira).
 
 use arca_core::disk::DiskStore;
 use arca_core::engine::{Engine, EngineError, Roots, Snapshot};
@@ -473,7 +475,7 @@ fn config_emptied() -> EngineError {
 /// passada já tê-lo lido. O piso reaplicado com a lista final recusa Config esvaziada, e nenhum
 /// manifest é publicado. O blob de `a.md`, já enviado, fica órfão: é o custo conhecido. (Um
 /// `settings.json` idêntico à ponta nem seria relido: a entrada dele continuaria na lista, ver
-/// o caso (vii).)
+/// o caso (viii), `an_unchanged_file_that_vanishes_after_the_first_read_stays_listed`.)
 #[tokio::test]
 async fn a_file_that_vanishes_during_the_send_still_cannot_publish_an_emptied_class() {
     let lab = lab(Hook::DeleteSettings).await;
@@ -620,4 +622,41 @@ async fn an_unchanged_file_that_changes_after_the_first_read_keeps_the_entry_of_
     assert_eq!(plain, SETTINGS_TIP);
     assert_eq!(digest(&plain), settings.sha256);
     assert_eq!(plain.len() as u64, settings.size);
+}
+
+/// (viii) O arquivo **idêntico à ponta** que **some** depois da 1ª leitura (no primeiro `put`):
+/// decisão de desenho do item "sem leitura dupla do que não mudou". Ele não é relido, então a
+/// lista final ainda o tem: o `snapshot` é `Created` (sem `ClassEmptied`, mesmo sendo a única
+/// entrada de Config) e `settings.json` segue listado com a entrada da ponta (mesmo blob,
+/// `sha256` e `size`). Não propaga remoção: o ciclo seguinte, que não o encontra no scan, o
+/// retira. Quem passou `allow_empty` para esvaziar a classe de propósito e perdeu essa corrida
+/// recebe `Created` com a entrada ainda listada e precisa repetir.
+#[tokio::test]
+async fn an_unchanged_file_that_vanishes_after_the_first_read_stays_listed() {
+    let lab = lab(Hook::DeleteSettings).await;
+    let tip = lab.tip_manifest().await;
+    add_first_vault_file(&lab);
+
+    let snapshot = lab.a.snapshot(&lab.roots(), 5).await.unwrap();
+
+    let Snapshot::Created {
+        manifest,
+        new_blobs,
+        ..
+    } = snapshot
+    else {
+        panic!("esperava Created, veio {snapshot:?}");
+    };
+    // premissa: a corrida aconteceu (o arquivo sumiu do disco) e só `a.md` foi enviado
+    assert!(!lab.config.join("settings.json").exists());
+    assert_eq!(new_blobs, 1);
+    assert_eq!(lab.puts(), 2, "o blob de a.md e o manifest");
+
+    assert_eq!(
+        listing(&manifest),
+        ["Vault:a.md", "Vault:x.md", "Config:settings.json"]
+    );
+    let settings = entry_of(&manifest, "settings.json");
+    assert_eq!(settings, entry_of(&tip, "settings.json"));
+    assert_eq!(lab.plain_of(settings).await, SETTINGS_TIP);
 }
