@@ -937,21 +937,32 @@ impl<S: BlobStore> Engine<S> {
             });
         }
         let prev = heads.into_iter().next();
-        self.build_snapshot(prev, roots, now, allow_empty).await
+        self.build_snapshot(prev, roots, now, allow_empty, None)
+            .await
     }
 
     /// O miolo do `snapshot`: varre as pastas, envia os blobs que mudaram em relação a `prev` e
     /// grava o manifest novo (com as chaves deste `Engine`), por último. Quem chama já tem a
     /// trava do estado e já checou as pré-condições (`ensure_not_interrupted`, `guard`,
     /// divergência): é o que o `begin_epoch` reaproveita com `prev` da época nova.
+    ///
+    /// `old_tip` só vem na **primeira** tentativa do `begin_epoch` (sem `prev`): o `Engine` da
+    /// época anterior e a ponta única dela. Sem ele o piso `ClassEmptied` e o `carried` olhariam
+    /// uma lista vazia (arca#198). Com ele, a ponta velha é a base dos dois, mas o manifest novo
+    /// não a cita (`base_version` segue nulo) e o `carried` é **recifrado**: a época nova não
+    /// referencia blobs da anterior (ADR 0018, item 5).
     async fn build_snapshot(
         &self,
         prev: Option<Head>,
         roots: &Roots,
         now: u64,
         allow_empty: &[Class],
+        old_tip: Option<(&Engine<S>, &Head)>,
     ) -> Result<Snapshot, EngineError> {
         let prev_files: &[FileEntry] = prev.as_ref().map_or(&[], |h| &h.manifest.files);
+        // a base do piso e do `carried`; o atalho `unchanged` e o `base_version` seguem em `prev`,
+        // porque os ids da época velha não valem na nova
+        let base_files: &[FileEntry] = old_tip.map_or(prev_files, |(_, head)| &head.manifest.files);
 
         // 1. varrer as classes ligadas (nada é lido nem enviado ainda)
         let mut candidates = Vec::new();
@@ -969,15 +980,21 @@ impl<S: BlobStore> Engine<S> {
         }
 
         // 2. entradas de classes desligadas vêm da ponta como estão
-        let carried: Vec<&FileEntry> = prev_files
+        let carried: Vec<&FileEntry> = base_files
             .iter()
             .filter(|f| !roots.is_enabled(f.class))
             .collect();
         let candidates = dedupe(candidates, &mut skipped);
 
         // 3. ler, comparar com a ponta e enviar só o que mudou
-        let mut files: Vec<FileEntry> = carried.into_iter().cloned().collect();
         let mut new_blobs = 0;
+        let mut files: Vec<FileEntry> = match old_tip {
+            None => carried.into_iter().cloned().collect(),
+            Some((old, _)) => {
+                new_blobs = carried.len();
+                self.reseal_carried(old, &carried).await?
+            }
+        };
         for candidate in candidates {
             let root = roots
                 .root_of(candidate.class)
@@ -1020,7 +1037,7 @@ impl<S: BlobStore> Engine<S> {
             }
             // só conta o que este dispositivo aplicaria: uma entrada que o filtro recusa (um nome
             // estranho publicado por outro dispositivo) não faz da pasta vazia um "esvaziei a classe"
-            let had = prev_files
+            let had = base_files
                 .iter()
                 .filter(|f| f.class == class && self.accepts(f))
                 .count();
@@ -1064,6 +1081,34 @@ impl<S: BlobStore> Engine<S> {
         })
     }
 
+    /// Leva para a época deste engine as entradas de classes sem pasta que a ponta da época
+    /// anterior (`old`) lista: cada blob é lido, aberto com as chaves de `old`, conferido
+    /// (`size` e `sha256` da entrada) e recifrado com as chaves deste engine, e a entrada sai com
+    /// o blob novo. **Nada é gravado antes de todos os blobs terem sido lidos e conferidos**
+    /// (leitura em duas voltas, para guardar um texto claro por vez em memória em vez de todos);
+    /// um erro depois disso deixa só blobs órfãos da época nova, que nenhum manifest cita e que
+    /// uma nova tentativa não reaproveita (o nonce é aleatório: ela grava outros).
+    async fn reseal_carried(
+        &self,
+        old: &Engine<S>,
+        carried: &[&FileEntry],
+    ) -> Result<Vec<FileEntry>, EngineError> {
+        for entry in carried {
+            old.plain_blob(entry).await?;
+        }
+        let mut resealed = Vec::with_capacity(carried.len());
+        for entry in carried {
+            let plain = old.plain_blob(entry).await?;
+            let sealed = seal(&self.keys, ObjectKind::Blob, &plain)?;
+            self.store.put(&sealed.id, &sealed.bytes).await?;
+            resealed.push(FileEntry {
+                blob: Hash32(sealed.id.hash),
+                ..(*entry).clone()
+            });
+        }
+        Ok(resealed)
+    }
+
     /// Inicia a época seguinte com `new_key` (ADR 0018, itens 4 e 5): publica um snapshot
     /// **completo** da pasta viva (`base_version = null`, todos os blobs recifrados) com as
     /// chaves da época atual + 1 e devolve um `Engine` novo com elas (as chaves de um `Engine`
@@ -1073,8 +1118,14 @@ impl<S: BlobStore> Engine<S> {
     /// época mais nova sem reconhecer (`NeedsNewKey`). O estado, se ligado, passa para a época
     /// nova. **Retomável:** se uma tentativa anterior já publicou o manifest da época nova e
     /// caiu antes de gravar o estado, repetir com a mesma chave o adota (`Unchanged`) em vez de
-    /// publicar outro; se a pasta mudou, o manifest novo vem sobre ele. O `Engine` antigo não
-    /// deve mais ser usado depois do sucesso (ele vê a época nova como `NeedsNewKey`).
+    /// publicar outro; se a pasta mudou, o manifest novo vem sobre ele. **Primeira tentativa:** o
+    /// manifest novo não tem base (`base_version = null`), mas a ponta velha (já validada) é a base
+    /// do piso `ClassEmptied` e das entradas das classes **sem pasta** neste dispositivo, que vão
+    /// para a época nova recifradas (decifradas com as chaves atuais e cifradas com as novas;
+    /// `Integrity` ou `MissingObject` se um blob não confere, sem gravar nada). `allow_empty` não
+    /// existe aqui: uma classe esvaziada de propósito não tem saída (limite conhecido). O
+    /// `Engine` antigo não deve mais ser usado depois do sucesso (ele vê a época nova como
+    /// `NeedsNewKey`).
     pub async fn begin_epoch(
         &self,
         new_key: &VaultKey,
@@ -1100,7 +1151,7 @@ impl<S: BlobStore> Engine<S> {
 
         // manifests da época nova que abrem com a chave nova (tentativa anterior que caiu)
         let Loaded { readable: own, .. } = next.load().await?;
-        let prev = if own.is_empty() {
+        let (prev, old_tip) = if own.is_empty() {
             // as pré-condições do `snapshot`, com as chaves e o estado da época atual
             let state = self.load_state().await?;
             let loaded = self.load().await?;
@@ -1121,7 +1172,9 @@ impl<S: BlobStore> Engine<S> {
                     rejected: rejected.len(),
                 });
             }
-            None
+            // sem `prev` (o manifest novo não tem base), mas a ponta velha, já validada, é a base
+            // do piso `ClassEmptied` e do `carried` recifrado (arca#198)
+            (None, heads.into_iter().next())
         } else {
             // O `guard` não roda: o estado guarda uma ponta da época velha e `satisfied` sem
             // pontas dá `Rollback`. Objeto ilegível da época nova (forjado) não veta a rotação.
@@ -1132,9 +1185,10 @@ impl<S: BlobStore> Engine<S> {
                     rejected: 0,
                 });
             }
-            heads.into_iter().next()
+            (heads.into_iter().next(), None)
         };
-        let snapshot = next.build_snapshot(prev, roots, now, &[]).await?;
+        let old_tip = old_tip.as_ref().map(|head| (self, head));
+        let snapshot = next.build_snapshot(prev, roots, now, &[], old_tip).await?;
         Ok((next, snapshot))
     }
 
