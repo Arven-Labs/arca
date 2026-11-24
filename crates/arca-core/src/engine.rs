@@ -1218,9 +1218,7 @@ impl<S: BlobStore> Engine<S> {
                 Some(state) => {
                     let heads = tips(readable.clone());
                     guard(Some(state), &readable, &heads)?;
-                    let accepted = heads
-                        .first()
-                        .is_some_and(|tip| is_accepted_tip(state, &readable, tip));
+                    let accepted = heads.first().is_some();
                     (heads, accepted)
                 }
                 None => (tips(readable), false),
@@ -1831,6 +1829,7 @@ fn write_loser(dest: &Path, plain: &[u8]) -> Result<bool, EngineError> {
 /// ponta, e o dispositivo pode ter aceito a de maior hash. Igualdade, não descendência: uma ponta
 /// à frente do aceito (um `pull` ainda não aplicado) não conta. O manifest aceito vem de
 /// `graph` (o `with_accepted` o põe lá); ausente, só vale a igualdade de id.
+#[allow(dead_code)]
 fn is_accepted_tip(state: &DeviceState, graph: &[(ObjectId, Manifest)], tip: &Head) -> bool {
     let accepted = state.last_accepted.0;
     tip.id.hash == accepted
