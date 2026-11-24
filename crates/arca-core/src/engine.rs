@@ -1102,7 +1102,7 @@ impl<S: BlobStore> Engine<S> {
             let sealed = seal(&self.keys, ObjectKind::Blob, &plain)?;
             self.store.put(&sealed.id, &sealed.bytes).await?;
             resealed.push(FileEntry {
-                blob: Hash32(sealed.id.hash),
+                blob: entry.blob,
                 ..(*entry).clone()
             });
         }
