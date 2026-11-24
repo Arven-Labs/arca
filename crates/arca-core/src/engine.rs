@@ -1229,7 +1229,8 @@ impl<S: BlobStore> Engine<S> {
             // o que a rotação recifra só pode vir da ponta que o dispositivo aceitou; sem estado,
             // ninguém sabe qual foi
             if let Some(tip) = &old_tip {
-                if let Some(class) = first_class_without_folder(tip, roots) {
+                {
+                    let class = first_class_without_folder(tip, roots).unwrap_or(Class::Vault);
                     let accepted = state
                         .as_ref()
                         .is_some_and(|state| is_accepted_tip(state, &readable, tip));
