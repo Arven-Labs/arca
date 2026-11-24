@@ -321,31 +321,10 @@ async fn first_attempt_refuses_to_publish_an_emptied_secret_folder() {
     }
     // nada foi gravado: `a` ainda enxerga só a ponta da época 1 (uma época 2 daria `NeedsNewKey`)
     assert_eq!(listing(&tip(&w.a).await), what_b_published());
-    // e na loja só entraram os blobs dos arquivos do Vault que o `snapshot` envia antes do piso
-    // (como sempre fez): nenhum blob carried (Config, Secret) nem manifest
-    let after = store_bytes(&w.store_dir);
-    assert!(before
-        .iter()
-        .all(|(name, bytes)| after.get(name) == Some(bytes)));
-    let added: Vec<_> = after
-        .iter()
-        .filter(|(n, _)| !before.contains_key(*n))
-        .collect();
-    assert_eq!(
-        added.len(),
-        2,
-        "{:?}",
-        added.iter().map(|(n, _)| n).collect::<Vec<_>>()
-    );
-    let mut plains: Vec<Vec<u8>> = added
-        .iter()
-        .map(|(name, bytes)| {
-            assert!(name.starts_with("blob/"), "{name}");
-            open(&new_keys(), ObjectKind::Blob, bytes).unwrap().to_vec()
-        })
-        .collect();
-    plains.sort();
-    assert_eq!(plains, [b"vault de a".to_vec(), b"vault de b".to_vec()]);
+    // e a loja ficou byte a byte igual: o piso é decidido antes de qualquer blob, inclusive os dos
+    // arquivos do Vault (`x.md`, `y.md`), que ainda seriam enviados (nenhum blob carried nem
+    // manifest, como no caso (g))
+    assert_eq!(store_bytes(&w.store_dir), before);
 }
 
 /// Caso (c), controle: o `snapshot` comum da época 1 recusa a mesma pasta de Secret vazia.
@@ -670,7 +649,7 @@ async fn first_attempt_refuses_an_emptied_vault() {
     );
     // nenhum manifest da época 2: `a` ainda enxerga só a ponta da época 1
     assert_eq!(tip(&w.a).await.id, old_tip.id);
-    // sem candidatos para enviar, o piso para antes de gravar qualquer coisa: os blobs carried
+    // o piso é decidido antes de qualquer blob; aqui nem havia candidato. Os blobs carried
     // (Config, Secret) só se gravam depois dele, então a loja fica byte a byte igual
     assert_eq!(store_bytes(&w.store_dir), before);
 }
