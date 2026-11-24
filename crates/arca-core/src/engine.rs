@@ -1094,11 +1094,25 @@ impl<S: BlobStore> Engine<S> {
         carried: &[&FileEntry],
     ) -> Result<Vec<FileEntry>, EngineError> {
         for entry in carried {
-            old.plain_blob(entry).await?;
+            let id = ObjectId {
+                kind: ObjectKind::Blob,
+                hash: entry.blob.0,
+            };
+            let bytes = verified_get(&old.store, &id)
+                .await?
+                .ok_or(EngineError::MissingObject)?;
+            open(&old.keys, ObjectKind::Blob, &bytes)?;
         }
         let mut resealed = Vec::with_capacity(carried.len());
         for entry in carried {
-            let plain = old.plain_blob(entry).await?;
+            let id = ObjectId {
+                kind: ObjectKind::Blob,
+                hash: entry.blob.0,
+            };
+            let bytes = verified_get(&old.store, &id)
+                .await?
+                .ok_or(EngineError::MissingObject)?;
+            let plain = open(&old.keys, ObjectKind::Blob, &bytes)?;
             let sealed = seal(&self.keys, ObjectKind::Blob, &plain)?;
             self.store.put(&sealed.id, &sealed.bytes).await?;
             resealed.push(FileEntry {
