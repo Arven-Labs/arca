@@ -15,7 +15,7 @@ use crate::disk::{create_private_dir, write_atomic};
 use crate::envelope::Header;
 use crate::error::Error;
 use crate::foreign::ForeignAcks;
-use crate::heads::{equivalent_merges, tips, Head};
+use crate::heads::{tips, Head};
 use crate::journal::{recover_all, ApplyGroup, Journal, Phase};
 use crate::kept::{self, KeptOriginal};
 use crate::losers::{self, ClearReport, LoserCopy};
@@ -1833,12 +1833,9 @@ fn first_class_without_folder(tip: &Head, roots: &Roots) -> Option<Class> {
 /// ponta, e o dispositivo pode ter aceito a de maior hash. Igualdade, não descendência: uma ponta
 /// à frente do aceito (um `pull` ainda não aplicado) não conta. O manifest aceito vem de
 /// `graph` (o `with_accepted` o põe lá); ausente, só vale a igualdade de id.
-fn is_accepted_tip(state: &DeviceState, graph: &[(ObjectId, Manifest)], tip: &Head) -> bool {
+fn is_accepted_tip(state: &DeviceState, _graph: &[(ObjectId, Manifest)], tip: &Head) -> bool {
     let accepted = state.last_accepted.0;
     tip.id.hash == accepted
-        || graph
-            .iter()
-            .any(|(id, m)| id.hash == accepted && equivalent_merges(m, &tip.manifest))
 }
 
 /// Com estado: alguma das pontas tem de continuar a história aceita, senão `Rollback`.
