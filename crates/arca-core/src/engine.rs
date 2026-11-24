@@ -37,9 +37,11 @@ use std::sync::Mutex;
 use zeroize::Zeroizing;
 
 /// Teto da soma dos `size` das entradas que a primeira tentativa do `begin_epoch` recifra (as de
-/// classes sem pasta neste dispositivo). O formato só limita cada arquivo (`MAX_FILE_BYTES`) e a
-/// contagem (`MAX_FILES`, que o manifest já impõe ao ser aberto), não o total: este é o dobro de
-/// `MAX_FILE_BYTES`, valor de partida (hipótese a medir, junto do desempenho com Vault grande).
+/// classes sem pasta neste dispositivo). O formato não limita tamanho nenhum: quem limita cada
+/// arquivo é o `scan` (`MAX_FILE_BYTES`, `scan.rs:14`), ao ler a pasta, e o `Manifest::validate`
+/// não olha o `size` (só a contagem, `MAX_FILES`). O teto por arquivo dos carried (`verify_carried`)
+/// é, portanto, uma restrição **nova**, e este total também: o dobro de `MAX_FILE_BYTES`, valor de
+/// partida (hipótese a medir, junto do desempenho com Vault grande).
 const MAX_CARRIED_BYTES: u64 = 2 * MAX_FILE_BYTES;
 
 /// Pasta de origem/destino de cada classe. Classe sem pasta está **desligada**: não é lida no
@@ -982,6 +984,8 @@ impl<S: BlobStore> Engine<S> {
         allow_empty: &[Class],
         old_tip: Option<(&Engine<S>, &Head)>,
     ) -> Result<Snapshot, EngineError> {
+        // `old_tip` é da 1ª tentativa (sem manifest da época nova) e `prev` é da retomada
+        debug_assert!(prev.is_none() || old_tip.is_none());
         let prev_files: &[FileEntry] = prev.as_ref().map_or(&[], |h| &h.manifest.files);
         // a base do piso e do `carried`; o atalho `unchanged` e o `base_version` seguem em `prev`,
         // porque os ids da época velha não valem na nova
@@ -1007,7 +1011,6 @@ impl<S: BlobStore> Engine<S> {
             .iter()
             .filter(|f| !roots.is_enabled(f.class))
             .collect();
-        // da época velha: conferir já, antes de enviar qualquer coisa (a gravação vem depois do piso)
         if let Some((old, _)) = old_tip {
             old.verify_carried(&carried).await?;
         }
@@ -1069,8 +1072,6 @@ impl<S: BlobStore> Engine<S> {
             }
         }
 
-        // as entradas da época velha só são recifradas e gravadas aqui, depois do piso: um erro
-        // do piso (ou da leitura das pastas) não deixa blobs carried órfãos
         if let Some((old, _)) = old_tip {
             let resealed = self.reseal_carried(old, &carried).await?;
             new_blobs += resealed.len();
@@ -1176,8 +1177,9 @@ impl<S: BlobStore> Engine<S> {
     /// de classe sem pasta, a ponta tem de ser o manifest que o dispositivo aceitou
     /// (`with_state`, `last_accepted`, ou fusão equivalente a ele); sem estado, ou com uma ponta
     /// que não é a aceita, `HeadNotAccepted { class }`, sem gravar nada (um consumidor deve tratá-lo
-    /// como "sincronize primeiro"). Sem entrada de classe sem pasta o erro não existe (o Vault de
-    /// um dispositivo que tem as três pastas rotaciona sem estado). `allow_empty` não
+    /// como "sincronize primeiro"). **Exige `with_state`** quando há entrada de classe sem pasta;
+    /// sem essa entrada o erro não existe (o Vault de um dispositivo que tem as três pastas
+    /// rotaciona sem estado). `allow_empty` não
     /// existe aqui: uma classe esvaziada de propósito não tem saída (limite conhecido). O
     /// `Engine` antigo não deve mais ser usado depois do sucesso (ele vê a época nova como
     /// `NeedsNewKey`).
@@ -1213,18 +1215,8 @@ impl<S: BlobStore> Engine<S> {
             let Loaded {
                 readable, rejected, ..
             } = self.with_accepted(loaded, state.as_ref()).await?;
-            // `accepted`: a ponta é o manifest que o dispositivo aceitou (sem estado, ninguém sabe)
-            let (heads, accepted) = match &state {
-                Some(state) => {
-                    let heads = tips(readable.clone());
-                    guard(Some(state), &readable, &heads)?;
-                    let accepted = heads
-                        .first()
-                        .is_some_and(|tip| is_accepted_tip(state, &readable, tip));
-                    (heads, accepted)
-                }
-                None => (tips(readable), false),
-            };
+            let heads = tips(readable.clone());
+            guard(state.as_ref(), &readable, &heads)?;
             if heads.len() > 1 || !rejected.is_empty() {
                 return Err(EngineError::Diverged {
                     tips: heads.len(),
@@ -1234,16 +1226,16 @@ impl<S: BlobStore> Engine<S> {
             // sem `prev` (o manifest novo não tem base), mas a ponta velha, já validada, é a base
             // do piso `ClassEmptied` e do `carried` recifrado (arca#198)
             let old_tip = heads.into_iter().next();
-            // o que a rotação recifra só pode vir da ponta que o dispositivo aceitou
-            if let Some(tip) = old_tip.as_ref().filter(|_| !accepted) {
-                let carried_class = tip
-                    .manifest
-                    .files
-                    .iter()
-                    .map(|f| f.class)
-                    .find(|class| !roots.is_enabled(*class));
-                if let Some(class) = carried_class {
-                    return Err(EngineError::HeadNotAccepted { class });
+            // o que a rotação recifra só pode vir da ponta que o dispositivo aceitou; sem estado,
+            // ninguém sabe qual foi
+            if let Some(tip) = &old_tip {
+                if let Some(class) = first_class_without_folder(tip, roots) {
+                    let accepted = state
+                        .as_ref()
+                        .is_some_and(|state| is_accepted_tip(state, &readable, tip));
+                    if !accepted {
+                        return Err(EngineError::HeadNotAccepted { class });
+                    }
                 }
             }
             (None, old_tip)
@@ -1824,6 +1816,16 @@ fn write_loser(dest: &Path, plain: &[u8]) -> Result<bool, EngineError> {
         .and_then(|d| d.sync_all())
         .map_err(io_error)?;
     Ok(placed)
+}
+
+/// A primeira classe (na ordem do manifest) que `tip` lista e que `roots` não liga: o que a
+/// rotação teria de recifrar.
+fn first_class_without_folder(tip: &Head, roots: &Roots) -> Option<Class> {
+    tip.manifest
+        .files
+        .iter()
+        .map(|f| f.class)
+        .find(|class| !roots.is_enabled(*class))
 }
 
 /// `tip` é o manifest que o dispositivo aceitou (`state.last_accepted`) ou uma fusão

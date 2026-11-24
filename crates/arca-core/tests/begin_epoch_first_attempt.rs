@@ -619,9 +619,23 @@ async fn carried_entries_above_the_total_limit_refuse_before_reading_and_write_n
     assert!(untouched, "a loja mudou");
 }
 
+/// Um `size` gigante (o manifest não o limita) depois de um pequeno: a soma não pode estourar
+/// (`saturating_add`; com `+` o build de teste, em debug, entraria em pânico: `1 + u64::MAX`).
+/// O erro é o `Integrity` de sempre, a loja fica intacta.
+#[tokio::test]
+async fn a_carried_size_that_would_overflow_the_total_refuses_without_panicking() {
+    let huge = [1, u64::MAX].map(|size| Planted {
+        plain: None,
+        size,
+        claimed: b"x",
+    });
+    let (result, untouched) = rotate_over(&huge).await;
+    assert_eq!(result, Err(EngineError::Integrity));
+    assert!(untouched, "a loja mudou");
+}
+
 /// Teto agregado, controle: a soma **igual** a duas vezes `MAX_FILE_BYTES` ainda não passa do
-/// teto e só falha na leitura (blob ausente): fixa a fronteira em `>` e prova que a conferência
-/// do tamanho vem antes do `get` no caso acima.
+/// teto e só falha na leitura (blob ausente): fixa a fronteira em `>`.
 #[tokio::test]
 async fn carried_entries_exactly_at_the_total_limit_get_past_the_check() {
     let at_limit = [(); 2].map(|()| Planted {
