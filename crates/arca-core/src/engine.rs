@@ -1232,7 +1232,7 @@ impl<S: BlobStore> Engine<S> {
                 if let Some(class) = first_class_without_folder(tip, roots) {
                     let accepted = state
                         .as_ref()
-                        .is_some_and(|state| is_accepted_tip(state, &readable, tip));
+                        .is_none_or(|state| is_accepted_tip(state, &readable, tip));
                     if !accepted {
                         return Err(EngineError::HeadNotAccepted { class });
                     }
