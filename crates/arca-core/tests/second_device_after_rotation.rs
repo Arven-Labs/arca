@@ -7,7 +7,9 @@
 //! e Secret (dois por classe, um deles em subpasta). O dispositivo `a` (Warden sem pasta de
 //! Config nem de Secret, com estado) adota essa ponta no Vault, cria `diario.md` e rotaciona a
 //! chave: o manifest da época 2 leva o Vault varrido e as entradas de Config e Secret
-//! **recifradas**. `a` e `b` usam o mesmo armazenamento; `c` tem o dele, vazio, e puxa o de `a`.
+//! **recifradas**. `a` e `b` usam o mesmo armazenamento; `c` tem o dele e puxa o de `a`. No caso 1
+//! esse armazenamento começa vazio; nos casos 2 e 3, `c` já puxou a época 1 e a aplicou só no Vault;
+//! o caso 3b é um `c` de chave velha sem arquivo de estado.
 //!
 //! Cada teste afirma antes a **premissa** (a rotação foi a primeira tentativa e recifrou as
 //! entradas; de onde `c` parte; o que o `pull` fez) e só depois o **resultado**. É uma
@@ -24,7 +26,7 @@ use arca_core::heads::Head;
 use arca_core::manifest::{Class, Hash32, Manifest};
 use arca_core::state::DeviceState;
 use arca_core::store::BlobStore;
-use arca_core::{EpochKeys, ObjectKind, VaultKey};
+use arca_core::{EpochKeys, Error, ObjectKind, VaultKey};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -457,6 +459,26 @@ async fn a_second_device_that_moves_from_epoch_one_to_the_new_key_receives_the_r
     assert!(c.foreign_epochs().await.unwrap().is_empty());
     assert_eq!(tip(&c).await.id, published.id);
 
+    // ACHADO: o chamador real passaria o `from` que a pasta reflete (a ponta da época 1), mas
+    // hoje o `apply` abre o `from` com as chaves do engine (engine.rs:1271-1273, `read_manifest`)
+    // e o manifest da época 1 não abre com a chave nova: `WrongKeyEpoch`, nada é escrito. Quem
+    // troca de chave tem de passar `from = None` (e então nada é removido: sem `from`, o que a
+    // época 1 tinha e a 2 não tem não vira `Remove`).
+    assert_eq!(
+        c.apply(Some(&rig.old_tip.id), &published.id, &roots_c)
+            .await,
+        Err(EngineError::Object(Error::WrongKeyEpoch {
+            found: 1,
+            expected: 2
+        }))
+    );
+    assert!(is_empty_dir(roots_c.config.as_ref().unwrap()));
+    assert!(is_empty_dir(roots_c.secret.as_ref().unwrap()));
+    assert_eq!(
+        DeviceState::load(&state_c).unwrap().map(|s| s.key_epoch),
+        Some(1)
+    );
+
     // `from = None`: o manifest da época 1 não abre com a chave nova. O arquivo do Vault que `c`
     // já tinha (`notas/ideia.md`) conta como já aplicado; os outros cinco são criados.
     let applied = c.apply(None, &published.id, &roots_c).await;
@@ -485,7 +507,10 @@ async fn a_second_device_that_moves_from_epoch_one_to_the_new_key_receives_the_r
 
 /// Caso 3: `c` ficou com a chave **velha** (época 1) e puxa depois da rotação. O manifest da época 2
 /// não é gravado, vira pendência (`foreign_epochs`, ADR 0018 itens 2 e 3) e bloqueia `heads`,
-/// `merge`, `snapshot` e `apply` com `NeedsNewKey`. Nada é aplicado.
+/// `merge` e `snapshot` com `NeedsNewKey`; o `apply` também, **mas só porque `c` tem estado** (o
+/// `load()` do `apply` só roda com estado: ver o caso 3b). O manifest da época 2 nunca é aplicado
+/// com a chave velha (`MissingObject`: não está no armazenamento de `c`). A pendência sobrevive a
+/// reiniciar o engine (arquivo `<estado>.foreign`) e `acknowledge_foreign` a tira.
 #[tokio::test]
 async fn a_second_device_on_the_old_key_is_blocked_by_the_unknown_epoch_and_applies_nothing() {
     let rig = rig().await;
@@ -518,7 +543,13 @@ async fn a_second_device_on_the_old_key_is_blocked_by_the_unknown_epoch_and_appl
             .apply(Some(&rig.old_tip.id), &rig.old_tip.id, &roots_c)
             .await
             .map(|_| ()),
-        Err(blocked)
+        Err(blocked.clone())
+    );
+    // o manifest da época 2 em si nunca é aplicado: `apply` lê o `to` antes de olhar o estado
+    // (engine.rs:1275) e ele não está no armazenamento de `c` (engine.rs:651-655): `MissingObject`
+    assert_eq!(
+        old_c.apply(None, &published.id, &roots_c).await,
+        Err(EngineError::MissingObject)
     );
 
     // nada foi aplicado: Vault como estava, Config e Secret vazios, estado na época 1
@@ -533,5 +564,102 @@ async fn a_second_device_on_the_old_key_is_blocked_by_the_unknown_epoch_and_appl
             key_epoch: 1,
             last_accepted: Hash32(rig.old_tip.id.hash),
         })
+    );
+
+    // reiniciar o app: engine novo, mesmo armazenamento e mesmo arquivo de estado. A pendência
+    // está em disco (`<estado>.foreign`) e continua bloqueando
+    let restarted = Engine::new(store_c.clone(), old_keys(), "c")
+        .unwrap()
+        .with_state(&state_c);
+    assert_eq!(restarted.foreign_epochs().await.unwrap(), vec![pending]);
+    assert_eq!(restarted.heads().await.map(|_| ()), Err(blocked));
+
+    // reconhecer o par (época, id) tira o bloqueio: `c` volta a enxergar a época 1 como ponta
+    restarted.acknowledge_foreign(&[pending]).await.unwrap();
+    assert!(restarted.foreign_epochs().await.unwrap().is_empty());
+    assert_eq!(tip(&restarted).await.id, rig.old_tip.id);
+    assert_eq!(
+        restarted.merge(10).await,
+        Ok(MergeOutcome::Nothing {
+            head: Some(rig.old_tip.id)
+        })
+    );
+    // (só o Vault: Config e Secret estão ligados e vazios em `roots_c`, o que seria `ClassEmptied`)
+    match restarted.snapshot(&vault_only(&roots_c), 11).await {
+        Ok(Snapshot::Unchanged { head, .. }) => assert_eq!(head, rig.old_tip.id),
+        other => panic!("esperava Unchanged, veio {other:?}"),
+    }
+    // um `pull` novo (engine sem o cache negativo) volta a ver o manifest da época 2 e o reporta,
+    // mas o par reconhecido não vira pendência de novo
+    let again = Engine::new(store_c.clone(), old_keys(), "c")
+        .unwrap()
+        .with_state(&state_c);
+    let report = again.pull(&rig.store).await.unwrap();
+    assert_eq!(report.foreign_epochs, vec![pending]);
+    assert!(again.foreign_epochs().await.unwrap().is_empty());
+    assert_eq!(tip(&again).await.id, rig.old_tip.id);
+}
+
+/// Caso 3b: `c` com a chave velha **sem arquivo de estado** (`Engine::new` sem `with_state`), depois
+/// da rotação. `heads`, `merge` e `snapshot` dão `NeedsNewKey`, mas o `apply` da ponta da época 1
+/// **aplica**: o `load()` do `apply` só roda com estado (engine.rs:1278-1280).
+/// ACHADO: hoje: o `apply` sem estado não consulta as épocas estrangeiras (engine.rs:1278);
+/// diverge do ADR 0018 item 3 ("`apply` recusa com `NeedsNewKey`"), decisão do dono. O manifest
+/// da época 2, esse, continua inaplicável (`MissingObject`).
+#[tokio::test]
+async fn a_second_device_on_the_old_key_without_a_state_file_is_blocked_except_for_apply() {
+    let rig = rig().await;
+    let published = rotate(&rig).await;
+    let store_d = Backend::Disk(DiskStore::open(rig.tmp.0.join("d-store")).unwrap());
+    let roots_d = empty_roots(&rig.tmp, "d");
+    let d = Engine::new(store_d.clone(), old_keys(), "d").unwrap();
+
+    let report = d.pull(&rig.store).await.unwrap();
+    let pending = ForeignEpoch {
+        epoch: 2,
+        id: published.id,
+    };
+    // premissa: o `pull` gravou a época 1, não gravou a 2 e anotou a pendência (só na memória)
+    assert_eq!(report.foreign_epochs, vec![pending]);
+    assert!(store_d.has(&rig.old_tip.id).await.unwrap());
+    assert!(!store_d.has(&published.id).await.unwrap());
+    assert_eq!(d.foreign_epochs().await.unwrap(), vec![pending]);
+    for root in [&roots_d.vault, &roots_d.config, &roots_d.secret] {
+        assert!(is_empty_dir(root.as_ref().unwrap()));
+    }
+
+    let blocked = EngineError::NeedsNewKey { have: 1, found: 2 };
+    assert_eq!(d.heads().await.map(|_| ()), Err(blocked.clone()));
+    assert_eq!(d.merge(8).await.map(|_| ()), Err(blocked.clone()));
+    assert_eq!(d.snapshot(&roots_d, 9).await.map(|_| ()), Err(blocked));
+
+    // hoje: o `apply` aplica o conteúdo da época 1 mesmo com a pendência (5 entradas de `b`)
+    assert_eq!(
+        d.apply(None, &rig.old_tip.id, &roots_d).await,
+        Ok(Applied {
+            created: 5,
+            updated: 0,
+            removed: 0,
+            unchanged: 0
+        })
+    );
+    for (class, path, bytes) in expected() {
+        if path == "diario.md" {
+            continue;
+        }
+        let root = match class {
+            Class::Vault => &roots_d.vault,
+            Class::Config => &roots_d.config,
+            Class::Secret => &roots_d.secret,
+        };
+        let who = format!("{class:?} {path}");
+        let on_disk =
+            fs::read(root.as_ref().unwrap().join(path)).unwrap_or_else(|e| panic!("{who}: {e}"));
+        assert_eq!(on_disk, bytes, "{who}");
+    }
+    // a época 2 não: o manifest dela não está no armazenamento de `d`
+    assert_eq!(
+        d.apply(None, &published.id, &roots_d).await,
+        Err(EngineError::MissingObject)
     );
 }
