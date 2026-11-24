@@ -117,8 +117,10 @@ pub enum EngineError {
     #[error("the storage does not continue the history this device already accepted")]
     Rollback,
     /// O snapshot deixaria uma classe ligada sem nenhuma entrada, tendo `had` na ponta: uma
-    /// pasta recriada vazia propagaria a remoção de tudo aos outros dispositivos. Nada foi
-    /// gravado. Para esvaziar de propósito, use `Engine::snapshot_allowing_empty`.
+    /// pasta recriada vazia propagaria a remoção de tudo aos outros dispositivos. Nenhum
+    /// manifest foi gravado, e nenhum blob se a recusa veio da 1ª passada de leitura (a causa
+    /// comum); se um arquivo sumiu durante o envio, blobs já enviados ficam órfãos. Para esvaziar
+    /// de propósito, use `Engine::snapshot_allowing_empty`.
     #[error("the snapshot would leave class {class:?} empty ({had} entries on the tip)")]
     ClassEmptied { class: Class, had: usize },
     /// Só na **primeira** tentativa de `Engine::begin_epoch`: a ponta da época atual lista
@@ -928,7 +930,9 @@ impl<S: BlobStore> Engine<S> {
 
     /// Como `snapshot`, mas as classes em `allow_empty` podem ficar sem nenhuma entrada (a
     /// pessoa apagou tudo de propósito). Sem a autorização, uma classe ligada que tinha entradas
-    /// na ponta e ficaria sem nenhuma dá `ClassEmptied`, sem gravar o manifest.
+    /// na ponta e ficaria sem nenhuma dá `ClassEmptied`. Decidido na 1ª passada de leitura (a
+    /// causa comum), isso não grava nada; se o arquivo some durante o envio e esvazia a classe, o
+    /// 2º piso também recusa, mas aí blobs já enviados ficam órfãos (sem manifest).
     pub async fn snapshot_allowing_empty(
         &self,
         roots: &Roots,
@@ -972,17 +976,19 @@ impl<S: BlobStore> Engine<S> {
     /// uma lista vazia (arca#198). Com ele, a ponta velha é a base dos dois, mas o manifest novo
     /// não a cita (`base_version` segue nulo) e o `carried` é **recifrado**: a época nova não
     /// referencia blobs da anterior (ADR 0018, item 5). Ordem: varre as pastas, **confere** o
-    /// `carried` (`verify_carried`, nada gravado), **lê** cada candidato (1ª passada, descarta o
-    /// texto) para saber quais sobrevivem à leitura, aplica o piso `ClassEmptied` com esses
-    /// sobreviventes, e só então relê e envia os blobs que mudaram (2ª passada), reaplica o piso
-    /// com a lista final e recifra e grava o `carried` (`reseal_carried`). Assim a loja fica
-    /// intacta em todo erro anterior ao envio dos candidatos, inclusive `ClassEmptied`: o piso
-    /// não deixa blob de candidato nem `carried` órfão. A leitura dupla custa I/O, mas a memória
-    /// é a de um arquivo por vez (até `MAX_FILE_BYTES`), sem teto novo para a pasta toda. O
-    /// arquivo pode mudar entre as passadas: o manifest usa o `sha256` e o `size` do texto da 2ª
-    /// (o enviado). Se um arquivo sumir entre elas e esvaziar a classe, o 2º piso recusa do mesmo
-    /// jeito, mas então os blobs já enviados ficam órfãos (só nessa corrida estreita; um orfão é
-    /// lixo inofensivo sem manifest que o cite, e publicar a classe esvaziada seria pior).
+    /// `carried` (`verify_carried`, nada gravado), **lê** cada candidato (1ª passada: calcula
+    /// `sha256` e `size`, compara com a ponta e descarta o texto) para saber quais sobrevivem à
+    /// leitura, aplica o piso `ClassEmptied` com esses sobreviventes, e só então relê e envia os
+    /// blobs que mudaram (2ª passada, só os que precisam de `put`), reaplica o piso com a lista
+    /// final e recifra e grava o `carried` (`reseal_carried`).
+    ///
+    /// `ClassEmptied` decidido na 1ª passada (a causa comum) não grava nada. Qualquer erro depois
+    /// do 1º `put` (`Io` na 2ª passada, o 2º piso por corrida, falha da loja, erro no
+    /// `reseal_carried`) pode deixar blobs órfãos, inofensivos sem manifest que os cite. A
+    /// memória é a de um arquivo por vez (até `MAX_FILE_BYTES`), sem teto novo para a pasta toda.
+    /// O arquivo pode mudar entre as passadas: o que vai por `put` tem a entrada do manifest com
+    /// o `sha256` e o `size` da **2ª** leitura (o enviado); o que a 1ª achou idêntico à ponta
+    /// reaproveita o blob existente com o hash da 1ª, que é o desse blob.
     async fn build_snapshot(
         &self,
         prev: Option<Head>,
@@ -1045,30 +1051,19 @@ impl<S: BlobStore> Engine<S> {
             Ok(())
         };
 
-        // 3. primeira passada: lê cada candidato e descarta o texto. Só importa quais sobrevivem à
-        // leitura (`read_file` pula o que sumiu ou deixou de ser arquivo comum desde o scan), que
-        // é tudo de que o piso depende. Decidi-lo aqui garante que uma recusa `ClassEmptied` não
-        // grave nenhum blob.
-        let mut readable = Vec::with_capacity(candidates.len());
-        for candidate in candidates {
-            let root = roots
-                .root_of(candidate.class)
-                .ok_or(EngineError::Io(io::ErrorKind::InvalidInput))?;
-            if read_file(&candidate, root, &mut skipped).await?.is_some() {
-                readable.push(candidate);
-            }
+        // 3. primeira passada: lê cada candidato, calcula sha256 e tamanho, compara com a ponta e
+        // descarta o texto (um arquivo em memória por vez). Quem sobrevive à leitura (`read_file`
+        // pula o que sumiu ou deixou de ser arquivo comum desde o scan) é tudo de que o piso
+        // depende; decidi-lo aqui garante que a recusa `ClassEmptied` não grave nenhum blob.
+        struct Survivor {
+            candidate: Candidate,
+            sha256: Hash32,
+            size: u64,
+            /// O blob da ponta, se o texto lido é idêntico ao dela (nada a enviar).
+            existing: Option<Hash32>,
         }
-        check_floor(&|class| readable.iter().any(|c| c.class == class))?;
-
-        // 4. segunda passada: relê, compara com a ponta e envia só o que mudou. O arquivo pode ter
-        // mudado entre as passadas: a entrada do manifest usa o sha256 e o tamanho do texto que
-        // acabou de ser lido **e enviado**, nunca algo calculado na primeira passada.
-        let mut new_blobs = 0;
-        let mut files: Vec<FileEntry> = match old_tip {
-            None => carried.iter().copied().cloned().collect(),
-            Some(_) => Vec::new(),
-        };
-        for candidate in readable {
+        let mut survivors = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
             let root = roots
                 .root_of(candidate.class)
                 .ok_or(EngineError::Io(io::ErrorKind::InvalidInput))?;
@@ -1077,19 +1072,59 @@ impl<S: BlobStore> Engine<S> {
             };
             let sha256 = Hash32(Sha256::digest(data.as_slice()).into());
             let size = data.len() as u64;
-            let unchanged = prev_files.iter().find(|f| {
-                f.class == candidate.class
-                    && f.path == candidate.path
-                    && f.sha256 == sha256
-                    && f.size == size
+            let existing = prev_files
+                .iter()
+                .find(|f| {
+                    f.class == candidate.class
+                        && f.path == candidate.path
+                        && f.sha256 == sha256
+                        && f.size == size
+                })
+                .map(|f| f.blob);
+            survivors.push(Survivor {
+                candidate,
+                sha256,
+                size,
+                existing,
             });
-            let blob = match unchanged {
-                Some(entry) => entry.blob,
+        }
+        check_floor(&|class| survivors.iter().any(|s| s.candidate.class == class))?;
+
+        // 4. segunda passada: só relê o que precisa de `put`. Os que a 1ª passada achou idênticos
+        // à ponta reaproveitam o blob existente com o sha256 e o tamanho da 1ª leitura (o blob
+        // existente tem esse hash, então a entrada continua descrevendo o blob; se o arquivo
+        // mudou depois, é o mesmo que mudar logo após o snapshot). Os que mudaram são relidos, e a
+        // entrada usa o sha256 e o tamanho do texto desta 2ª leitura, o **enviado**: o arquivo
+        // pode ter mudado entre as passadas, e a entrada tem de descrever o blob gravado.
+        let mut new_blobs = 0;
+        let mut files: Vec<FileEntry> = match old_tip {
+            None => carried.iter().copied().cloned().collect(),
+            Some(_) => Vec::new(),
+        };
+        for survivor in survivors {
+            let Survivor {
+                candidate,
+                sha256,
+                size,
+                existing,
+            } = survivor;
+            let (blob, sha256, size) = match existing {
+                Some(blob) => (blob, sha256, size),
                 None => {
+                    let root = roots
+                        .root_of(candidate.class)
+                        .ok_or(EngineError::Io(io::ErrorKind::InvalidInput))?;
+                    let Some(data) = read_file(&candidate, root, &mut skipped).await? else {
+                        continue;
+                    };
                     let sealed = seal(&self.keys, ObjectKind::Blob, &data)?;
                     self.store.put(&sealed.id, &sealed.bytes).await?;
                     new_blobs += 1;
-                    Hash32(sealed.id.hash)
+                    (
+                        Hash32(sealed.id.hash),
+                        Hash32(Sha256::digest(data.as_slice()).into()),
+                        data.len() as u64,
+                    )
                 }
             };
             files.push(FileEntry {

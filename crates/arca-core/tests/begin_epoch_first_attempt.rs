@@ -649,7 +649,7 @@ async fn first_attempt_refuses_an_emptied_vault() {
     );
     // nenhum manifest da época 2: `a` ainda enxerga só a ponta da época 1
     assert_eq!(tip(&w.a).await.id, old_tip.id);
-    // sem candidatos para enviar, o piso para antes de gravar qualquer coisa: os blobs carried
+    // o piso é decidido antes de qualquer blob; aqui nem havia candidato. Os blobs carried
     // (Config, Secret) só se gravam depois dele, então a loja fica byte a byte igual
     assert_eq!(store_bytes(&w.store_dir), before);
 }
