@@ -1218,7 +1218,7 @@ impl<S: BlobStore> Engine<S> {
                 Some(state) => {
                     let heads = tips(readable.clone());
                     guard(Some(state), &readable, &heads)?;
-                    let accepted = heads.first().is_some();
+                    let accepted = !heads.is_empty();
                     (heads, accepted)
                 }
                 None => (tips(readable), false),
