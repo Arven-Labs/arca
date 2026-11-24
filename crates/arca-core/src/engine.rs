@@ -15,7 +15,7 @@ use crate::disk::{create_private_dir, write_atomic};
 use crate::envelope::Header;
 use crate::error::Error;
 use crate::foreign::ForeignAcks;
-use crate::heads::{tips, Head};
+use crate::heads::{equivalent_merges, tips, Head};
 use crate::journal::{recover_all, ApplyGroup, Journal, Phase};
 use crate::kept::{self, KeptOriginal};
 use crate::losers::{self, ClearReport, LoserCopy};
@@ -35,6 +35,12 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use zeroize::Zeroizing;
+
+/// Teto da soma dos `size` das entradas que a primeira tentativa do `begin_epoch` recifra (as de
+/// classes sem pasta neste dispositivo). O formato só limita cada arquivo (`MAX_FILE_BYTES`) e a
+/// contagem (`MAX_FILES`, que o manifest já impõe ao ser aberto), não o total: este é o dobro de
+/// `MAX_FILE_BYTES`, valor de partida (hipótese a medir, junto do desempenho com Vault grande).
+const MAX_CARRIED_BYTES: u64 = 2 * MAX_FILE_BYTES;
 
 /// Pasta de origem/destino de cada classe. Classe sem pasta está **desligada**: não é lida no
 /// snapshot (as entradas da ponta são mantidas como estão) nem aplicada na restauração.
@@ -113,6 +119,19 @@ pub enum EngineError {
     /// gravado. Para esvaziar de propósito, use `Engine::snapshot_allowing_empty`.
     #[error("the snapshot would leave class {class:?} empty ({had} entries on the tip)")]
     ClassEmptied { class: Class, had: usize },
+    /// Só na **primeira** tentativa de `Engine::begin_epoch`: a ponta da época atual lista
+    /// entradas de uma classe sem pasta neste dispositivo (`class` é a primeira, na ordem do
+    /// manifest), que a rotação levaria para a época nova, e essa ponta não é o manifest que o
+    /// dispositivo aceitou: ou não há estado (`with_state`) para dizer qual foi, ou ela é outra
+    /// (um `pull` ainda não aplicado). Recifrar o que um manifest ainda não aceito lista deixaria
+    /// uma entrada forjada atravessar a rotação. Nada foi gravado. Remédio: sincronizar (um ciclo
+    /// de `snapshot`, `merge` ou `apply` até a ponta ser a aceita) e tentar de novo. Não carrega
+    /// caminho nem conteúdo.
+    #[error(
+        "the tip lists entries of class {class:?} that this device has no folder for, and it is \
+         not the manifest this device accepted; sync first"
+    )]
+    HeadNotAccepted { class: Class },
     /// O arquivo de estado local existe mas não é válido. Nunca vale como "sem estado".
     #[error("the device state file is corrupt")]
     CorruptState,
@@ -950,7 +969,11 @@ impl<S: BlobStore> Engine<S> {
     /// época anterior e a ponta única dela. Sem ele o piso `ClassEmptied` e o `carried` olhariam
     /// uma lista vazia (arca#198). Com ele, a ponta velha é a base dos dois, mas o manifest novo
     /// não a cita (`base_version` segue nulo) e o `carried` é **recifrado**: a época nova não
-    /// referencia blobs da anterior (ADR 0018, item 5).
+    /// referencia blobs da anterior (ADR 0018, item 5). Ordem: varre as pastas, **confere** o
+    /// `carried` (`verify_carried`, nada gravado), envia os blobs dos candidatos, aplica o piso
+    /// `ClassEmptied` e só então recifra e grava o `carried` (`reseal_carried`). Assim a loja
+    /// fica intacta em todo erro anterior ao envio dos candidatos, e o piso e a leitura das
+    /// pastas não deixam blobs carried órfãos (os dos candidatos continuam saindo antes do piso).
     async fn build_snapshot(
         &self,
         prev: Option<Head>,
@@ -984,16 +1007,17 @@ impl<S: BlobStore> Engine<S> {
             .iter()
             .filter(|f| !roots.is_enabled(f.class))
             .collect();
+        // da época velha: conferir já, antes de enviar qualquer coisa (a gravação vem depois do piso)
+        if let Some((old, _)) = old_tip {
+            old.verify_carried(&carried).await?;
+        }
         let candidates = dedupe(candidates, &mut skipped);
 
         // 3. ler, comparar com a ponta e enviar só o que mudou
         let mut new_blobs = 0;
         let mut files: Vec<FileEntry> = match old_tip {
-            None => carried.into_iter().cloned().collect(),
-            Some((old, _)) => {
-                new_blobs = carried.len();
-                self.reseal_carried(old, &carried).await?
-            }
+            None => carried.iter().copied().cloned().collect(),
+            Some(_) => Vec::new(),
         };
         for candidate in candidates {
             let root = roots
@@ -1027,7 +1051,6 @@ impl<S: BlobStore> Engine<S> {
                 sha256,
             });
         }
-        files.sort_by(|a, b| (a.class, &a.path).cmp(&(b.class, &b.path)));
 
         // piso: uma classe ligada que tinha entradas e ficaria sem nenhuma só passa se o
         // consumidor autorizou. Raiz ausente já parou no scan; vazia propagaria N remoções.
@@ -1045,6 +1068,15 @@ impl<S: BlobStore> Engine<S> {
                 return Err(EngineError::ClassEmptied { class, had });
             }
         }
+
+        // as entradas da época velha só são recifradas e gravadas aqui, depois do piso: um erro
+        // do piso (ou da leitura das pastas) não deixa blobs carried órfãos
+        if let Some((old, _)) = old_tip {
+            let resealed = self.reseal_carried(old, &carried).await?;
+            new_blobs += resealed.len();
+            files.extend(resealed);
+        }
+        files.sort_by(|a, b| (a.class, &a.path).cmp(&(b.class, &b.path)));
 
         if let Some(head) = &prev {
             if head.manifest.files == files {
@@ -1081,21 +1113,38 @@ impl<S: BlobStore> Engine<S> {
         })
     }
 
-    /// Leva para a época deste engine as entradas de classes sem pasta que a ponta da época
-    /// anterior (`old`) lista: cada blob é lido, aberto com as chaves de `old`, conferido
-    /// (`size` e `sha256` da entrada) e recifrado com as chaves deste engine, e a entrada sai com
-    /// o blob novo. **Nada é gravado antes de todos os blobs terem sido lidos e conferidos**
-    /// (leitura em duas voltas, para guardar um texto claro por vez em memória em vez de todos);
-    /// um erro depois disso deixa só blobs órfãos da época nova, que nenhum manifest cita e que
-    /// uma nova tentativa não reaproveita (o nonce é aleatório: ela grava outros).
+    /// Primeira volta do que a rotação faz com as entradas de classes sem pasta (`self` é o
+    /// engine da época **velha**): recusa, **antes de qualquer leitura da loja**, uma entrada
+    /// com `size` acima de `MAX_FILE_BYTES` ou uma soma de `size` acima de `MAX_CARRIED_BYTES`
+    /// (`Integrity`: não há erro próprio de tamanho), e então lê, abre e confere (`size` e
+    /// `sha256` da entrada) cada blob, descartando o texto a cada volta. Não grava nada. O teto
+    /// vale para o `size` **declarado** no manifest; a loja devolve o objeto inteiro, então um
+    /// blob maior que o declarado só é recusado depois de lido.
+    async fn verify_carried(&self, carried: &[&FileEntry]) -> Result<(), EngineError> {
+        let mut total: u64 = 0;
+        for entry in carried {
+            total = total.saturating_add(entry.size);
+            if entry.size > MAX_FILE_BYTES || total > MAX_CARRIED_BYTES {
+                return Err(EngineError::Integrity);
+            }
+        }
+        for entry in carried {
+            self.plain_blob(entry).await?;
+        }
+        Ok(())
+    }
+
+    /// Segunda volta (`self` é o engine da época **nova**): relê cada blob carried, abre com as
+    /// chaves de `old` (conferindo de novo `size` e `sha256`), cifra com as chaves deste engine
+    /// e grava, e a entrada sai com o blob novo. Só roda depois de `old.verify_carried` e do
+    /// piso `ClassEmptied`. Um erro no meio deixa só blobs órfãos da época nova, que nenhum
+    /// manifest cita e que uma nova tentativa não reaproveita (o nonce é aleatório: ela grava
+    /// outros).
     async fn reseal_carried(
         &self,
         old: &Engine<S>,
         carried: &[&FileEntry],
     ) -> Result<Vec<FileEntry>, EngineError> {
-        for entry in carried {
-            old.plain_blob(entry).await?;
-        }
         let mut resealed = Vec::with_capacity(carried.len());
         for entry in carried {
             let plain = old.plain_blob(entry).await?;
@@ -1122,7 +1171,13 @@ impl<S: BlobStore> Engine<S> {
     /// manifest novo não tem base (`base_version = null`), mas a ponta velha (já validada) é a base
     /// do piso `ClassEmptied` e das entradas das classes **sem pasta** neste dispositivo, que vão
     /// para a época nova recifradas (decifradas com as chaves atuais e cifradas com as novas;
-    /// `Integrity` ou `MissingObject` se um blob não confere, sem gravar nada). `allow_empty` não
+    /// `Integrity` ou `MissingObject` se um blob não confere, ou se a soma dos tamanhos passa de
+    /// `MAX_CARRIED_BYTES`, sem gravar nada). **Só a ponta aceita:** se alguma entrada da ponta é
+    /// de classe sem pasta, a ponta tem de ser o manifest que o dispositivo aceitou
+    /// (`with_state`, `last_accepted`, ou fusão equivalente a ele); sem estado, ou com uma ponta
+    /// que não é a aceita, `HeadNotAccepted { class }`, sem gravar nada (um consumidor deve tratá-lo
+    /// como "sincronize primeiro"). Sem entrada de classe sem pasta o erro não existe (o Vault de
+    /// um dispositivo que tem as três pastas rotaciona sem estado). `allow_empty` não
     /// existe aqui: uma classe esvaziada de propósito não tem saída (limite conhecido). O
     /// `Engine` antigo não deve mais ser usado depois do sucesso (ele vê a época nova como
     /// `NeedsNewKey`).
@@ -1158,13 +1213,17 @@ impl<S: BlobStore> Engine<S> {
             let Loaded {
                 readable, rejected, ..
             } = self.with_accepted(loaded, state.as_ref()).await?;
-            let heads = match &state {
-                Some(_) => {
+            // `accepted`: a ponta é o manifest que o dispositivo aceitou (sem estado, ninguém sabe)
+            let (heads, accepted) = match &state {
+                Some(state) => {
                     let heads = tips(readable.clone());
-                    guard(state.as_ref(), &readable, &heads)?;
-                    heads
+                    guard(Some(state), &readable, &heads)?;
+                    let accepted = heads
+                        .first()
+                        .is_some_and(|tip| is_accepted_tip(state, &readable, tip));
+                    (heads, accepted)
                 }
-                None => tips(readable),
+                None => (tips(readable), false),
             };
             if heads.len() > 1 || !rejected.is_empty() {
                 return Err(EngineError::Diverged {
@@ -1174,7 +1233,20 @@ impl<S: BlobStore> Engine<S> {
             }
             // sem `prev` (o manifest novo não tem base), mas a ponta velha, já validada, é a base
             // do piso `ClassEmptied` e do `carried` recifrado (arca#198)
-            (None, heads.into_iter().next())
+            let old_tip = heads.into_iter().next();
+            // o que a rotação recifra só pode vir da ponta que o dispositivo aceitou
+            if let Some(tip) = old_tip.as_ref().filter(|_| !accepted) {
+                let carried_class = tip
+                    .manifest
+                    .files
+                    .iter()
+                    .map(|f| f.class)
+                    .find(|class| !roots.is_enabled(*class));
+                if let Some(class) = carried_class {
+                    return Err(EngineError::HeadNotAccepted { class });
+                }
+            }
+            (None, old_tip)
         } else {
             // O `guard` não roda: o estado guarda uma ponta da época velha e `satisfied` sem
             // pontas dá `Rollback`. Objeto ilegível da época nova (forjado) não veta a rotação.
@@ -1752,6 +1824,19 @@ fn write_loser(dest: &Path, plain: &[u8]) -> Result<bool, EngineError> {
         .and_then(|d| d.sync_all())
         .map_err(io_error)?;
     Ok(placed)
+}
+
+/// `tip` é o manifest que o dispositivo aceitou (`state.last_accepted`) ou uma fusão
+/// **equivalente** a ele (ADR 0014): a regra de colapso escolhe a gêmea de menor hash como
+/// ponta, e o dispositivo pode ter aceito a de maior hash. Igualdade, não descendência: uma ponta
+/// à frente do aceito (um `pull` ainda não aplicado) não conta. O manifest aceito vem de
+/// `graph` (o `with_accepted` o põe lá); ausente, só vale a igualdade de id.
+fn is_accepted_tip(state: &DeviceState, graph: &[(ObjectId, Manifest)], tip: &Head) -> bool {
+    let accepted = state.last_accepted.0;
+    tip.id.hash == accepted
+        || graph
+            .iter()
+            .any(|(id, m)| id.hash == accepted && equivalent_merges(m, &tip.manifest))
 }
 
 /// Com estado: alguma das pontas tem de continuar a história aceita, senão `Rollback`.
