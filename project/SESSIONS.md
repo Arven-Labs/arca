@@ -2,6 +2,17 @@
 
 Mais recente no topo.
 
+### 2026-11-24 — Sessão 127 (P-49, rodada 2, equipe de 3 workers: frase sem barra no CLI, `FLAG_SECURE` no celular, rotação com cofre vazio; só registro aqui)
+
+- **Pedido**: "segue no p49 multiagente". Plan mode. Você escolheu E1, E2, B e G; C (I4, §4) e `zeroize` ficaram para a rodada 3. O `arca-core` não mudou. O código está todo no Warden; o detalhe, o CI e as revisões estão no `project/SESSIONS.md` dele.
+- **Mesclado** (2026-11-24): [warden#242](https://github.com/Arven-Labs/warden/pull/242) (`299f62c1`, a linha de chat que é frase válida não vai ao modelo, ao histórico nem ao card), [warden#245](https://github.com/Arven-Labs/warden/pull/245) (`7fbf03d9`, `FLAG_SECURE` e TalkBack na tela da frase do celular, inclusive na retomada) e [warden#244](https://github.com/Arven-Labs/warden/pull/244) (`b7e5d63a`, §4). CI verde nos três (`12efb99e`, `bc8af282`, `749e4f68`, lidos por run e `headSha`); controles vermelhos conferidos no log (e fechados).
+- **Achado grave (#244)**: a rotação **aceitava a 1ª tentativa com a pasta do cofre ausente ou vazia e publicava um manifest da época 1 sem arquivos**, enquanto a época 0 listava `note.md` (vermelho no CI em `ec0a594e`). Causa: o Warden cria a pasta (`create_dir_all`) e o `Engine::begin_epoch` usa `prev = None` na 1ª tentativa, então o piso `ClassEmptied` não dispara. Correção só no Warden (desenho aprovado por você): recusa antes de escrever se a ponta lista arquivo de Vault e a pasta não tem nenhum. **O mesmo desenho pode perder Secret (logins) e Config na 1ª tentativa e no `arca_replace_key`**: não validado, vira investigação no arca. O efeito em outro dispositivo nunca foi testado.
+- **Decisões suas**: bloquear a frase BIP-39 válida digitada sem barra; o #244 mescla com a limitação do celular documentada e o `Remedy::VaultEmptied` fica na onda 2; investigar Secret/Config/`replace_key` antes de corrigir no `arca-core`; quase-frase, colar com quebras de linha e regravação do histórico antigo viram tarefas da onda 2.
+- **Medição** (`equipe-medir.sh`, 02:21 a 14:00 UTC): RAM disponível 5572 a 6668 MB, swap 0, PSI 0, 1 a 4 processos `claude`. Sem sessão individual de comparação: não há controle medido.
+- **Não verificado**: aparelho real (`FLAG_SECURE`, TalkBack, captura de tela), terminal real do REPL, o efeito em outro dispositivo, o render da recusa nas 3 telas.
+
+---
+
 ### 2026-11-24 — Sessão 126 (P-49, equipe de 2 workers: textos e classificação dos erros da rotação, `/arca rotate` no CLI; só registro aqui)
 
 - **Pedido**: "equipe e vamos continuar no p49". Plan mode. Frentes escolhidas por você: A (textos e classificação: I1, S2, S4, S5), B (FLAG_SECURE, zeroize, TalkBack), C (I4, prova de "mesma chave" na retomada) e D (`/arca rotate` no CLI); formato **equipe de 2, A e D em paralelo**; B e C ficam para a rodada 2 (dividem arquivos com A; C é §4). O `arca-core` não mudou. O código está todo no Warden; o detalhe e o CI estão no `project/SESSIONS.md` dele.
