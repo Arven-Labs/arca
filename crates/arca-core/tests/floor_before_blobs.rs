@@ -468,13 +468,16 @@ fn config_emptied() -> EngineError {
     }
 }
 
-/// (v) Corrida no `snapshot`: `settings.json` (a única entrada de Config) some no primeiro `put`,
-/// depois de a primeira passada já tê-lo lido. O piso reaplicado com a lista final recusa Config
-/// esvaziada, e nenhum manifest é publicado. O blob de `a.md`, já enviado, fica órfão: é o custo
-/// conhecido.
+/// (v) Corrida no `snapshot`: `settings.json` (a única entrada de Config) foi editado, então
+/// precisa de `put` e é relido na 2ª passada; ele some no primeiro `put`, depois de a primeira
+/// passada já tê-lo lido. O piso reaplicado com a lista final recusa Config esvaziada, e nenhum
+/// manifest é publicado. O blob de `a.md`, já enviado, fica órfão: é o custo conhecido. (Um
+/// `settings.json` idêntico à ponta nem seria relido: a entrada dele continuaria na lista, ver
+/// o caso (vii).)
 #[tokio::test]
 async fn a_file_that_vanishes_during_the_send_still_cannot_publish_an_emptied_class() {
     let lab = lab(Hook::DeleteSettings).await;
+    fs::write(lab.config.join("settings.json"), b"{\"tema\":\"claro\"}").unwrap();
     add_first_vault_file(&lab);
     let stored_before = lab.stored();
 
