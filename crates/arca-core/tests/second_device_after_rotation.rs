@@ -460,7 +460,7 @@ async fn a_second_device_that_moves_from_epoch_one_to_the_new_key_receives_the_r
     assert_eq!(tip(&c).await.id, published.id);
 
     // ACHADO: o chamador real passaria o `from` que a pasta reflete (a ponta da época 1), mas
-    // hoje o `apply` abre o `from` com as chaves do engine (engine.rs:1271-1273, `read_manifest`)
+    // hoje o `apply` abre o `from` com as chaves do engine (`read_manifest`, antes do `load()`)
     // e o manifest da época 1 não abre com a chave nova: `WrongKeyEpoch`, nada é escrito. Quem
     // troca de chave tem de passar `from = None` (e então nada é removido: sem `from`, o que a
     // época 1 tinha e a 2 não tem não vira `Remove`).
@@ -545,8 +545,8 @@ async fn a_second_device_on_the_old_key_is_blocked_by_the_unknown_epoch_and_appl
             .map(|_| ()),
         Err(blocked.clone())
     );
-    // o manifest da época 2 em si nunca é aplicado: `apply` lê o `to` antes de olhar o estado
-    // (engine.rs:1275) e ele não está no armazenamento de `c` (engine.rs:651-655): `MissingObject`
+    // o manifest da época 2 em si nunca é aplicado: `apply` lê o `to` antes de olhar a pendência
+    // (`load()`), e `read_manifest` não o acha no armazenamento de `c`: `MissingObject`
     assert_eq!(
         old_c.apply(None, &published.id, &roots_c).await,
         Err(EngineError::MissingObject)
