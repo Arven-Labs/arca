@@ -1338,8 +1338,9 @@ impl<S: BlobStore> Engine<S> {
     /// `from = None`, e então: o que a época antiga tinha e a nova não tem **não** vira `Remove`;
     /// e tudo o que `to` lista é `Create`, de modo que um arquivo que já existe na pasta com texto
     /// diferente recusa o `apply` inteiro com `LocalChanges` (um igual conta como já aplicado).
-    /// Por isso o Warden tira um snapshot da pasta como ela está antes de trocar o ponteiro. O
-    /// erro não protege as remoções (quem passa `None` as perde do mesmo jeito): só obriga o
+    /// O Warden, na troca de chave, grava o ponteiro da pasta no 1º manifest da época nova
+    /// (`arca_replace_key`), então o `from` seguinte é `Some(esse manifest)` e um arquivo
+    /// existente vira `Update`, não `Create`. O erro não protege as remoções (quem passa `None` as perde do mesmo jeito): só obriga o
     /// chamador a escolher `None` de propósito.
     pub async fn apply(
         &self,
