@@ -1333,10 +1333,14 @@ impl<S: BlobStore> Engine<S> {
     /// deste `Engine`, então só recusa depois de um `pull` na mesma instância (um `Engine` novo
     /// sem `pull` ainda aplica) e, sem a trava do estado, um `pull` concorrente pode anotá-la
     /// depois de o `apply` passar do `load()`. `from` e `to` são abertos com as chaves **deste**
-    /// `Engine`: um `from` de outra época dá `WrongKeyEpoch` e nada é escrito. Quem troca de
-    /// época (`begin_epoch`, troca de chave) passa `from = None`, e então o que a época antiga
-    /// tinha e a nova não tem **não** vira `Remove` (sem a chave antiga não há como calcular o
-    /// diff). O erro é a catraca: tratar esse `from` como `None` esconderia as remoções perdidas.
+    /// `Engine`: um `from` de outra época dá `WrongKeyEpoch` e nada é escrito (o `apply` não abre
+    /// manifest de outra época). Quem troca de época (`begin_epoch`, troca de chave) passa
+    /// `from = None`, e então: o que a época antiga tinha e a nova não tem **não** vira `Remove`;
+    /// e tudo o que `to` lista é `Create`, de modo que um arquivo que já existe na pasta com texto
+    /// diferente recusa o `apply` inteiro com `LocalChanges` (um igual conta como já aplicado).
+    /// Por isso o Warden tira um snapshot da pasta como ela está antes de trocar o ponteiro. O
+    /// erro não protege as remoções (quem passa `None` as perde do mesmo jeito): só obriga o
+    /// chamador a escolher `None` de propósito.
     pub async fn apply(
         &self,
         from: Option<&ObjectId>,
