@@ -1332,7 +1332,16 @@ impl<S: BlobStore> Engine<S> {
     /// item 3 e atualização item 1). Limite: sem `with_state` a pendência vive só na memória
     /// deste `Engine`, então só recusa depois de um `pull` na mesma instância (um `Engine` novo
     /// sem `pull` ainda aplica) e, sem a trava do estado, um `pull` concorrente pode anotá-la
-    /// depois de o `apply` passar do `load()`.
+    /// depois de o `apply` passar do `load()`. `from` e `to` são abertos com as chaves **deste**
+    /// `Engine`: um `from` de outra época dá `WrongKeyEpoch` e nada é escrito (o `apply` não abre
+    /// manifest de outra época). Quem troca de época (`begin_epoch`, troca de chave) passa
+    /// `from = None`, e então: o que a época antiga tinha e a nova não tem **não** vira `Remove`;
+    /// e tudo o que `to` lista é `Create`, de modo que um arquivo que já existe na pasta com texto
+    /// diferente recusa o `apply` inteiro com `LocalChanges` (um igual conta como já aplicado).
+    /// O Warden, na troca de chave, grava o ponteiro da pasta no 1º manifest da época nova
+    /// (`arca_replace_key`), então o `from` seguinte é `Some(esse manifest)` e um arquivo
+    /// existente vira `Update`, não `Create`. O erro não protege as remoções (quem passa `None` as perde do mesmo jeito): só obriga o
+    /// chamador a escolher `None` de propósito.
     pub async fn apply(
         &self,
         from: Option<&ObjectId>,
