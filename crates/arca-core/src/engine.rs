@@ -1332,7 +1332,11 @@ impl<S: BlobStore> Engine<S> {
     /// item 3 e atualização item 1). Limite: sem `with_state` a pendência vive só na memória
     /// deste `Engine`, então só recusa depois de um `pull` na mesma instância (um `Engine` novo
     /// sem `pull` ainda aplica) e, sem a trava do estado, um `pull` concorrente pode anotá-la
-    /// depois de o `apply` passar do `load()`.
+    /// depois de o `apply` passar do `load()`. `from` e `to` são abertos com as chaves **deste**
+    /// `Engine`: um `from` de outra época dá `WrongKeyEpoch` e nada é escrito. Quem troca de
+    /// época (`begin_epoch`, troca de chave) passa `from = None`, e então o que a época antiga
+    /// tinha e a nova não tem **não** vira `Remove` (sem a chave antiga não há como calcular o
+    /// diff). O erro é a catraca: tratar esse `from` como `None` esconderia as remoções perdidas.
     pub async fn apply(
         &self,
         from: Option<&ObjectId>,
