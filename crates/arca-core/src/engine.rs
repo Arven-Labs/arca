@@ -1327,7 +1327,12 @@ impl<S: BlobStore> Engine<S> {
 
     /// Leva a pasta viva do estado `from` (o manifest que ela reflete; `None` = nenhum) ao de
     /// `to`: cria, atualiza e remove só o que difere, tudo ou nada. Recusa com `LocalChanges`
-    /// se um arquivo do diff já foi alterado no disco, sem escrever nada.
+    /// se um arquivo do diff já foi alterado no disco, sem escrever nada. Com época estrangeira
+    /// pendente (não reconhecida), recusa com `NeedsNewKey`, com ou sem `with_state` (ADR 0018
+    /// item 3 e atualização item 1). Limite: sem `with_state` a pendência vive só na memória
+    /// deste `Engine`, então só recusa depois de um `pull` na mesma instância (um `Engine` novo
+    /// sem `pull` ainda aplica) e, sem a trava do estado, um `pull` concorrente pode anotá-la
+    /// depois de o `apply` passar do `load()`.
     pub async fn apply(
         &self,
         from: Option<&ObjectId>,
@@ -1342,10 +1347,13 @@ impl<S: BlobStore> Engine<S> {
             None => None,
         };
         let to_manifest = self.read_manifest(to).await?;
+        // época estrangeira pendente recusa (`NeedsNewKey`) com ou sem estado (ADR 0018 item 3 e
+        // atualização item 1: sem estado a pendência vive na memória do `Engine`, então só vale
+        // depois de um `pull` nesta instância)
+        let loaded = self.load().await?;
         // adotar um manifest só vale se ele continua a história já aceita (voltar a uma versão
         // mais velha é `restore`)
         if let Some(state) = &state {
-            let loaded = self.load().await?;
             let Loaded { readable, .. } = self.with_accepted(loaded, Some(state)).await?;
             if !descends(state, &readable, to) {
                 return Err(EngineError::Rollback);

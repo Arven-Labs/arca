@@ -460,7 +460,7 @@ async fn a_second_device_that_moves_from_epoch_one_to_the_new_key_receives_the_r
     assert_eq!(tip(&c).await.id, published.id);
 
     // ACHADO: o chamador real passaria o `from` que a pasta reflete (a ponta da época 1), mas
-    // hoje o `apply` abre o `from` com as chaves do engine (engine.rs:1271-1273, `read_manifest`)
+    // hoje o `apply` abre o `from` com as chaves do engine (`read_manifest`, antes do `load()`)
     // e o manifest da época 1 não abre com a chave nova: `WrongKeyEpoch`, nada é escrito. Quem
     // troca de chave tem de passar `from = None` (e então nada é removido: sem `from`, o que a
     // época 1 tinha e a 2 não tem não vira `Remove`).
@@ -507,8 +507,8 @@ async fn a_second_device_that_moves_from_epoch_one_to_the_new_key_receives_the_r
 
 /// Caso 3: `c` ficou com a chave **velha** (época 1) e puxa depois da rotação. O manifest da época 2
 /// não é gravado, vira pendência (`foreign_epochs`, ADR 0018 itens 2 e 3) e bloqueia `heads`,
-/// `merge` e `snapshot` com `NeedsNewKey`; o `apply` também, **mas só porque `c` tem estado** (o
-/// `load()` do `apply` só roda com estado: ver o caso 3b). O manifest da época 2 nunca é aplicado
+/// `merge` e `snapshot` com `NeedsNewKey`; o `apply` também (com ou sem estado: ver o caso 3b).
+/// O manifest da época 2 nunca é aplicado
 /// com a chave velha (`MissingObject`: não está no armazenamento de `c`). A pendência sobrevive a
 /// reiniciar o engine (arquivo `<estado>.foreign`) e `acknowledge_foreign` a tira.
 #[tokio::test]
@@ -545,8 +545,8 @@ async fn a_second_device_on_the_old_key_is_blocked_by_the_unknown_epoch_and_appl
             .map(|_| ()),
         Err(blocked.clone())
     );
-    // o manifest da época 2 em si nunca é aplicado: `apply` lê o `to` antes de olhar o estado
-    // (engine.rs:1275) e ele não está no armazenamento de `c` (engine.rs:651-655): `MissingObject`
+    // o manifest da época 2 em si nunca é aplicado: `apply` lê o `to` antes de olhar a pendência
+    // (`load()`), e `read_manifest` não o acha no armazenamento de `c`: `MissingObject`
     assert_eq!(
         old_c.apply(None, &published.id, &roots_c).await,
         Err(EngineError::MissingObject)
@@ -601,13 +601,12 @@ async fn a_second_device_on_the_old_key_is_blocked_by_the_unknown_epoch_and_appl
 }
 
 /// Caso 3b: `c` com a chave velha **sem arquivo de estado** (`Engine::new` sem `with_state`), depois
-/// da rotação. `heads`, `merge` e `snapshot` dão `NeedsNewKey`, mas o `apply` da ponta da época 1
-/// **aplica**: o `load()` do `apply` só roda com estado (engine.rs:1278-1280).
-/// ACHADO: hoje: o `apply` sem estado não consulta as épocas estrangeiras (engine.rs:1278);
-/// diverge do ADR 0018 item 3 ("`apply` recusa com `NeedsNewKey`"), decisão do dono. O manifest
-/// da época 2, esse, continua inaplicável (`MissingObject`).
+/// da rotação. `heads`, `merge`, `snapshot` **e `apply`** dão `NeedsNewKey` enquanto a pendência
+/// (que vive só na memória do `Engine`) não é reconhecida, como manda o ADR 0018 item 3. Nada é
+/// escrito. Depois de `acknowledge_foreign` (em memória) o `apply` da ponta da época 1 aplica; o
+/// manifest da época 2 continua inaplicável (`MissingObject`: não está no armazenamento de `d`).
 #[tokio::test]
-async fn a_second_device_on_the_old_key_without_a_state_file_is_blocked_except_for_apply() {
+async fn a_second_device_on_the_old_key_without_a_state_file_is_blocked_for_apply_too() {
     let rig = rig().await;
     let published = rotate(&rig).await;
     let store_d = Backend::Disk(DiskStore::open(rig.tmp.0.join("d-store")).unwrap());
@@ -631,9 +630,25 @@ async fn a_second_device_on_the_old_key_without_a_state_file_is_blocked_except_f
     let blocked = EngineError::NeedsNewKey { have: 1, found: 2 };
     assert_eq!(d.heads().await.map(|_| ()), Err(blocked.clone()));
     assert_eq!(d.merge(8).await.map(|_| ()), Err(blocked.clone()));
-    assert_eq!(d.snapshot(&roots_d, 9).await.map(|_| ()), Err(blocked));
+    assert_eq!(
+        d.snapshot(&roots_d, 9).await.map(|_| ()),
+        Err(blocked.clone())
+    );
 
-    // hoje: o `apply` aplica o conteúdo da época 1 mesmo com a pendência (5 entradas de `b`)
+    // o `apply` também recusa, mesmo sem estado: a ponta da época 1 está no armazenamento e abre
+    // (não é `MissingObject`), então o `NeedsNewKey` vem da pendência. Nada é escrito
+    assert_eq!(
+        d.apply(None, &rig.old_tip.id, &roots_d).await.map(|_| ()),
+        Err(blocked)
+    );
+    for root in [&roots_d.vault, &roots_d.config, &roots_d.secret] {
+        assert!(is_empty_dir(root.as_ref().unwrap()));
+    }
+
+    // reconhecer o par (época, id) só na memória tira o bloqueio, e o `apply` da época 1 aplica
+    // as 5 entradas de `b`
+    d.acknowledge_foreign(&[pending]).await.unwrap();
+    assert!(d.foreign_epochs().await.unwrap().is_empty());
     assert_eq!(
         d.apply(None, &rig.old_tip.id, &roots_d).await,
         Ok(Applied {

@@ -2,6 +2,17 @@
 
 Mais recente no topo.
 
+### 2026-11-25 — Sessão 131 (P-49, rodada 6, equipe de 1 worker: `apply` sem arquivo de estado recusa com `NeedsNewKey`, §4; PR ainda NÃO mesclado)
+
+- **Pedido**: "prefiro multiagente, oq vc recomenda de código?" e "manda bala". Plan mode. Você escolheu só a T1 (1 worker), sem o 2º achado do `from` e sem a nota do `arca_replace_key`.
+- **PR**: [arca#211](https://github.com/Arven-Labs/arca/pull/211) (rascunho): `Engine::apply` chama `load()` sempre (antes só com estado), então época estrangeira pendente dá `NeedsNewKey` também sem `with_state`; `with_accepted`/`descends`/`Rollback` continuam só com estado. Corrige o achado (1) da Sessão 130 (T1); a linha daquela sessão que diz que o `apply` ignora a época continua como história.
+- **Controle**: PR #212 (só o teste do caso 3b invertido), run 45588240401 (`headSha` `30e9f56`), vermelho só em `a_second_device_on_the_old_key_without_a_state_file_is_blocked_for_apply_too` (`left: Ok(())`, `right: Err(NeedsNewKey{1,2})`); fechado e branch apagada. O PR da correção (`6fe1753`) ficou verde no run 45588236782; o commit de ajuste de texto tem o CI no corpo do PR.
+- **O que a revisão e a auditoria pegaram (o worker e o CI não)**: o doc do `apply` prometia "recusa com ou sem estado" sem dizer que a pendência sem estado só vive na instância do `Engine` que fez o `pull` (um `Engine` novo sem `pull` ainda aplica; sem o lock do estado um `pull` concorrente pode anotar depois do `load()`); âncoras `engine.rs:NNNN` obsoletas nos comentários do teste. Corrigidos só em texto.
+- **Limites que ficam**: `restore` não chama `load()` (coerente com o ADR 0018 item 3, que não o lista); o teto de 256 reconhecidos (`MAX_ACKS`) pode travar de forma permanente o `apply` de um `Engine` ligado direto a um backend hostil, sem estado (leitura, não executado; já valia com estado para `heads`/`snapshot`); o `apply` sem estado agora custa O(manifests) em download e decifragem (não medido; o Warden sempre usa `with_state`).
+- **Não verificado**: o Warden na versão atual do arca (ele fixa o `rev` `499628b`); a ordem `MissingObject` x `NeedsNewKey` sem estado com `to` ausente (sem teste); as execuções dos ~45 `apply` de `engine.rs` e do `s3_e2e.rs` (só o CI); sem controle medido contra sessão individual.
+
+---
+
 ### 2026-11-24 — Sessão 130 (P-49, rodada 5, equipe de 4 tarefas: 2º dispositivo, piso antes dos blobs, `arca_replace_key`, pausa do loop; PRs ainda NÃO mesclados)
 
 - **Pedido**: "prefiro equipe, vamos continuar no p49". Plan mode. Você escolheu as quatro frentes, 3 workers e **sem codegen** (`Remedy` novo, `VaultEmptied` e `.arb` ficam para quando você puder rodar FRB e gen-l10n).
