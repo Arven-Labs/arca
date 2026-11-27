@@ -16,7 +16,7 @@
 //! Vault). Cada teste afirma antes a **premissa** (o que o armazenamento tem, com que chave cada
 //! objeto abre, e por qual caminho o `begin_epoch` passa) e só depois o **resultado**.
 //!
-//! Resposta esperada, que o CI confirma (hipótese até lá):
+//! Resposta, confirmada no CI (run 46083349358):
 //! - (a) `legit_...` e `forged_...`: `begin_epoch(K2)` na 1ª tentativa dá `NeedsNewKey { have: 1,
 //!   found: 2 }` e nada é escrito, tanto para a rotação legítima de outro dispositivo (chave K2'
 //!   diferente da K2) quanto para um forjado: o veto não distingue os dois, e é isso que o
@@ -33,10 +33,16 @@
 //!   foi reconhecido para a rotação passar), o `snapshot` do `Engine` novo dá `Diverged { tips: 1,
 //!   rejected: 1 }`.
 //! - (d') O mesmo com o autor **legítimo** no lugar do forjado: `a` reconhece o manifest de época 2
-//!   de `b` (K2') e roda `begin_epoch(K2)`. Hipótese: passa, publica um 2º manifest de época 2 e o
-//!   `snapshot` seguinte dá `Diverged { tips: 1, rejected: 1 }`, a divisão em silêncio que o ADR
-//!   0018 (item 5) quer evitar. Só vale para "ignorar por cabeçalho": reconhecimento por faixa e
-//!   teto maior não são derrubados por este teste.
+//!   de `b` (K2') e roda `begin_epoch(K2)`. Confirmado no CI (run 46083349358): passa, publica um
+//!   2º manifest de época 2 e o `snapshot` seguinte dá `Diverged { tips: 1, rejected: 1 }`. É o
+//!   que acontece quando a pessoa reconhece e segue sobre um legítimo: o Vault se divide e o `a`
+//!   não consegue mais fazer `snapshot` enquanto o manifest de `b` existir (só apagá-lo fora da
+//!   API destrava). O veto do (a) existe para que essa escolha seja da pessoa; uma regra "ignorar
+//!   por cabeçalho" levaria ao mesmo split sem essa decisão, e o (a) é que ficaria vermelho. As
+//!   rotações simultâneas são detectadas, tarde, como `Diverged` no `snapshot` seguinte (o ADR
+//!   0018, item 5, diz que o núcleo não as detecta). Este teste não diz nada sobre reconhecimento
+//!   por faixa nem sobre um teto maior (uma faixa que cobrisse o manifest de `b` levaria ao mesmo
+//!   split com um reconhecimento).
 
 use arca_core::backend::Backend;
 use arca_core::disk::DiskStore;
@@ -362,8 +368,9 @@ const FORGED: usize = 257;
 /// retomada: só o `next.load()` roda, e nada veta. Um `self.load()` aqui vetaria já com 0 ou 1
 /// forjado, porque o próprio manifest publicado (época 2) é "mais novo" para as chaves velhas
 /// (premissa 2 afirma isso para o `Engine` velho); só o teto de 256 tornaria o veto irrecuperável
-/// (`forged_count + 1` > 256 com 257). Com 1 forjado o teto não entra: o caso isola "a retomada
-/// não chama `self.load()`".
+/// (`forged_count + 1` > 256 com 257). Com 1 forjado o teto não entra: o caso documenta que "a
+/// retomada não chama `self.load()`" e que a causa não é o teto (não é detector de mutação a mais,
+/// ver o teste com 1 forjado).
 async fn resuming_with_forged_epoch_2_objects_goes_through(with_state: bool, forged_count: usize) {
     let (lab, engine) = setup(with_state).await;
     let earlier = Engine::new(lab.store.clone(), old_keys(), "a").unwrap();
@@ -438,8 +445,10 @@ async fn with_state_resuming_with_257_forged_epoch_2_objects_goes_through() {
     resuming_with_forged_epoch_2_objects_goes_through(true, FORGED).await;
 }
 
-/// Isola o caminho do teto: com 1 forjado o `Engine` velho já está vetado (o manifest publicado
-/// basta) e a retomada passa, ou seja, ela não chama `self.load()`.
+/// Documenta a atribuição: com 1 forjado o `Engine` velho já está vetado (o manifest publicado
+/// basta) e a retomada passa, ou seja, ela não chama `self.load()` e a causa não é o teto. Não é
+/// um detector de mutação a mais: o caso de 257 já cai com qualquer mutação que faça a retomada
+/// chamar `self.load()`.
 #[tokio::test]
 async fn without_state_resuming_with_1_forged_epoch_2_object_goes_through_though_the_old_engine_is_vetoed(
 ) {
@@ -537,13 +546,18 @@ async fn with_state_one_forged_epoch_2_object_makes_the_snapshot_after_rotation_
 }
 
 /// (d') O autor **legítimo** no lugar do forjado: `b` rotacionou com K2'; `a` (K1) vê o manifest
-/// de época 2 dele, o reconhece (`acknowledge_foreign`) e roda `begin_epoch(K2)`. Hipótese: o
-/// reconhecimento tira o veto, a 1ª tentativa publica um 2º manifest de época 2 (com K2) ao lado
-/// do de `b` (K2'), e o `snapshot` seguinte dá `Diverged { tips: 1, rejected: 1 }`: o manifest de
-/// `b` é ilegível para K2. É a divisão em silêncio que o ADR 0018 (item 5) quer evitar; um
-/// `begin_epoch` que "ignorasse objeto de época igual por cabeçalho" chegaria aqui sem exigir o
-/// reconhecimento. A conclusão vale só para "ignorar por cabeçalho": reconhecimento por faixa e
-/// teto maior não são derrubados por este teste.
+/// de época 2 dele, o reconhece (`acknowledge_foreign`) e roda `begin_epoch(K2)`. Confirmado no CI
+/// (run 46083349358): o reconhecimento tira o veto, a 1ª tentativa publica um 2º manifest de época
+/// 2 (com K2) ao lado do de `b` (K2'), e o `snapshot` seguinte dá `Diverged { tips: 1, rejected:
+/// 1 }`, porque o manifest de `b` é ilegível para K2. É o que acontece quando a pessoa reconhece e
+/// segue sobre um legítimo: o Vault se divide e o `a` não consegue mais fazer `snapshot` enquanto
+/// o manifest de `b` existir (só apagá-lo fora da API destrava). O veto de (a) existe para que
+/// essa escolha seja da pessoa; um `begin_epoch` que "ignorasse objeto de época igual por
+/// cabeçalho" levaria ao mesmo split sem essa decisão, e (a) é que ficaria vermelho. Rotações
+/// simultâneas são detectadas, tarde, como `Diverged` no `snapshot` seguinte (o ADR 0018, item 5,
+/// diz que o núcleo não as detecta). A conclusão vale só para "ignorar por cabeçalho": este teste
+/// não diz nada sobre reconhecimento por faixa nem sobre um teto maior (uma faixa que cobrisse o
+/// manifest de `b` levaria ao mesmo split com um reconhecimento).
 async fn acknowledging_a_legitimate_rotation_then_rotating_splits_the_vault(with_state: bool) {
     let (lab, engine) = setup(with_state).await;
     let theirs = another_device_rotates(&lab).await;

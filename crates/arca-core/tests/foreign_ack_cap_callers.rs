@@ -16,7 +16,7 @@
 //! do teto, e não a outro erro). A operação ser vetada por `load()` (e não por outra checagem) é o
 //! que o 257 vs. 256 prova: só o número de forjados muda.
 //!
-//! Resposta esperada, que o CI confirma (hipótese até lá): os quatro testes passam. São
+//! Resposta, confirmada no CI (run 46083349358): os quatro testes passam. São
 //! caracterização do comportamento atual: ficam vermelhos no dia em que a operação deixar de
 //! chamar `load()` (o 257 deixa de vetar) ou em que o teto deixar de travar; é esse o sinal para
 //! atualizar o ADR 0018.
