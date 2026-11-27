@@ -539,21 +539,32 @@ mod tests {
     }
 
     /// O vencedor do conflito é decidido em ms: 1 ms de diferença basta, e a cópia leva o
-    /// selo do perdedor. Os dois lados caem no mesmo segundo.
+    /// selo do perdedor. Os dois lados caem no mesmo segundo. O mesmo conflito roda nas duas
+    /// orientações (cada manifest ora como `left`, ora como `right`, com ids diferentes): se o
+    /// desempate fosse em segundos, o id decidiria e uma das orientações elegeria o outro.
     #[test]
     fn a_one_millisecond_difference_decides_the_winner_of_a_conflict() {
-        let m = run(
-            &[v("a.md", 1)],
-            ("pc-a", 1_700_000_000_001, vec![v("a.md", 2)]),
-            ("pc-b", 1_700_000_000_000, vec![v("a.md", 3)]),
-        );
-        // pc-a (…001) fica no lugar; pc-b (…000) vira cópia
-        assert_eq!(m.files[0].sha256, h(2));
-        assert_eq!(m.conflicts[0].loser_device, "pc-b");
-        assert_eq!(
-            m.conflicts[0].copy_path.as_deref(),
-            Some("a.md.conflito-pc-b-20231114T221320Z.md")
-        );
+        let newer = || ("pc-a", 1_700_000_000_001, vec![v("a.md", 2)]);
+        let older = || ("pc-b", 1_700_000_000_000, vec![v("a.md", 3)]);
+        for (orientation, m) in [
+            ("pc-a em left", run(&[v("a.md", 1)], newer(), older())),
+            ("pc-a em right", run(&[v("a.md", 1)], older(), newer())),
+        ] {
+            // pc-a (…001) fica no lugar; pc-b (…000) vira cópia
+            assert_eq!(m.files[0].sha256, h(2), "{orientation}");
+            assert_eq!(m.conflicts[0].loser_device, "pc-b", "{orientation}");
+            assert_eq!(
+                m.conflicts[0].copy_path.as_deref(),
+                Some("a.md.conflito-pc-b-20231114T221320Z.md"),
+                "{orientation}"
+            );
+        }
+    }
+
+    /// Valor extremo que o parse do manifest aceita: o selo sai sem pânico.
+    #[test]
+    fn utc_stamp_does_not_panic_on_the_largest_created_at() {
+        assert!(!utc_stamp(u64::MAX).is_empty());
     }
 
     #[test]
