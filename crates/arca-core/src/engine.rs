@@ -805,24 +805,25 @@ impl<S: BlobStore> Engine<S> {
     /// tem perdedor gravado (P-37).
     pub async fn merge_with_losers(
         &self,
-        now: u64,
+        now_ms: u64,
         dir: &Path,
         roots: &Roots,
     ) -> Result<(MergeOutcome, SavedLosers), EngineError> {
-        self.merge_inner(now, Some((dir, roots))).await
+        self.merge_inner(now_ms, Some((dir, roots))).await
     }
 
     /// Funde as duas primeiras pontas (ordem `(counter, hash)`) num manifest de fusão
     /// (`SPEC-TECNICA.md` §7, ADR 0014). Uma chamada resolve um par; repetir até `tips_after`
     /// chegar a 1. Os perdedores de `config` e `secret` só voltam em `conflicts`, em memória:
-    /// quem os usa deve chamar `merge_with_losers`, que os grava antes do manifest.
-    pub async fn merge(&self, now: u64) -> Result<MergeOutcome, EngineError> {
-        Ok(self.merge_inner(now, None).await?.0)
+    /// quem os usa deve chamar `merge_with_losers`, que os grava antes do manifest. `now_ms` são
+    /// milissegundos Unix (UTC) e viram o `created_at` do manifest de fusão.
+    pub async fn merge(&self, now_ms: u64) -> Result<MergeOutcome, EngineError> {
+        Ok(self.merge_inner(now_ms, None).await?.0)
     }
 
     async fn merge_inner(
         &self,
-        now: u64,
+        now_ms: u64,
         losers_to: Option<(&Path, &Roots)>,
     ) -> Result<(MergeOutcome, SavedLosers), EngineError> {
         let mut saved = SavedLosers {
@@ -896,7 +897,7 @@ impl<S: BlobStore> Engine<S> {
                 .max(second.manifest.counter)
                 .saturating_add(1),
             device: self.device.clone(),
-            created_at: now,
+            created_at: now_ms,
             files: merged.files,
         };
         let sealed = manifest.seal(&self.keys)?;
@@ -923,9 +924,10 @@ impl<S: BlobStore> Engine<S> {
     }
 
     /// Fotografa as pastas de `roots` e grava o estado como um manifest novo (blobs primeiro,
-    /// manifest por último). `now` são segundos Unix (UTC), injetados para testes determinísticos.
-    pub async fn snapshot(&self, roots: &Roots, now: u64) -> Result<Snapshot, EngineError> {
-        self.snapshot_allowing_empty(roots, now, &[]).await
+    /// manifest por último). `now_ms` são milissegundos Unix (UTC), injetados para testes
+    /// determinísticos; vira o `created_at` do manifest.
+    pub async fn snapshot(&self, roots: &Roots, now_ms: u64) -> Result<Snapshot, EngineError> {
+        self.snapshot_allowing_empty(roots, now_ms, &[]).await
     }
 
     /// Como `snapshot`, mas as classes em `allow_empty` podem ficar sem nenhuma entrada (a
@@ -936,7 +938,7 @@ impl<S: BlobStore> Engine<S> {
     pub async fn snapshot_allowing_empty(
         &self,
         roots: &Roots,
-        now: u64,
+        now_ms: u64,
         allow_empty: &[Class],
     ) -> Result<Snapshot, EngineError> {
         let _state_lock = self.lock_state().await?;
@@ -962,7 +964,7 @@ impl<S: BlobStore> Engine<S> {
             });
         }
         let prev = heads.into_iter().next();
-        self.build_snapshot(prev, roots, now, allow_empty, None)
+        self.build_snapshot(prev, roots, now_ms, allow_empty, None)
             .await
     }
 
@@ -993,7 +995,7 @@ impl<S: BlobStore> Engine<S> {
         &self,
         prev: Option<Head>,
         roots: &Roots,
-        now: u64,
+        now_ms: u64,
         allow_empty: &[Class],
         old_tip: Option<(&Engine<S>, &Head)>,
     ) -> Result<Snapshot, EngineError> {
@@ -1169,7 +1171,7 @@ impl<S: BlobStore> Engine<S> {
                 .as_ref()
                 .map_or(1, |h| h.manifest.counter.saturating_add(1)),
             device: self.device.clone(),
-            created_at: now,
+            created_at: now_ms,
             files,
         };
         let sealed = manifest.seal(&self.keys)?;
@@ -1256,7 +1258,7 @@ impl<S: BlobStore> Engine<S> {
         &self,
         new_key: &VaultKey,
         roots: &Roots,
-        now: u64,
+        now_ms: u64,
     ) -> Result<(Engine<S>, Snapshot), EngineError>
     where
         S: Clone,
@@ -1321,7 +1323,9 @@ impl<S: BlobStore> Engine<S> {
             (heads.into_iter().next(), None)
         };
         let old_tip = old_tip.as_ref().map(|head| (self, head));
-        let snapshot = next.build_snapshot(prev, roots, now, &[], old_tip).await?;
+        let snapshot = next
+            .build_snapshot(prev, roots, now_ms, &[], old_tip)
+            .await?;
         Ok((next, snapshot))
     }
 
@@ -3195,16 +3199,17 @@ mod tests {
         let d = diverge(
             &[("a.md", b"1")],
             vec![
-                ("pa", 10, vec![("a.md", b"from-a")]),
-                ("pb", 20, vec![("a.md", b"from-b")]),
+                ("pa", 10_000, vec![("a.md", b"from-a")]),
+                ("pb", 20_000, vec![("a.md", b"from-b")]),
             ],
         )
         .await;
         let MergeOutcome::Merged { id, conflicts, .. } =
-            d.rig.engine("pc").merge(30).await.unwrap()
+            d.rig.engine("pc").merge(30_000).await.unwrap()
         else {
             panic!("esperava Merged");
         };
+        // `created_at` e `now` são milissegundos: o selo é o do perdedor (10 s)
         let copy = "a.md.conflito-pa-19700101T000010Z.md";
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].kind, ConflictKind::BothEdited);

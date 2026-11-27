@@ -112,7 +112,8 @@ pub struct Manifest {
     pub merged_from: Vec<Hash32>,
     pub counter: u64,
     pub device: String,
-    /// Segundos Unix (UTC).
+    /// Milissegundos Unix (UTC). Quem chama (`snapshot`, `merge`, `begin_epoch`) passa
+    /// milissegundos; o desempate de conflito compara `(created_at, id)`.
     pub created_at: u64,
     /// Em ordem estrita crescente de `path` (bytes).
     pub files: Vec<FileEntry>,

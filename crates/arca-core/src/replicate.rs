@@ -909,11 +909,11 @@ mod tests {
         write(&a.vault, "notas/partilhada.md", b"do A");
         write(&a.vault, "notas/so-a.md", b"so a");
         write(&a.config, "app.toml", b"tema = 'a'");
-        let tip_a = a.snapshot(10).await;
+        let tip_a = a.snapshot(10_000).await;
         write(&b.vault, "notas/partilhada.md", b"do B");
         write(&b.vault, "notas/so-b.md", b"so b");
         write(&b.config, "app.toml", b"tema = 'b'");
-        let tip_b = b.snapshot(20).await;
+        let tip_b = b.snapshot(20_000).await;
 
         // troca pelo remoto: cada um fica com duas pontas
         replicate(&a.local, &remote).await.unwrap();
