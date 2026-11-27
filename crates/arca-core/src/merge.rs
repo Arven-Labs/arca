@@ -128,8 +128,11 @@ pub fn merge_files(base: &[FileEntry], left: Side, right: Side) -> Result<Merged
         .copied()
         .collect();
     // quem leva o lugar num conflito: created_at maior, depois id maior (simétrico)
-    let left_wins =
-        (left.manifest.created_at, left.id.hash) > (right.manifest.created_at, right.id.hash);
+    let (lc, rc) = (
+        left.manifest.created_at / 1000,
+        right.manifest.created_at / 1000,
+    );
+    let left_wins = (lc, left.id.hash) > (rc, right.id.hash);
 
     let mut files: Vec<FileEntry> = Vec::new();
     let mut conflicts: Vec<Conflict> = Vec::new();
