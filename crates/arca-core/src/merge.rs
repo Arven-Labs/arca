@@ -443,10 +443,10 @@ mod tests {
     fn both_edited_in_the_vault_keeps_the_newer_in_place_and_a_conflict_copy_of_the_other() {
         let m = run(
             &[v("a.md", 1)],
-            ("pc-a", 200, vec![v("a.md", 2)]),
-            ("pc-b", 100, vec![v("a.md", 3)]),
+            ("pc-a", 200_000, vec![v("a.md", 2)]),
+            ("pc-b", 100_000, vec![v("a.md", 3)]),
         );
-        // o vencedor é o de created_at maior (200); o perdedor (100) vira cópia
+        // o vencedor é o de created_at maior (200 s, em ms); o perdedor (100 s) vira cópia
         let copy = "a.md.conflito-pc-b-19700101T000140Z.md";
         assert_eq!(
             paths(&m),
@@ -469,10 +469,11 @@ mod tests {
 
     #[test]
     fn the_conflict_copy_date_is_the_losers_created_at_in_utc() {
+        // `created_at` é em milissegundos Unix
         let m = run(
             &[v("a.md", 1)],
-            ("pc-a", 1_793_455_331, vec![v("a.md", 2)]),
-            ("pc-b", 1_793_455_332, vec![v("a.md", 3)]),
+            ("pc-a", 1_793_455_331_000, vec![v("a.md", 2)]),
+            ("pc-b", 1_793_455_332_000, vec![v("a.md", 3)]),
         );
         assert_eq!(
             m.conflicts[0].copy_path.as_deref(),
@@ -481,8 +482,8 @@ mod tests {
         // ano bissexto: 2000-02-29T00:00:00Z
         let m = run(
             &[v("a.md", 1)],
-            ("pc-a", 951_782_400, vec![v("a.md", 2)]),
-            ("pc-b", 951_782_401, vec![v("a.md", 3)]),
+            ("pc-a", 951_782_400_000, vec![v("a.md", 2)]),
+            ("pc-b", 951_782_401_000, vec![v("a.md", 3)]),
         );
         assert_eq!(
             m.conflicts[0].copy_path.as_deref(),
@@ -490,12 +491,76 @@ mod tests {
         );
     }
 
+    /// 1_700_000_000_000 ms = 2023-11-14T22:13:20Z. Lido como segundos, o mesmo valor daria um
+    /// ano de 5 dígitos (o selo do `.conflito-*` que o Warden, que passa ms, chegou a gravar).
+    #[test]
+    fn a_created_at_in_milliseconds_gives_a_four_digit_year_in_the_copy_name() {
+        let m = run(
+            &[v("a.md", 1)],
+            ("pc-a", 1_700_000_000_000, vec![v("a.md", 2)]),
+            ("pc-b", 1_700_000_005_000, vec![v("a.md", 3)]),
+        );
+        assert_eq!(
+            m.conflicts[0].copy_path.as_deref(),
+            Some("a.md.conflito-pc-a-20231114T221320Z.md")
+        );
+    }
+
+    /// Os milissegundos do perdedor são descartados (truncamento, não arredondamento): nada de
+    /// 22:13:21 para 22:13:20.999.
+    #[test]
+    fn the_milliseconds_of_the_loser_are_truncated_in_the_copy_name() {
+        let m = run(
+            &[v("a.md", 1)],
+            ("pc-a", 1_700_000_000_999, vec![v("a.md", 2)]),
+            ("pc-b", 1_700_000_002_000, vec![v("a.md", 3)]),
+        );
+        assert_eq!(
+            m.conflicts[0].copy_path.as_deref(),
+            Some("a.md.conflito-pc-a-20231114T221320Z.md")
+        );
+    }
+
+    /// `utc_stamp` direto, nas bordas de segundo e de dia (entrada em ms).
+    #[test]
+    fn utc_stamp_reads_milliseconds_at_the_second_and_day_edges() {
+        for (ms, expected) in [
+            (0, "19700101T000000Z"),
+            (999, "19700101T000000Z"),
+            (1_000, "19700101T000001Z"),
+            (86_399_999, "19700101T235959Z"),
+            (86_400_000, "19700102T000000Z"),
+            (1_700_000_000_000, "20231114T221320Z"),
+            (1_793_455_331_999, "20261031T140211Z"),
+        ] {
+            assert_eq!(utc_stamp(ms), expected, "{ms} ms");
+        }
+    }
+
+    /// O vencedor do conflito é decidido em ms: 1 ms de diferença basta, e a cópia leva o
+    /// selo do perdedor. Dois lados no mesmo segundo, valores que em segundos seriam iguais.
+    #[test]
+    fn a_one_millisecond_difference_decides_the_winner_of_a_conflict() {
+        let m = run(
+            &[v("a.md", 1)],
+            ("pc-a", 1_700_000_000_001, vec![v("a.md", 2)]),
+            ("pc-b", 1_700_000_000_000, vec![v("a.md", 3)]),
+        );
+        // pc-a (…001) fica no lugar; pc-b (…000) vira cópia
+        assert_eq!(m.files[0].sha256, h(2));
+        assert_eq!(m.conflicts[0].loser_device, "pc-b");
+        assert_eq!(
+            m.conflicts[0].copy_path.as_deref(),
+            Some("a.md.conflito-pc-b-20231114T221320Z.md")
+        );
+    }
+
     #[test]
     fn the_copy_goes_next_to_the_original_in_its_folder() {
         let m = run(
             &[v("notas/x.md", 1)],
-            ("pa", 20, vec![v("notas/x.md", 2)]),
-            ("pb", 10, vec![v("notas/x.md", 3)]),
+            ("pa", 20_000, vec![v("notas/x.md", 2)]),
+            ("pb", 10_000, vec![v("notas/x.md", 3)]),
         );
         assert_eq!(
             m.conflicts[0].copy_path.as_deref(),
@@ -508,8 +573,8 @@ mod tests {
     fn a_created_at_tie_is_broken_by_the_larger_manifest_id() {
         let m = run(
             &[v("a.md", 1)],
-            ("pa", 50, vec![v("a.md", 2)]),
-            ("pb", 50, vec![v("a.md", 3)]),
+            ("pa", 1_700_000_000_500, vec![v("a.md", 2)]),
+            ("pb", 1_700_000_000_500, vec![v("a.md", 3)]),
         );
         let left_wins = mid("left").hash > mid("right").hash;
         let (winner, loser_device) = if left_wins { (2, "pb") } else { (3, "pa") };
@@ -524,8 +589,8 @@ mod tests {
         let base = [v("a.md", 1), v(taken, 7), v(&upper, 8)];
         let m = run(
             &base,
-            ("pa", 20, vec![v("a.md", 2), v(taken, 7), v(&upper, 8)]),
-            ("pb", 10, vec![v("a.md", 3), v(taken, 7), v(&upper, 8)]),
+            ("pa", 20_000, vec![v("a.md", 2), v(taken, 7), v(&upper, 8)]),
+            ("pb", 10_000, vec![v("a.md", 3), v(taken, 7), v(&upper, 8)]),
         );
         assert_eq!(
             m.conflicts[0].copy_path.as_deref(),
@@ -551,8 +616,8 @@ mod tests {
     fn copy_of(name: &str, loser_device: &str) -> String {
         let m = run(
             &[v(name, 1)],
-            (loser_device, 10, vec![v(name, 2)]),
-            ("pb", 20, vec![v(name, 3)]),
+            (loser_device, 10_000, vec![v(name, 2)]),
+            ("pb", 20_000, vec![v(name, 3)]),
         );
         assert_eq!(m.conflicts.len(), 1);
         let copy = m.conflicts[0].copy_path.clone().expect("copy_path");
@@ -654,8 +719,8 @@ mod tests {
         assert_eq!(first.len(), 255);
         let m = run(
             &[v(&name, 1), v(&first, 7)],
-            (device.as_str(), 10, vec![v(&name, 2), v(&first, 7)]),
-            ("pb", 20, vec![v(&name, 3), v(&first, 7)]),
+            (device.as_str(), 10_000, vec![v(&name, 2), v(&first, 7)]),
+            ("pb", 20_000, vec![v(&name, 3), v(&first, 7)]),
         );
         let copy = m.conflicts[0].copy_path.clone().unwrap();
         assert_ne!(copy, first);

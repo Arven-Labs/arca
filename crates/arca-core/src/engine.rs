@@ -3195,16 +3195,17 @@ mod tests {
         let d = diverge(
             &[("a.md", b"1")],
             vec![
-                ("pa", 10, vec![("a.md", b"from-a")]),
-                ("pb", 20, vec![("a.md", b"from-b")]),
+                ("pa", 10_000, vec![("a.md", b"from-a")]),
+                ("pb", 20_000, vec![("a.md", b"from-b")]),
             ],
         )
         .await;
         let MergeOutcome::Merged { id, conflicts, .. } =
-            d.rig.engine("pc").merge(30).await.unwrap()
+            d.rig.engine("pc").merge(30_000).await.unwrap()
         else {
             panic!("esperava Merged");
         };
+        // `created_at` e `now` são milissegundos: o selo é o do perdedor (10 s)
         let copy = "a.md.conflito-pa-19700101T000010Z.md";
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].kind, ConflictKind::BothEdited);
