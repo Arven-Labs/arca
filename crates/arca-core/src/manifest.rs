@@ -566,7 +566,7 @@ mod tests {
             merged_from: vec![],
             counter: 17,
             device: "portatil-fabio".to_string(),
-            created_at: 1_793_455_331, // número qualquer: aqui só a serialização importa
+            created_at: 1_793_455_331, // 2026-10-31T14:02:11Z
             files: vec![FileEntry {
                 path: "memoria/projeto-x.md".to_string(),
                 class: Class::Vault,
