@@ -1290,7 +1290,7 @@ impl<S: BlobStore> Engine<S> {
         // (o guarda do `Mutex` cai no `;`, sem `await` entre ler e atribuir), e uma corrida
         // concorrente só pode fazer o `next` perder um reconhecimento (veta: fail-closed) ou um
         // pendente (volta no próximo `pull`).
-        let inherited = self.foreign_memory.lock().unwrap().clone();
+        let inherited = ForeignAcks::default();
         *next.foreign_memory.lock().unwrap() = inherited;
         ensure_not_interrupted(roots)?;
 
