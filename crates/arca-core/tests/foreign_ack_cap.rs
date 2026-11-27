@@ -1,38 +1,54 @@
 //! O teto de reconhecimentos (`MAX_ACKS` = 256, `foreign.rs`) contra um armazenamento hostil
 //! (P-49, Sessão 131, ADR 0018 "Ainda não corrigido, por escolha"). Pergunta: um `Engine` ligado
 //! **direto** a um backend que lista mais de 256 manifests de época mais nova, que ele não abre,
-//! fica travado para sempre? O `apply` agora chama `load()` sempre (arca#211), então ele entra na
-//! pergunta junto com `heads`, `merge` e `snapshot`.
+//! fica travado? O `apply` agora chama `load()` sempre (arca#211), então ele entra na pergunta
+//! junto com `heads`, `merge` e `snapshot`, e o `begin_epoch` (que chama `load()` duas vezes) também.
 //!
 //! Por que o teto é alcançável: `load()` lê **todos** os manifests do armazenamento do `Engine`
 //! (`scan_manifests`) e, para cada um de época maior que a das chaves, `unacknowledged` só o
 //! descarta se o par `(época, id)` está nos reconhecidos. `ForeignAcks::add` guarda no máximo 256
-//! pares e, ao passar disso, tira o mais antigo. Com 300 manifests estrangeiros, reconhecer os 300
-//! deixa 256 e **desreconhece 44**, que bloqueiam de novo; reconhecer esses 44 tira outros 44.
-//! Nada no `Engine` apaga objeto do armazenamento, então a saída não existe pela API do núcleo.
-//! (O `pull` não grava manifest estrangeiro na réplica; este teste é o caso do `Engine` **sem**
-//! réplica local, o limite que o ADR 0018 já registra em "Não validado".)
+//! pares e, ao passar disso, tira o mais antigo (descarte FIFO). Com 300 manifests estrangeiros,
+//! reconhecer os 300 deixa 256 e **desreconhece 44**, que bloqueiam de novo; reconhecer esses 44
+//! tira outros 44 (os mais antigos). Nada no `Engine` apaga objeto do armazenamento, então a saída
+//! não existe pela API do núcleo. (O `pull` não grava manifest estrangeiro na réplica; este teste
+//! é o caso do `Engine` **sem** réplica local, o limite que o ADR 0018 já registra em "Não
+//! validado". O caminho com réplica e `pull` não é testado aqui.)
+//!
+//! "Travado" vale só para as operações que chamam `load()`: `heads`, `merge`, `snapshot`, `apply`,
+//! `begin_epoch` e `conflicts_between`. `foreign_epochs`, `acknowledge_foreign`, `restore` e `pull`
+//! não chamam `load()` e seguem funcionando (o teste de 300 confere os quatro).
 //!
 //! Cenário: o dispositivo `a` (época 1, chave velha) publica um manifest legítimo com um arquivo
-//! de Vault. Um atacante grava no **mesmo** armazenamento N manifests de época 2, cifrados com uma
-//! chave que `a` não tem (ele também não precisa da chave certa: o cabeçalho em claro basta, ADR
-//! 0018). Cada teste afirma antes a **premissa** (o backend lista 1 + N manifests; os N têm id
-//! distinto, cabeçalho de época 2 e não abrem com as chaves de `a`; `a` os vê todos como
-//! estrangeiros não reconhecidos, o que prova que o `Engine` chegou ao caminho do teto) e só
-//! depois o **resultado**.
+//! de Vault. Um atacante grava no **mesmo** armazenamento N manifests de uma época maior, cifrados
+//! com uma chave que `a` não tem (ele também não precisa da chave certa: o cabeçalho em claro
+//! basta, ADR 0018). Cada teste afirma antes a **premissa** (o backend lista 1 + N manifests; os N
+//! têm id distinto, o cabeçalho da época forjada e não abrem nem com as chaves de `a` nem com as
+//! da época 2; `a` os vê todos como estrangeiros não reconhecidos, o que prova que o `Engine`
+//! chegou ao caminho do teto) e só depois o **resultado**.
 //!
-//! Resposta esperada, que o CI confirma: com mais de 256, `heads`, `merge`, `snapshot` e `apply`
-//! dão `NeedsNewKey { have: 1, found: 2 }` depois de qualquer número de reconhecimentos, com e sem
-//! `with_state` (e depois de reiniciar o `Engine`); com exatamente 256, um reconhecimento basta; com
-//! 257, sobra exatamente um não reconhecido, até alguém **apagar do backend** (fora da API do
-//! `Engine`) um dos objetos. Isto é caracterização do comportamento atual, não uma correção: os
-//! testes `..._stay_blocked_...` ficam vermelhos no dia em que o teto deixar de travar (por exemplo,
-//! `unacknowledged` passar a contar só o que cabe, ou o reconhecimento ganhar outra forma), e é
-//! esse o sinal para atualizar o ADR 0018.
+//! Resposta esperada, que o CI confirma:
+//! - Com mais de 256 forjados, `heads`, `merge`, `snapshot` e `apply` dão `NeedsNewKey { have: 1,
+//!   found: 2 }` depois de qualquer número de reconhecimentos, com e sem `with_state` (e depois de
+//!   reiniciar o `Engine`). O `begin_epoch` também: ele chama `load()` com as chaves **velhas**
+//!   (`engine.rs`, depois do `next.load()` com as novas), e um forjado de época 2 é "época mais
+//!   nova" para elas. A rotação, que é a remediação do T8, fica vetada.
+//! - Com exatamente 256, um reconhecimento basta, e o `begin_epoch` publica a época 2; os forjados
+//!   de época 2 passam a ser `rejected` do `Engine` novo (mesma época, não abrem), então o
+//!   `snapshot` seguinte dá `Diverged`.
+//! - Com 257, sobra exatamente um não reconhecido até alguém **apagar do backend** (fora da API do
+//!   `Engine`) um dos objetos.
+//! - Achado à parte (não é o teto): sem `with_state`, o `Engine` novo do `begin_epoch` nasce sem os
+//!   reconhecimentos do velho, então um **único** forjado de época 3 veta a rotação mesmo
+//!   reconhecido; com estado, o arquivo `<estado>.foreign` é compartilhado e a rotação passa.
+//!
+//! Isto é caracterização do comportamento atual, não uma correção: os testes
+//! `..._stay_blocked_...`, `..._257_...` e `..._vetoed_...` ficam vermelhos no dia em que o teto
+//! deixar de travar (por exemplo, `unacknowledged` passar a contar só o que cabe, ou o
+//! reconhecimento ganhar outra forma), e é esse o sinal para atualizar o ADR 0018.
 
 use arca_core::backend::Backend;
 use arca_core::disk::DiskStore;
-use arca_core::engine::{Applied, Engine, EngineError, ForeignEpoch, Roots, Snapshot};
+use arca_core::engine::{Applied, Engine, EngineError, ForeignEpoch, Restored, Roots, Snapshot};
 use arca_core::manifest::{Hash32, Manifest};
 use arca_core::state::DeviceState;
 use arca_core::store::BlobStore;
@@ -45,7 +61,8 @@ use std::path::PathBuf;
 /// 257 trava) são o que prova que é este o valor: se mudar, eles falham.
 const ACK_CAP: usize = 256;
 
-/// A época que o atacante grava: maior que a do dispositivo (1).
+/// A época que o atacante grava na maioria dos testes: maior que a do dispositivo (1) e igual à
+/// que a rotação vai criar.
 const FOREIGN_EPOCH: u32 = 2;
 
 /// Pasta única em `temp_dir()`, removida no `Drop` (o `testutil` do crate não é visível aqui).
@@ -72,12 +89,21 @@ fn old_keys() -> EpochKeys {
     EpochKeys::derive(&VaultKey::from_bytes([3u8; 32]), 1)
 }
 
-/// As chaves de quem forja: de outra `VaultKey`, na época 2. `a` nunca as tem.
-fn attacker_keys() -> EpochKeys {
-    EpochKeys::derive(&VaultKey::from_bytes([0xAA; 32]), FOREIGN_EPOCH)
+/// A chave que a rotação usa (`begin_epoch`).
+fn next_vault_key() -> VaultKey {
+    VaultKey::from_bytes([4u8; 32])
 }
 
-/// O erro que bloqueia: o dispositivo está na época 1 e o armazenamento mostra a 2.
+fn next_keys() -> EpochKeys {
+    EpochKeys::derive(&next_vault_key(), 2)
+}
+
+/// As chaves de quem forja: de outra `VaultKey`, na época pedida. `a` nunca as tem.
+fn attacker_keys(epoch: u32) -> EpochKeys {
+    EpochKeys::derive(&VaultKey::from_bytes([0xAA; 32]), epoch)
+}
+
+/// O erro que bloqueia o dispositivo da época 1 quando o armazenamento mostra a época 2.
 fn blocked() -> EngineError {
     EngineError::NeedsNewKey {
         have: 1,
@@ -107,6 +133,15 @@ impl Lab {
 
     fn state_path(&self) -> PathBuf {
         self.tmp.0.join("a-state")
+    }
+
+    async fn manifest_count(&self) -> usize {
+        self.store.list(ObjectKind::Manifest).await.unwrap().len()
+    }
+
+    async fn blob_ids(&self) -> HashSet<[u8; 32]> {
+        let blobs = self.store.list(ObjectKind::Blob).await.unwrap();
+        blobs.iter().map(|id| id.hash).collect()
     }
 }
 
@@ -162,15 +197,15 @@ async fn setup(with_state: bool) -> (Lab, Engine<Backend>) {
     (lab, engine)
 }
 
-/// O atacante grava `count` manifests da época 2 no armazenamento. Cada um é um manifest válido
+/// O atacante grava `count` manifests da `epoch` no armazenamento. Cada um é um manifest válido
 /// para quem tem a chave dele (corpo distinto: `counter` e nonce), com id distinto.
-async fn flood(store: &Backend, count: usize) -> Vec<ObjectId> {
-    let keys = attacker_keys();
+async fn flood(store: &Backend, count: usize, epoch: u32) -> Vec<ObjectId> {
+    let keys = attacker_keys(epoch);
     let mut ids = Vec::with_capacity(count);
     for n in 0..count as u64 {
         let manifest = Manifest {
             format_version: 1,
-            key_epoch: FOREIGN_EPOCH,
+            key_epoch: epoch,
             base_version: None,
             merged_from: Vec::new(),
             counter: n + 1,
@@ -186,12 +221,13 @@ async fn flood(store: &Backend, count: usize) -> Vec<ObjectId> {
 }
 
 /// A premissa: o backend lista o manifest de `a` e os `flood.len()` forjados; os forjados têm id
-/// distinto, cabeçalho de época 2 e **não abrem** com as chaves de `a`; e `a` os enxerga todos
-/// como estrangeiros não reconhecidos (é o que leva `load()` até o teto).
+/// distinto, cabeçalho da `epoch` e **não abrem** nem com as chaves de `a` nem com as da época 2;
+/// e `a` os enxerga todos como estrangeiros não reconhecidos (é o que leva `load()` até o teto).
 async fn assert_the_engine_reaches_the_cap_path(
     lab: &Lab,
     engine: &Engine<Backend>,
     flood: &[ObjectId],
+    epoch: u32,
 ) {
     let listed = lab.store.list(ObjectKind::Manifest).await.unwrap();
     assert_eq!(listed.len(), flood.len() + 1);
@@ -203,13 +239,14 @@ async fn assert_the_engine_reaches_the_cap_path(
         assert!(listed.contains(id));
         let bytes = lab.store.get(id).await.unwrap().unwrap();
         let (header, _) = Header::decode(&bytes).unwrap();
-        assert_eq!(header.key_epoch, FOREIGN_EPOCH);
+        assert_eq!(header.key_epoch, epoch);
         assert!(Manifest::open(&old_keys(), &bytes).is_err());
+        assert!(Manifest::open(&next_keys(), &bytes).is_err());
     }
     let seen = engine.foreign_epochs().await.unwrap();
     assert_eq!(seen.len(), flood.len());
     assert!(seen.iter().all(|f| distinct.contains(&f.id.hash)));
-    assert!(seen.iter().all(|f| f.epoch == FOREIGN_EPOCH));
+    assert!(seen.iter().all(|f| f.epoch == epoch));
 }
 
 /// `heads`, `merge`, `snapshot` e `apply` recusam, e nada é escrito.
@@ -233,6 +270,10 @@ async fn acknowledge_everything(engine: &Engine<Backend>) -> Vec<ForeignEpoch> {
     engine.foreign_epochs().await.unwrap()
 }
 
+fn hashes(list: &[ForeignEpoch]) -> HashSet<[u8; 32]> {
+    list.iter().map(|f| f.id.hash).collect()
+}
+
 /// O estado de `a` não andou (nada foi aceito além do manifest legítimo).
 fn assert_state_untouched(lab: &Lab) {
     if lab.with_state {
@@ -247,31 +288,34 @@ fn assert_state_untouched(lab: &Lab) {
 }
 
 /// 300 > 256: reconhecer não destrava, em nenhuma rodada, em lotes ou de uma vez, e (com estado) nem
-/// depois de reiniciar o `Engine`.
+/// depois de reiniciar o `Engine`. O que não chama `load()` segue funcionando.
 async fn above_the_cap_the_engine_stays_blocked(with_state: bool) {
     const FLOOD: usize = 300;
     const _: () = assert!(FLOOD > ACK_CAP);
     let (lab, engine) = setup(with_state).await;
-    let forged = flood(&lab.store, FLOOD).await;
+    let forged = flood(&lab.store, FLOOD, FOREIGN_EPOCH).await;
     let forged_hashes: HashSet<[u8; 32]> = forged.iter().map(|id| id.hash).collect();
-    assert_the_engine_reaches_the_cap_path(&lab, &engine, &forged).await;
+    assert_the_engine_reaches_the_cap_path(&lab, &engine, &forged, FOREIGN_EPOCH).await;
     assert_blocked(&lab, &engine).await;
 
     // rodada 1: reconhecer tudo, em lotes de 50 (o lote não muda o teto)
     for chunk in engine.foreign_epochs().await.unwrap().chunks(50) {
         engine.acknowledge_foreign(chunk).await.unwrap();
     }
-    let left = engine.foreign_epochs().await.unwrap();
-    assert_eq!(left.len(), FLOOD - ACK_CAP);
-    assert!(left.iter().all(|f| forged_hashes.contains(&f.id.hash)));
+    let mut previous = engine.foreign_epochs().await.unwrap();
+    assert_eq!(previous.len(), FLOOD - ACK_CAP);
+    assert!(hashes(&previous).is_subset(&forged_hashes));
     assert_blocked(&lab, &engine).await;
 
-    // rodadas 2 e 3: reconhecer o que sobrou desreconhece outros tantos
+    // rodadas 2 e 3: reconhecer o que sobrou desreconhece outros tantos, e **outros**: o que sai é
+    // o mais antigo (FIFO), então o conjunto que sobra não repete o da rodada anterior
     for _ in 0..2 {
         let left = acknowledge_everything(&engine).await;
         assert_eq!(left.len(), FLOOD - ACK_CAP);
-        assert!(left.iter().all(|f| forged_hashes.contains(&f.id.hash)));
+        assert!(hashes(&left).is_subset(&forged_hashes));
+        assert!(hashes(&left).is_disjoint(&hashes(&previous)));
         assert_blocked(&lab, &engine).await;
+        previous = left;
     }
 
     if with_state {
@@ -279,14 +323,39 @@ async fn above_the_cap_the_engine_stays_blocked(with_state: bool) {
         // reconhecidos estão em disco (`<estado>.foreign`) e os outros 44 continuam bloqueando
         let restarted = lab.engine();
         assert_eq!(
-            restarted.foreign_epochs().await.unwrap().len(),
-            FLOOD - ACK_CAP
+            hashes(&restarted.foreign_epochs().await.unwrap()),
+            hashes(&previous)
         );
         assert_blocked(&lab, &restarted).await;
         let left = acknowledge_everything(&restarted).await;
         assert_eq!(left.len(), FLOOD - ACK_CAP);
         assert_blocked(&lab, &restarted).await;
     }
+
+    // o que não chama `load()` segue funcionando: `foreign_epochs` e `acknowledge_foreign` (acima),
+    // `restore` e `pull`
+    let restored = Roots {
+        vault: Some(lab.tmp.0.join("restored")),
+        config: None,
+        secret: None,
+    };
+    assert_eq!(
+        engine.restore(&lab.own, &restored).await,
+        Ok(Restored { files: 1 })
+    );
+    assert_eq!(
+        fs::read(restored.vault.as_ref().unwrap().join("notas/diario.md")).unwrap(),
+        b"diario de a: 27 de novembro"
+    );
+    let remote = Backend::Disk(DiskStore::open(lab.tmp.0.join("remote")).unwrap());
+    let report = engine.pull(&remote).await.unwrap();
+    assert_eq!(report.copied, 0);
+    assert!(report.foreign_epochs.is_empty(), "{report:?}");
+    assert_blocked(&lab, &engine).await;
+
+    // nada foi escrito no armazenamento por nada disto
+    assert_eq!(lab.manifest_count().await, FLOOD + 1);
+    assert_eq!(lab.blob_ids().await.len(), 1);
     assert_state_untouched(&lab);
 }
 
@@ -300,12 +369,13 @@ async fn with_state_more_than_256_foreign_manifests_stay_blocked_even_after_a_re
     above_the_cap_the_engine_stays_blocked(true).await;
 }
 
-/// Controle da fronteira: com exatamente 256, um reconhecimento basta e tudo volta a funcionar.
-/// Sem isto, o teste de cima poderia estar vermelho por outro motivo que não o teto.
+/// Controle da fronteira: com exatamente 256, um reconhecimento basta e tudo volta a funcionar
+/// (com estado, também depois de reiniciar o `Engine`). Sem isto, o teste de cima poderia estar
+/// vermelho por outro motivo que não o teto.
 async fn at_the_cap_one_acknowledgement_unblocks(with_state: bool) {
     let (lab, engine) = setup(with_state).await;
-    let forged = flood(&lab.store, ACK_CAP).await;
-    assert_the_engine_reaches_the_cap_path(&lab, &engine, &forged).await;
+    let forged = flood(&lab.store, ACK_CAP, FOREIGN_EPOCH).await;
+    assert_the_engine_reaches_the_cap_path(&lab, &engine, &forged, FOREIGN_EPOCH).await;
     assert_blocked(&lab, &engine).await;
 
     assert!(acknowledge_everything(&engine).await.is_empty());
@@ -327,6 +397,14 @@ async fn at_the_cap_one_acknowledgement_unblocks(with_state: bool) {
         Snapshot::Unchanged { head, .. } => assert_eq!(head, lab.own),
         other => panic!("esperava Unchanged, veio {other:?}"),
     }
+    if with_state {
+        // o reconhecimento está em disco: um `Engine` novo também está livre
+        let restarted = lab.engine();
+        assert!(restarted.foreign_epochs().await.unwrap().is_empty());
+        let heads = restarted.heads().await.unwrap();
+        assert_eq!(heads.tips.len(), 1);
+        assert_eq!(heads.tips[0].id, lab.own);
+    }
     assert_state_untouched(&lab);
 }
 
@@ -345,8 +423,8 @@ async fn with_state_exactly_256_foreign_manifests_are_unblocked_by_one_acknowled
 /// no armazenamento, não do reconhecimento nem do estado.
 async fn one_past_the_cap_leaves_exactly_one_until_the_backend_drops_it(with_state: bool) {
     let (lab, engine) = setup(with_state).await;
-    let forged = flood(&lab.store, ACK_CAP + 1).await;
-    assert_the_engine_reaches_the_cap_path(&lab, &engine, &forged).await;
+    let forged = flood(&lab.store, ACK_CAP + 1, FOREIGN_EPOCH).await;
+    assert_the_engine_reaches_the_cap_path(&lab, &engine, &forged, FOREIGN_EPOCH).await;
     assert_blocked(&lab, &engine).await;
 
     let mut left = Vec::new();
@@ -354,6 +432,13 @@ async fn one_past_the_cap_leaves_exactly_one_until_the_backend_drops_it(with_sta
         left = acknowledge_everything(&engine).await;
         assert_eq!(left.len(), 1, "{left:?}");
         assert_blocked(&lab, &engine).await;
+    }
+
+    if with_state {
+        // reiniciar o app: o que sobrou é o mesmo, lido do arquivo, e continua bloqueando
+        let restarted = lab.engine();
+        assert_eq!(restarted.foreign_epochs().await.unwrap(), left);
+        assert_blocked(&lab, &restarted).await;
     }
 
     // o backend apaga o que sobrou: os 256 que restam já estão todos reconhecidos
@@ -382,4 +467,164 @@ async fn without_state_257_foreign_manifests_leave_one_blocking_until_the_backen
 #[tokio::test]
 async fn with_state_257_foreign_manifests_leave_one_blocking_until_the_backend_drops_it() {
     one_past_the_cap_leaves_exactly_one_until_the_backend_drops_it(true).await;
+}
+
+/// A rotação com 300 forjados **da época que ela vai criar** (a próxima época é previsível, ADR
+/// 0018 item 3). O `next.load()` do `begin_epoch` (chaves novas) passa, porque para elas o forjado é
+/// "da minha época, ilegível" (`rejected`). O `self.load()` (chaves velhas) é o que veta: para
+/// elas o forjado é "época mais nova não reconhecida", e com mais de 256 sempre sobra algum.
+async fn above_the_cap_begin_epoch_is_vetoed(with_state: bool) {
+    const FLOOD: usize = 300;
+    const _: () = assert!(FLOOD > ACK_CAP);
+    let (lab, engine) = setup(with_state).await;
+    let forged = flood(&lab.store, FLOOD, FOREIGN_EPOCH).await;
+    assert_the_engine_reaches_the_cap_path(&lab, &engine, &forged, FOREIGN_EPOCH).await;
+    let blobs = lab.blob_ids().await;
+    assert_eq!(blobs.len(), 1);
+
+    // sem reconhecer, e depois de reconhecer tudo (sobram 44): o mesmo veto
+    for round in 0..2 {
+        if round == 1 {
+            assert_eq!(acknowledge_everything(&engine).await.len(), FLOOD - ACK_CAP);
+        }
+        let outcome = engine
+            .begin_epoch(&next_vault_key(), &lab.roots, 30)
+            .await
+            .map(|_| ());
+        assert_eq!(outcome, Err(blocked()), "rodada {round}");
+    }
+
+    // nada foi publicado: nenhum manifest da época 2, nenhum blob novo, estado onde estava
+    assert_eq!(lab.manifest_count().await, FLOOD + 1);
+    assert_eq!(lab.blob_ids().await, blobs);
+    assert_state_untouched(&lab);
+}
+
+#[tokio::test]
+async fn without_state_more_than_256_forged_manifests_of_the_next_epoch_veto_begin_epoch() {
+    above_the_cap_begin_epoch_is_vetoed(false).await;
+}
+
+#[tokio::test]
+async fn with_state_more_than_256_forged_manifests_of_the_next_epoch_veto_begin_epoch() {
+    above_the_cap_begin_epoch_is_vetoed(true).await;
+}
+
+/// Controle: com exatamente 256 forjados de época 2, o `begin_epoch` é vetado até o reconhecimento
+/// e passa depois dele. A rotação publica a época 2 e os forjados ficam como `rejected` do `Engine`
+/// novo (mesma época, não abrem): o `snapshot` seguinte dá `Diverged`.
+async fn at_the_cap_begin_epoch_goes_through_after_one_acknowledgement(with_state: bool) {
+    let (lab, engine) = setup(with_state).await;
+    let forged = flood(&lab.store, ACK_CAP, FOREIGN_EPOCH).await;
+    assert_the_engine_reaches_the_cap_path(&lab, &engine, &forged, FOREIGN_EPOCH).await;
+    let outcome = engine
+        .begin_epoch(&next_vault_key(), &lab.roots, 30)
+        .await
+        .map(|_| ());
+    assert_eq!(outcome, Err(blocked()));
+    assert_eq!(lab.manifest_count().await, ACK_CAP + 1);
+
+    assert!(acknowledge_everything(&engine).await.is_empty());
+    let (next, snapshot) = engine
+        .begin_epoch(&next_vault_key(), &lab.roots, 31)
+        .await
+        .unwrap();
+    let Snapshot::Created {
+        id,
+        manifest,
+        new_blobs,
+        ..
+    } = snapshot
+    else {
+        panic!("esperava Created, veio {snapshot:?}");
+    };
+    assert_eq!(manifest.key_epoch, FOREIGN_EPOCH);
+    assert_eq!(manifest.base_version, None);
+    assert_eq!(manifest.counter, 1);
+    assert_eq!(manifest.files.len(), 1);
+    assert_eq!(new_blobs, 1);
+    assert_eq!(lab.manifest_count().await, ACK_CAP + 2);
+    if with_state {
+        assert_eq!(
+            DeviceState::load(&lab.state_path()).unwrap(),
+            Some(DeviceState {
+                key_epoch: FOREIGN_EPOCH,
+                last_accepted: Hash32(id.hash),
+            })
+        );
+    }
+
+    // para o `Engine` novo os 256 forjados são da época dele e não abrem: `rejected`, nunca ponta
+    let heads = next.heads().await.unwrap();
+    assert_eq!(heads.tips.len(), 1);
+    assert_eq!(heads.tips[0].id, id);
+    assert_eq!(heads.rejected.len(), ACK_CAP);
+    assert_eq!(
+        next.snapshot(&lab.roots, 32).await.map(|_| ()),
+        Err(EngineError::Diverged {
+            tips: 1,
+            rejected: ACK_CAP
+        })
+    );
+}
+
+#[tokio::test]
+async fn without_state_with_256_forged_manifests_of_the_next_epoch_begin_epoch_goes_through_once_acknowledged(
+) {
+    at_the_cap_begin_epoch_goes_through_after_one_acknowledgement(false).await;
+}
+
+#[tokio::test]
+async fn with_state_with_256_forged_manifests_of_the_next_epoch_begin_epoch_goes_through_once_acknowledged(
+) {
+    at_the_cap_begin_epoch_goes_through_after_one_acknowledgement(true).await;
+}
+
+/// Achado à parte, sem relação com o teto: **um** forjado de época 3 (uma acima da que a rotação
+/// cria), reconhecido. O `next.load()` do `begin_epoch` usa um `Engine` novo, e o que ele sabe dos
+/// reconhecimentos vem do arquivo de estado, se houver, ou da memória do `Engine` novo, que nasce
+/// vazia. Sem estado o reconhecimento feito no `Engine` velho não chega lá.
+async fn one_forged_manifest_of_a_later_epoch(with_state: bool) -> (Lab, Engine<Backend>) {
+    let (lab, engine) = setup(with_state).await;
+    let forged = flood(&lab.store, 1, 3).await;
+    assert_the_engine_reaches_the_cap_path(&lab, &engine, &forged, 3).await;
+    // a pessoa vê e reconhece o objeto: o `Engine` velho volta a operar
+    assert!(acknowledge_everything(&engine).await.is_empty());
+    let heads = engine.heads().await.unwrap();
+    assert_eq!(heads.tips.len(), 1);
+    assert_eq!(heads.tips[0].id, lab.own);
+    (lab, engine)
+}
+
+#[tokio::test]
+async fn without_state_one_acknowledged_forged_manifest_of_epoch_3_still_vetoes_begin_epoch() {
+    let (lab, engine) = one_forged_manifest_of_a_later_epoch(false).await;
+    for _ in 0..2 {
+        let outcome = engine
+            .begin_epoch(&next_vault_key(), &lab.roots, 30)
+            .await
+            .map(|_| ());
+        assert_eq!(outcome, Err(EngineError::NeedsNewKey { have: 2, found: 3 }));
+        // reconhecer de novo não muda nada: o `Engine` novo nasce sem os reconhecimentos
+        assert!(acknowledge_everything(&engine).await.is_empty());
+    }
+    assert_eq!(lab.manifest_count().await, 2);
+    assert_eq!(lab.blob_ids().await.len(), 1);
+}
+
+#[tokio::test]
+async fn with_state_one_acknowledged_forged_manifest_of_epoch_3_lets_begin_epoch_through() {
+    let (lab, engine) = one_forged_manifest_of_a_later_epoch(true).await;
+    let (next, snapshot) = engine
+        .begin_epoch(&next_vault_key(), &lab.roots, 30)
+        .await
+        .unwrap();
+    let Snapshot::Created { id, manifest, .. } = snapshot else {
+        panic!("esperava Created, veio {snapshot:?}");
+    };
+    assert_eq!(manifest.key_epoch, FOREIGN_EPOCH);
+    let heads = next.heads().await.unwrap();
+    assert_eq!(heads.tips.len(), 1);
+    assert_eq!(heads.tips[0].id, id);
+    assert!(heads.rejected.is_empty());
 }
