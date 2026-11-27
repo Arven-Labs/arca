@@ -537,7 +537,8 @@ impl<S: BlobStore> Engine<S> {
     /// `(época, id)` (ADR 0018). O consumidor deve mostrar a lista antes de chamar. Não apaga
     /// nada. Guarda os 256 mais recentes (passou, sai o mais antigo, que bloqueia de novo se
     /// ainda existir). Também tira do que está pendente (P-47b). Sem `with_state` o
-    /// reconhecimento vale só na memória deste `Engine`. Estado ocupado por outra operação: `Busy`.
+    /// reconhecimento vale só na memória deste `Engine` e é herdado pelo `Engine` novo do
+    /// `begin_epoch`. Estado ocupado por outra operação: `Busy`.
     pub async fn acknowledge_foreign(
         &self,
         acknowledged: &[ForeignEpoch],
@@ -1283,7 +1284,10 @@ impl<S: BlobStore> Engine<S> {
         // o `next` herda os do velho, senão um forjado de época 3 já reconhecido vetaria a
         // rotação. Só os reconhecidos: o pendente (visto pelo `pull`, não reconhecido) fica de
         // fora, e `drop_pending_up_to(u32::MAX)` o tira (nenhuma época passa de `u32::MAX`).
-        // Lido sob a trava do estado, e o guarda do `Mutex` cai no `;`, antes de qualquer `await`.
+        // Sem `with_state` não há trava (`lock_state` devolve `None`). O clone é um instante só
+        // (o guarda do `Mutex` cai no `;`, sem `await` entre ler e atribuir), e uma corrida
+        // concorrente só pode fazer o `next` perder um reconhecimento (veta: fail-closed) ou um
+        // pendente (volta no próximo `pull`).
         let mut inherited = self.foreign_memory.lock().unwrap().clone();
         inherited.drop_pending_up_to(u32::MAX);
         *next.foreign_memory.lock().unwrap() = inherited;
