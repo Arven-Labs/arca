@@ -616,8 +616,9 @@ async fn one_forged_manifest_of_a_later_epoch(with_state: bool) -> (Lab, Engine<
 async fn without_state_one_acknowledged_forged_manifest_of_epoch_3_is_inherited_and_lets_begin_epoch_through(
 ) {
     let (lab, engine) = one_forged_manifest_of_a_later_epoch(false).await;
-    // premissa: o único forjado já foi reconhecido no `Engine` velho (nada a reconhecer de novo)
-    assert!(acknowledge_everything(&engine).await.is_empty());
+    // premissa: o único forjado já foi reconhecido no `Engine` velho (nada a reconhecer de novo,
+    // conferido por `one_forged_manifest_of_a_later_epoch`)
+    assert!(engine.foreign_epochs().await.unwrap().is_empty());
     assert_eq!(lab.manifest_count().await, 2);
     assert_eq!(lab.blob_ids().await.len(), 1);
 
@@ -645,7 +646,8 @@ async fn without_state_one_acknowledged_forged_manifest_of_epoch_3_is_inherited_
     assert_eq!(heads.tips.len(), 1);
     assert_eq!(heads.tips[0].id, id);
     assert!(heads.rejected.is_empty());
-    assert!(acknowledge_everything(&next).await.is_empty());
+    // o reconhecimento chegou ao `Engine` novo: nada a reconhecer (só lê, não muda o `next`)
+    assert!(next.foreign_epochs().await.unwrap().is_empty());
 }
 
 #[tokio::test]

@@ -9,11 +9,10 @@
 //! - o reconhecimento é por `(época, id)`: um **segundo** forjado de época 3, de id diferente e
 //!   não reconhecido, continua vetando (a próxima época é previsível, e a rotação verdadeira, ou
 //!   outro forjado, tem id novo);
-//! - o que o `pull` apenas **anotou** como pendente (visto, não reconhecido) não vira reconhecido
-//!   ao passar para o `Engine` novo: a pendência continua vetando, e quem a vê é o `self.load()`
-//!   da primeira tentativa, com as chaves **velhas** (`have: 1`). Se o `next` herdasse a
-//!   pendência, o veto sairia já no `next.load()`, com `have: 2`; é essa diferença que o teste
-//!   olha.
+//! - o que o `pull` apenas **anotou** como pendente (visto, não reconhecido) é herdado como
+//!   pendente, nunca como reconhecido: a pendência continua vetando, já no `next.load()` (`have:
+//!   2`), com ou sem `with_state`. Na **retomada** (já existe manifest da época nova) só o
+//!   `next.load()` roda, e o veto do pendente só existe porque o `next` o herdou.
 //!
 //! Cada teste afirma antes a **premissa** (o que `foreign_epochs` mostra e o que o armazenamento
 //! lista) e só depois o **resultado**.
@@ -291,12 +290,14 @@ async fn a_new_forged_id_of_epoch_3_after_the_rotation_still_vetoes_the_new_engi
     );
 }
 
-/// O que o `pull` só **anotou** (pendente: visto, não reconhecido) não é herdado como
-/// reconhecido: a rotação continua vetada, pelo `self.load()` das chaves velhas (`have: 1`).
-/// Se o `next` herdasse a pendência, o veto viria do `next.load()` com `have: 2`. Depois de
-/// reconhecer, a pendência vira reconhecimento e a rotação passa.
+/// O que o `pull` só **anotou** (pendente: visto, não reconhecido) é herdado **como pendente**,
+/// nunca como reconhecido: a rotação continua vetada, e o veto sai do `next.load()` com as chaves
+/// novas (`have: 2`), como acontece com `with_state`, em que a pendência está no arquivo
+/// `<estado>.foreign` compartilhado. Se o `next` a descartasse, o veto viria do `self.load()` das
+/// chaves velhas, com `have: 1`. Depois de reconhecer, a pendência vira reconhecimento e a
+/// rotação passa.
 #[tokio::test]
-async fn a_pending_epoch_3_noted_by_pull_is_not_inherited_as_acknowledged() {
+async fn a_pending_epoch_3_noted_by_pull_is_inherited_and_still_vetoes_the_new_engine() {
     let (lab, engine) = setup(false).await;
     let remote = Backend::Disk(DiskStore::open(lab.tmp.0.join("remote")).unwrap());
     let forged = forge(&remote, FOREIGN_EPOCH, 1).await;
@@ -312,13 +313,7 @@ async fn a_pending_epoch_3_noted_by_pull_is_not_inherited_as_acknowledged() {
         .begin_epoch(&next_vault_key(), &lab.roots, 30)
         .await
         .map(|_| ());
-    assert_eq!(
-        outcome,
-        Err(EngineError::NeedsNewKey {
-            have: 1,
-            found: FOREIGN_EPOCH
-        })
-    );
+    assert_eq!(outcome, Err(blocked_by_next()));
     assert_eq!(lab.manifest_count().await, 1);
 
     engine
@@ -328,4 +323,45 @@ async fn a_pending_epoch_3_noted_by_pull_is_not_inherited_as_acknowledged() {
     assert!(engine.foreign_epochs().await.unwrap().is_empty());
     let (next, id) = rotate_ok(&lab, &engine).await;
     assert_next_is_healthy(&next, id).await;
+}
+
+/// **Retomada** sem estado: uma tentativa anterior já publicou o manifest da época 2 com a chave
+/// nova (`own` não vazio), então só o `next.load()` roda e o `self.load()` das chaves velhas não.
+/// Um pendente de época 3, anotado pelo `pull` depois, só veta se o `next` o herdou: com o
+/// descarte, nada vetaria e a rotação passaria. É o caso que distingue herdar de descartar sem
+/// depender da ordem dos dois `load()`. Reconhecido o pendente, a retomada passa.
+#[tokio::test]
+async fn without_state_a_resumed_begin_epoch_is_vetoed_by_a_pending_epoch_3_noted_by_pull() {
+    let (lab, engine) = setup(false).await;
+    // a tentativa anterior: publicou a época 2 (o `Engine` novo dela é descartado)
+    let (_previous_next, published) = rotate_ok(&lab, &engine).await;
+    // premissa: o armazenamento tem o manifest da época 1 e o da época 2 (`own` da retomada)
+    assert_eq!(lab.manifest_count().await, 2);
+    assert!(lab.store.has(&published).await.unwrap());
+
+    let remote = Backend::Disk(DiskStore::open(lab.tmp.0.join("remote")).unwrap());
+    let forged = forge(&remote, FOREIGN_EPOCH, 1).await;
+    let report = engine.pull(&remote).await.unwrap();
+    // premissa: o `pull` anotou o forjado de época 3 como pendente, sem gravá-lo
+    assert_eq!(report.foreign_epochs, foreign(&[forged]));
+    assert!(!lab.store.has(&forged).await.unwrap());
+    assert_eq!(lab.manifest_count().await, 2);
+    let pending = ForeignEpoch {
+        epoch: FOREIGN_EPOCH,
+        id: forged,
+    };
+    assert!(engine.foreign_epochs().await.unwrap().contains(&pending));
+
+    let outcome = engine
+        .begin_epoch(&next_vault_key(), &lab.roots, 31)
+        .await
+        .map(|_| ());
+    assert_eq!(outcome, Err(blocked_by_next()));
+    assert_eq!(lab.manifest_count().await, 2);
+
+    // reconhecido o pendente, a retomada passa (adota o manifest da época 2)
+    engine.acknowledge_foreign(&[pending]).await.unwrap();
+    let resumed = engine.begin_epoch(&next_vault_key(), &lab.roots, 32).await;
+    assert_eq!(resumed.as_ref().err(), None, "a retomada devia passar");
+    assert_eq!(lab.manifest_count().await, 2);
 }
