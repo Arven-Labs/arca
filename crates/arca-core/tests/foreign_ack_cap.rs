@@ -47,17 +47,18 @@
 //!   `snapshot` seguinte dá `Diverged`.
 //! - Com 257, sobra exatamente um não reconhecido até alguém **apagar do backend** (fora da API do
 //!   `Engine`) um dos objetos.
-//! - Achado à parte (não é o teto): sem `with_state`, o `Engine` novo do `begin_epoch` nasce sem os
-//!   reconhecimentos do velho, então um **único** forjado de época 3 veta a rotação mesmo
-//!   reconhecido; com estado, o arquivo `<estado>.foreign` é compartilhado e a rotação passa.
+//! - Achado à parte (não é o teto), **corrigido na rodada 9**: sem `with_state`, o `Engine` novo do
+//!   `begin_epoch` nascia sem os reconhecimentos do velho, e um **único** forjado de época 3 vetava
+//!   a rotação mesmo reconhecido. Agora o `Engine` novo herda os reconhecidos do velho (não os
+//!   pendentes) e a rotação passa, com e sem estado; o id novo de época 3 continua vetando (ver
+//!   `tests/begin_epoch_inherits_acks.rs`).
 //!
-//! Isto é caracterização do comportamento atual, não uma correção: os testes
+//! Isto é caracterização do comportamento atual, não uma correção, no que toca ao teto: os testes
 //! `..._stay_blocked_...`, `..._257_...` e `..._veto_begin_epoch` ficam vermelhos no dia em que o
 //! teto deixar de travar (por exemplo, `unacknowledged` passar a contar só o que cabe, ou o
 //! reconhecimento ganhar outra forma), e é esse o sinal para atualizar o ADR 0018. O teste
-//! `..._still_vetoes_begin_epoch` (época 3, sem estado) não é do teto: ele caracteriza um
-//! comportamento que o dono pode decidir **corrigir**; se ficar vermelho, é porque alguém o
-//! corrigiu (por exemplo, o `begin_epoch` passar os reconhecimentos ao `Engine` novo).
+//! `..._is_inherited_and_lets_begin_epoch_through` (época 3, sem estado) não é do teto: ele fixa a
+//! correção do achado à parte e fica vermelho se a herança dos reconhecimentos sumir.
 
 use arca_core::backend::Backend;
 use arca_core::disk::DiskStore;
@@ -597,8 +598,8 @@ async fn with_state_with_256_forged_manifests_of_the_next_epoch_begin_epoch_goes
 
 /// Achado à parte, sem relação com o teto: **um** forjado de época 3 (uma acima da que a rotação
 /// cria), reconhecido. O `next.load()` do `begin_epoch` usa um `Engine` novo, e o que ele sabe dos
-/// reconhecimentos vem do arquivo de estado, se houver, ou da memória do `Engine` novo, que nasce
-/// vazia. Sem estado o reconhecimento feito no `Engine` velho não chega lá.
+/// reconhecimentos vem do arquivo de estado, se houver, ou da memória do `Engine` novo, que herda
+/// os reconhecidos do velho (antes nascia vazia e o reconhecimento não chegava lá).
 async fn one_forged_manifest_of_a_later_epoch(with_state: bool) -> (Lab, Engine<Backend>) {
     let (lab, engine) = setup(with_state).await;
     let forged = flood(&lab.store, 1, 3).await;
@@ -612,22 +613,39 @@ async fn one_forged_manifest_of_a_later_epoch(with_state: bool) -> (Lab, Engine<
 }
 
 #[tokio::test]
-async fn without_state_one_acknowledged_forged_manifest_of_epoch_3_still_vetoes_begin_epoch() {
+async fn without_state_one_acknowledged_forged_manifest_of_epoch_3_is_inherited_and_lets_begin_epoch_through(
+) {
     let (lab, engine) = one_forged_manifest_of_a_later_epoch(false).await;
-    for _ in 0..2 {
-        let outcome = engine
-            .begin_epoch(&next_vault_key(), &lab.roots, 30)
-            .await
-            .map(|_| ());
-        assert_eq!(outcome, Err(EngineError::NeedsNewKey { have: 2, found: 3 }));
-        // não há o que reconhecer de novo: `one_forged_manifest_of_a_later_epoch` já reconheceu o
-        // único forjado, então `foreign_epochs` vem vazia e esta chamada não faz nada. O que
-        // vale é a 2ª tentativa dar o mesmo erro: o `Engine` novo do `begin_epoch` nasce sem os
-        // reconhecimentos do velho
-        assert!(acknowledge_everything(&engine).await.is_empty());
-    }
+    // premissa: o único forjado já foi reconhecido no `Engine` velho (nada a reconhecer de novo)
+    assert!(acknowledge_everything(&engine).await.is_empty());
     assert_eq!(lab.manifest_count().await, 2);
     assert_eq!(lab.blob_ids().await.len(), 1);
+
+    // o `Engine` novo do `begin_epoch` herda o reconhecimento (antes: `NeedsNewKey { have: 2,
+    // found: 3 }`), então o forjado de época 3 não veta a rotação
+    let outcome = engine.begin_epoch(&next_vault_key(), &lab.roots, 30).await;
+    assert_eq!(outcome.as_ref().err(), None, "a rotação devia passar");
+    let (next, snapshot) = outcome.unwrap();
+    let Snapshot::Created {
+        id,
+        manifest,
+        new_blobs,
+        ..
+    } = snapshot
+    else {
+        panic!("esperava Created, veio {snapshot:?}");
+    };
+    assert_eq!(manifest.key_epoch, FOREIGN_EPOCH);
+    assert_eq!(new_blobs, 1);
+    // o manifest novo entrou e o blob do arquivo foi recifrado com a chave nova
+    assert_eq!(lab.manifest_count().await, 3);
+    assert_eq!(lab.blob_ids().await.len(), 2);
+    // o forjado reconhecido não vira ponta nem rejeitado para o `Engine` novo, e nada bloqueia
+    let heads = next.heads().await.unwrap();
+    assert_eq!(heads.tips.len(), 1);
+    assert_eq!(heads.tips[0].id, id);
+    assert!(heads.rejected.is_empty());
+    assert!(acknowledge_everything(&next).await.is_empty());
 }
 
 #[tokio::test]

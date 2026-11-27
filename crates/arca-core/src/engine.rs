@@ -359,7 +359,8 @@ pub struct Engine<S> {
     /// Filtros de arquivos locais por classe (`with_scan_filter`).
     scan_filters: Vec<(Class, ScanFilter)>,
     /// Pendentes e reconhecidos **sem** `with_state` (ADR 0018, P-47b): vivem só neste
-    /// `Engine`. Com estado, o arquivo `<estado>.foreign` é a fonte e isto não é usado.
+    /// `Engine`. Com estado, o arquivo `<estado>.foreign` é a fonte e isto não é usado. O `Engine`
+    /// novo do `begin_epoch` herda os **reconhecidos** do velho, não os pendentes.
     foreign_memory: Mutex<ForeignAcks>,
     /// Cache negativo do `pull`: manifests de outra época já classificados (só memória, com teto).
     foreign_seen: Mutex<Seen>,
@@ -1253,7 +1254,10 @@ impl<S: BlobStore> Engine<S> {
     /// rotaciona sem estado). `allow_empty` não
     /// existe aqui: uma classe esvaziada de propósito não tem saída (limite conhecido). O
     /// `Engine` antigo não deve mais ser usado depois do sucesso (ele vê a época nova como
-    /// `NeedsNewKey`).
+    /// `NeedsNewKey`). **Reconhecimentos:** o `Engine` novo herda os **reconhecidos**
+    /// (`acknowledge_foreign`) do velho, também sem `with_state` (onde vivem só na memória); os
+    /// pendentes do `pull` não são herdados e o reconhecimento segue por `(época, id)`, então um
+    /// id novo de época mais nova ainda veta.
     pub async fn begin_epoch(
         &self,
         new_key: &VaultKey,
