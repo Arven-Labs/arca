@@ -1275,6 +1275,14 @@ impl<S: BlobStore> Engine<S> {
         };
         // uma trava só: pedi-la de novo (pelo `snapshot` do `next`) daria `Busy` contra mim mesmo
         let _state_lock = self.lock_state().await?;
+        // Sem `with_state` os reconhecimentos vivem só na memória do `Engine` (ADR 0018, item 5):
+        // o `next` herda os do velho, senão um forjado de época 3 já reconhecido vetaria a
+        // rotação. Só os reconhecidos: o pendente (visto pelo `pull`, não reconhecido) fica de
+        // fora, e `drop_pending_up_to(u32::MAX)` o tira (nenhuma época passa de `u32::MAX`).
+        // Lido sob a trava do estado, e o guarda do `Mutex` cai no `;`, antes de qualquer `await`.
+        let mut inherited = self.foreign_memory.lock().unwrap().clone();
+        inherited.drop_pending_up_to(u32::MAX);
+        *next.foreign_memory.lock().unwrap() = inherited;
         ensure_not_interrupted(roots)?;
 
         // manifests da época nova que abrem com a chave nova (tentativa anterior que caiu)
