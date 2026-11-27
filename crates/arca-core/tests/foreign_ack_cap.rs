@@ -2,7 +2,8 @@
 //! (P-49, Sessão 131, ADR 0018 "Ainda não corrigido, por escolha"). Pergunta: um `Engine` ligado
 //! **direto** a um backend que lista mais de 256 manifests de época mais nova, que ele não abre,
 //! fica travado? O `apply` agora chama `load()` sempre (arca#211), então ele entra na pergunta
-//! junto com `heads`, `merge` e `snapshot`, e o `begin_epoch` (que chama `load()` duas vezes) também.
+//! junto com `heads`, `merge` e `snapshot`, e o `begin_epoch` também (ele chama `load()` com as
+//! chaves novas e, **só na primeira tentativa**, de novo com as velhas; ver abaixo).
 //!
 //! Por que o teto é alcançável: `load()` lê **todos** os manifests do armazenamento do `Engine`
 //! (`scan_manifests`) e, para cada um de época maior que a das chaves, `unacknowledged` só o
@@ -14,9 +15,18 @@
 //! é o caso do `Engine` **sem** réplica local, o limite que o ADR 0018 já registra em "Não
 //! validado". O caminho com réplica e `pull` não é testado aqui.)
 //!
-//! "Travado" vale só para as operações que chamam `load()`: `heads`, `merge`, `snapshot`, `apply`,
-//! `begin_epoch` e `conflicts_between`. `foreign_epochs`, `acknowledge_foreign`, `restore` e `pull`
-//! não chamam `load()` e seguem funcionando (o teste de 300 confere os quatro).
+//! "Travado" vale só para as operações que chamam `load()` (conferido por `grep` em `engine.rs` e
+//! `engine/verify.rs`): `heads`, `verify` (`verify.rs`), `conflicts_between`, `merge` e
+//! `merge_with_losers` (ambos por `merge_inner`), `snapshot` e `snapshot_allowing_empty`, `apply` e
+//! `begin_epoch`. `foreign_epochs`, `acknowledge_foreign`, `restore` e `pull` não chamam `load()` e
+//! seguem funcionando (o teste de 300 confere os quatro; `verify`, `merge_with_losers`,
+//! `snapshot_allowing_empty` e `conflicts_between` não são chamados aqui, a lista deles é por leitura).
+//!
+//! O `begin_epoch` tem dois `load()`: o `next.load()` (chaves novas), que roda sempre, e o
+//! `self.load()` (chaves velhas), que só roda na **primeira tentativa** (`own.is_empty()`, sem
+//! manifest da época nova). Na **retomada** só o `next.load()` roda, e o veto de >256 forjados de
+//! época 2 (que vem do `self.load()`) não se aplica. **Nenhum teste aqui fixa a retomada**: não
+//! verificado.
 //!
 //! Cenário: o dispositivo `a` (época 1, chave velha) publica um manifest legítimo com um arquivo
 //! de Vault. Um atacante grava no **mesmo** armazenamento N manifests de uma época maior, cifrados
@@ -29,9 +39,9 @@
 //! Resposta esperada, que o CI confirma:
 //! - Com mais de 256 forjados, `heads`, `merge`, `snapshot` e `apply` dão `NeedsNewKey { have: 1,
 //!   found: 2 }` depois de qualquer número de reconhecimentos, com e sem `with_state` (e depois de
-//!   reiniciar o `Engine`). O `begin_epoch` também: ele chama `load()` com as chaves **velhas**
-//!   (`engine.rs`, depois do `next.load()` com as novas), e um forjado de época 2 é "época mais
-//!   nova" para elas. A rotação, que é a remediação do T8, fica vetada.
+//!   reiniciar o `Engine`). O `begin_epoch` também, na primeira tentativa: ele chama `load()` com as
+//!   chaves **velhas** (`engine.rs`, depois do `next.load()` com as novas), e um forjado de época 2
+//!   é "época mais nova" para elas. A rotação, que é a remediação do T8, fica vetada.
 //! - Com exatamente 256, um reconhecimento basta, e o `begin_epoch` publica a época 2; os forjados
 //!   de época 2 passam a ser `rejected` do `Engine` novo (mesma época, não abrem), então o
 //!   `snapshot` seguinte dá `Diverged`.
@@ -42,9 +52,12 @@
 //!   reconhecido; com estado, o arquivo `<estado>.foreign` é compartilhado e a rotação passa.
 //!
 //! Isto é caracterização do comportamento atual, não uma correção: os testes
-//! `..._stay_blocked_...`, `..._257_...` e `..._vetoed_...` ficam vermelhos no dia em que o teto
-//! deixar de travar (por exemplo, `unacknowledged` passar a contar só o que cabe, ou o
-//! reconhecimento ganhar outra forma), e é esse o sinal para atualizar o ADR 0018.
+//! `..._stay_blocked_...`, `..._257_...` e `..._veto_begin_epoch` ficam vermelhos no dia em que o
+//! teto deixar de travar (por exemplo, `unacknowledged` passar a contar só o que cabe, ou o
+//! reconhecimento ganhar outra forma), e é esse o sinal para atualizar o ADR 0018. O teste
+//! `..._still_vetoes_begin_epoch` (época 3, sem estado) não é do teto: ele caracteriza um
+//! comportamento que o dono pode decidir **corrigir**; se ficar vermelho, é porque alguém o
+//! corrigiu (por exemplo, o `begin_epoch` passar os reconhecimentos ao `Engine` novo).
 
 use arca_core::backend::Backend;
 use arca_core::disk::DiskStore;
@@ -472,7 +485,9 @@ async fn with_state_257_foreign_manifests_leave_one_blocking_until_the_backend_d
 /// A rotação com 300 forjados **da época que ela vai criar** (a próxima época é previsível, ADR
 /// 0018 item 3). O `next.load()` do `begin_epoch` (chaves novas) passa, porque para elas o forjado é
 /// "da minha época, ilegível" (`rejected`). O `self.load()` (chaves velhas) é o que veta: para
-/// elas o forjado é "época mais nova não reconhecida", e com mais de 256 sempre sobra algum.
+/// elas o forjado é "época mais nova não reconhecida", e com mais de 256 sempre sobra algum. Esse
+/// 2º `load()` só roda na primeira tentativa (sem manifest da época nova), que é o caso aqui; a
+/// retomada não é testada.
 async fn above_the_cap_begin_epoch_is_vetoed(with_state: bool) {
     const FLOOD: usize = 300;
     const _: () = assert!(FLOOD > ACK_CAP);
@@ -605,7 +620,10 @@ async fn without_state_one_acknowledged_forged_manifest_of_epoch_3_still_vetoes_
             .await
             .map(|_| ());
         assert_eq!(outcome, Err(EngineError::NeedsNewKey { have: 2, found: 3 }));
-        // reconhecer de novo não muda nada: o `Engine` novo nasce sem os reconhecimentos
+        // não há o que reconhecer de novo: `one_forged_manifest_of_a_later_epoch` já reconheceu o
+        // único forjado, então `foreign_epochs` vem vazia e esta chamada não faz nada. O que
+        // vale é a 2ª tentativa dar o mesmo erro: o `Engine` novo do `begin_epoch` nasce sem os
+        // reconhecimentos do velho
         assert!(acknowledge_everything(&engine).await.is_empty());
     }
     assert_eq!(lab.manifest_count().await, 2);
