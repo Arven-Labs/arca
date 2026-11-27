@@ -5,9 +5,10 @@
 //! rotacionou; os testes (a) e (b) fixam o que uma correção futura teria de manter e o que ela
 //! mudaria.
 //!
-//! O cabeçalho de um manifest de época nova **não é autenticado** (só o corpo é, pela chave): para
-//! quem não tem a chave, "rotação feita por outro dispositivo com outra chave" e "manifest forjado
-//! de época 2" são o mesmo objeto. O `begin_epoch`, na **primeira tentativa** (`next.load()` das
+//! O cabeçalho de um manifest é autenticado (é o AAD da cifra, `crypto.rs`), mas só **quem tem a
+//! chave** consegue verificá-lo. Quem não a tem lê a época em claro, como dica que não consegue
+//! autenticar: "rotação feita por outro dispositivo com outra chave" e "manifest forjado de época
+//! 2" são, para ele, o mesmo objeto. O `begin_epoch`, na **primeira tentativa** (`next.load()` das
 //! chaves novas não acha manifest dele, `own` vazio), faz `self.load()` com as chaves **velhas**, e
 //! para elas qualquer objeto de época 2 não reconhecido é "época mais nova": `NeedsNewKey`.
 //!
@@ -21,12 +22,21 @@
 //!   diferente da K2) quanto para um forjado: o veto não distingue os dois, e é isso que o
 //!   contrato exige. Uma correção que ignore época igual à que cria faria **os dois** passarem
 //!   (publicariam um 2º manifest de época 2, com K2, ao lado do de K2'): ficam vermelhos.
-//! - (b) Retomada com 257 forjados de época 2 **e** um manifest de época 2 que abre com a chave
-//!   nova: passa (`Unchanged`), porque só o `next.load()` roda. O controle (mesmos 257 forjados,
-//!   sem o manifest da tentativa anterior) dá `NeedsNewKey`.
+//! - (b) Retomada com forjados de época 2 **e** um manifest de época 2 que abre com a chave nova:
+//!   passa (`Unchanged`), porque só o `next.load()` roda. O veto de um `self.load()` na retomada
+//!   viria já com 0 ou 1 forjado, porque o próprio manifest publicado (época 2) é "mais novo" para
+//!   as chaves velhas; os 257 só o tornam irrecuperável (257 + 1 > `MAX_ACKS`). Por isso há o caso
+//!   com 1 forjado (o `Engine` velho está vetado e a retomada passa: a retomada não chama
+//!   `self.load()`, sem depender do teto) e o com 257. O controle (257 forjados sem o manifest da
+//!   tentativa anterior) dá `NeedsNewKey`.
 //! - (d) Depois de uma rotação bem-sucedida com **um** forjado de época 2 no armazenamento (que
 //!   foi reconhecido para a rotação passar), o `snapshot` do `Engine` novo dá `Diverged { tips: 1,
 //!   rejected: 1 }`.
+//! - (d') O mesmo com o autor **legítimo** no lugar do forjado: `a` reconhece o manifest de época 2
+//!   de `b` (K2') e roda `begin_epoch(K2)`. Hipótese: passa, publica um 2º manifest de época 2 e o
+//!   `snapshot` seguinte dá `Diverged { tips: 1, rejected: 1 }`, a divisão em silêncio que o ADR
+//!   0018 (item 5) quer evitar. Só vale para "ignorar por cabeçalho": reconhecimento por faixa e
+//!   teto maior não são derrubados por este teste.
 
 use arca_core::backend::Backend;
 use arca_core::disk::DiskStore;
@@ -348,9 +358,13 @@ const FORGED: usize = 257;
 
 /// (b) Retomada: uma tentativa anterior de `a` com K2 publicou o manifest de época 2 e caiu antes
 /// de gravar o estado (simulada por um `Engine` sem estado, que o `begin_epoch` não grava), e
-/// depois 257 forjados de época 2 foram gravados. O `begin_epoch(K2)` toma o caminho da retomada:
-/// só o `next.load()` roda, e os 257 não vetam.
-async fn resuming_with_257_forged_epoch_2_objects_goes_through(with_state: bool) {
+/// depois `forged_count` forjados de época 2 foram gravados. O `begin_epoch(K2)` toma o caminho da
+/// retomada: só o `next.load()` roda, e nada veta. Um `self.load()` aqui vetaria já com 0 ou 1
+/// forjado, porque o próprio manifest publicado (época 2) é "mais novo" para as chaves velhas
+/// (premissa 2 afirma isso para o `Engine` velho); só o teto de 256 tornaria o veto irrecuperável
+/// (`forged_count + 1` > 256 com 257). Com 1 forjado o teto não entra: o caso isola "a retomada
+/// não chama `self.load()`".
+async fn resuming_with_forged_epoch_2_objects_goes_through(with_state: bool, forged_count: usize) {
     let (lab, engine) = setup(with_state).await;
     let earlier = Engine::new(lab.store.clone(), old_keys(), "a").unwrap();
     let (_, first) = earlier.begin_epoch(&k2(), &lab.roots, 20).await.unwrap();
@@ -363,10 +377,10 @@ async fn resuming_with_257_forged_epoch_2_objects_goes_through(with_state: bool)
         panic!("esperava Created, veio {first:?}");
     };
     assert_eq!(manifest.key_epoch, NEXT_EPOCH);
-    let forged = flood(&lab.store, FORGED, NEXT_EPOCH).await;
+    let forged = flood(&lab.store, forged_count, NEXT_EPOCH).await;
     let forged_hashes: HashSet<[u8; 32]> = forged.iter().map(|id| id.hash).collect();
-    assert_eq!(forged_hashes.len(), FORGED);
-    assert_eq!(lab.manifest_count().await, FORGED + 2);
+    assert_eq!(forged_hashes.len(), forged_count);
+    assert_eq!(lab.manifest_count().await, forged_count + 2);
 
     // premissa 1: o manifest da tentativa anterior abre com K2 e não com as chaves velhas
     let bytes = lab.store.get(&published).await.unwrap().unwrap();
@@ -376,15 +390,16 @@ async fn resuming_with_257_forged_epoch_2_objects_goes_through(with_state: bool)
     );
     assert!(Manifest::open(&old_keys(), &bytes).is_err());
     // premissa 2: o `Engine` velho está vetado (o `self.load()` do `begin_epoch` daria
-    // `NeedsNewKey`): ele vê os 257 forjados e o manifest publicado como época mais nova
+    // `NeedsNewKey`), seja qual for `forged_count`: ele vê os forjados e o manifest publicado
+    // como época mais nova
     assert_eq!(
         engine.foreign_epochs().await.unwrap().len(),
-        FORGED + 1,
+        forged_count + 1,
         "os forjados e o manifest de K2 são estrangeiros para as chaves velhas"
     );
     assert_eq!(engine.heads().await.map(|_| ()), Err(blocked()));
-    // premissa 3: com K2 há uma ponta (o publicado) e 257 ilegíveis: `own` não é vazio, então o
-    // caminho é o da retomada
+    // premissa 3: com K2 há uma ponta (o publicado) e `forged_count` ilegíveis: `own` não é vazio,
+    // então o caminho é o da retomada
     let (tips, unreadable) = what_the_new_keys_see(&lab).await;
     assert_eq!(tips, vec![published]);
     assert_eq!(unreadable, forged_hashes);
@@ -401,7 +416,7 @@ async fn resuming_with_257_forged_epoch_2_objects_goes_through(with_state: bool)
     let heads = next.heads().await.unwrap();
     assert_eq!(heads.tips.len(), 1);
     assert_eq!(heads.tips[0].id, published);
-    assert_eq!(heads.rejected.len(), FORGED);
+    assert_eq!(heads.rejected.len(), forged_count);
     if with_state {
         assert_eq!(
             DeviceState::load(&lab.state_path()).unwrap(),
@@ -415,12 +430,26 @@ async fn resuming_with_257_forged_epoch_2_objects_goes_through(with_state: bool)
 
 #[tokio::test]
 async fn without_state_resuming_with_257_forged_epoch_2_objects_goes_through() {
-    resuming_with_257_forged_epoch_2_objects_goes_through(false).await;
+    resuming_with_forged_epoch_2_objects_goes_through(false, FORGED).await;
 }
 
 #[tokio::test]
 async fn with_state_resuming_with_257_forged_epoch_2_objects_goes_through() {
-    resuming_with_257_forged_epoch_2_objects_goes_through(true).await;
+    resuming_with_forged_epoch_2_objects_goes_through(true, FORGED).await;
+}
+
+/// Isola o caminho do teto: com 1 forjado o `Engine` velho já está vetado (o manifest publicado
+/// basta) e a retomada passa, ou seja, ela não chama `self.load()`.
+#[tokio::test]
+async fn without_state_resuming_with_1_forged_epoch_2_object_goes_through_though_the_old_engine_is_vetoed(
+) {
+    resuming_with_forged_epoch_2_objects_goes_through(false, 1).await;
+}
+
+#[tokio::test]
+async fn with_state_resuming_with_1_forged_epoch_2_object_goes_through_though_the_old_engine_is_vetoed(
+) {
+    resuming_with_forged_epoch_2_objects_goes_through(true, 1).await;
 }
 
 /// (b) Controle: os mesmos 257 forjados de época 2 **sem** o manifest da tentativa anterior. A
@@ -505,4 +534,75 @@ async fn without_state_one_forged_epoch_2_object_makes_the_snapshot_after_rotati
 #[tokio::test]
 async fn with_state_one_forged_epoch_2_object_makes_the_snapshot_after_rotation_diverge() {
     one_forged_epoch_2_object_makes_the_next_snapshot_diverge(true).await;
+}
+
+/// (d') O autor **legítimo** no lugar do forjado: `b` rotacionou com K2'; `a` (K1) vê o manifest
+/// de época 2 dele, o reconhece (`acknowledge_foreign`) e roda `begin_epoch(K2)`. Hipótese: o
+/// reconhecimento tira o veto, a 1ª tentativa publica um 2º manifest de época 2 (com K2) ao lado
+/// do de `b` (K2'), e o `snapshot` seguinte dá `Diverged { tips: 1, rejected: 1 }`: o manifest de
+/// `b` é ilegível para K2. É a divisão em silêncio que o ADR 0018 (item 5) quer evitar; um
+/// `begin_epoch` que "ignorasse objeto de época igual por cabeçalho" chegaria aqui sem exigir o
+/// reconhecimento. A conclusão vale só para "ignorar por cabeçalho": reconhecimento por faixa e
+/// teto maior não são derrubados por este teste.
+async fn acknowledging_a_legitimate_rotation_then_rotating_splits_the_vault(with_state: bool) {
+    let (lab, engine) = setup(with_state).await;
+    let theirs = another_device_rotates(&lab).await;
+    // premissa: o objeto de `b` abre com K2' e não com K2; `a` o vê como estrangeiro e está na
+    // 1ª tentativa; sem reconhecer, o veto de (a) vale
+    assert_theirs_is_an_epoch_2_object_k2_cannot_open(&lab, &engine, &theirs, &other_keys()).await;
+    assert_eq!(
+        engine.begin_epoch(&k2(), &lab.roots, 30).await.map(|_| ()),
+        Err(blocked())
+    );
+
+    engine
+        .acknowledge_foreign(&[ForeignEpoch {
+            epoch: NEXT_EPOCH,
+            id: theirs,
+        }])
+        .await
+        .unwrap();
+    assert!(engine.foreign_epochs().await.unwrap().is_empty());
+    let (next, snapshot) = engine.begin_epoch(&k2(), &lab.roots, 31).await.unwrap();
+    let Snapshot::Created { id, manifest, .. } = snapshot else {
+        panic!("esperava Created, veio {snapshot:?}");
+    };
+    // 1ª tentativa, sem base, e agora há dois manifests de época 2 com chaves diferentes
+    assert_eq!(manifest.key_epoch, NEXT_EPOCH);
+    assert_eq!(manifest.base_version, None);
+    assert_eq!(manifest.counter, 1);
+    assert_ne!(id, theirs);
+    assert_eq!(lab.manifest_count().await, 3);
+    let mine_bytes = lab.store.get(&id).await.unwrap().unwrap();
+    assert!(Manifest::open(&k2_keys(), &mine_bytes).is_ok());
+    assert!(Manifest::open(&other_keys(), &mine_bytes).is_err());
+    let theirs_bytes = lab.store.get(&theirs).await.unwrap().unwrap();
+    assert!(Manifest::open(&other_keys(), &theirs_bytes).is_ok());
+    assert!(Manifest::open(&k2_keys(), &theirs_bytes).is_err());
+
+    // o manifest de `b` é `rejected` do `Engine` novo, nunca ponta, e o `snapshot` recusa
+    let heads = next.heads().await.unwrap();
+    assert_eq!(heads.tips.len(), 1);
+    assert_eq!(heads.tips[0].id, id);
+    assert_eq!(
+        heads.rejected.iter().map(|r| r.id).collect::<Vec<_>>(),
+        vec![theirs]
+    );
+    assert_eq!(
+        next.snapshot(&lab.roots, 32).await.map(|_| ()),
+        Err(EngineError::Diverged {
+            tips: 1,
+            rejected: 1
+        })
+    );
+}
+
+#[tokio::test]
+async fn without_state_acknowledging_a_legitimate_rotation_then_rotating_splits_the_vault() {
+    acknowledging_a_legitimate_rotation_then_rotating_splits_the_vault(false).await;
+}
+
+#[tokio::test]
+async fn with_state_acknowledging_a_legitimate_rotation_then_rotating_splits_the_vault() {
+    acknowledging_a_legitimate_rotation_then_rotating_splits_the_vault(true).await;
 }
