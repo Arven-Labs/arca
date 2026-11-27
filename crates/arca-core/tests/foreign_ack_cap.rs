@@ -49,7 +49,7 @@
 //!   `Engine`) um dos objetos.
 //! - Achado à parte (não é o teto), **corrigido na rodada 9**: sem `with_state`, o `Engine` novo do
 //!   `begin_epoch` nascia sem os reconhecimentos do velho, e um **único** forjado de época 3 vetava
-//!   a rotação mesmo reconhecido. Agora o `Engine` novo herda os reconhecidos do velho (não os
+//!   a rotação mesmo reconhecido. Agora o `Engine` novo herda tudo do velho (reconhecidos e
 //!   pendentes) e a rotação passa, com e sem estado; o id novo de época 3 continua vetando (ver
 //!   `tests/begin_epoch_inherits_acks.rs`).
 //!
