@@ -1323,7 +1323,9 @@ impl<S: BlobStore> Engine<S> {
             (heads.into_iter().next(), None)
         };
         let old_tip = old_tip.as_ref().map(|head| (self, head));
-        let snapshot = next.build_snapshot(prev, roots, now_ms, &[], old_tip).await?;
+        let snapshot = next
+            .build_snapshot(prev, roots, now_ms, &[], old_tip)
+            .await?;
         Ok((next, snapshot))
     }
 
