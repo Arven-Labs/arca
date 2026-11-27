@@ -254,9 +254,10 @@ fn copy_path(path: &str, device: &str, stamp: &str, n: Option<usize>) -> String 
     format!("{dir}{}~{hash}{tail}", &name[..cut])
 }
 
-/// `AAAAMMDDTHHMMSSZ` em UTC a partir de segundos Unix (calendário gregoriano proléptico,
-/// algoritmo `civil_from_days` de Howard Hinnant).
-fn utc_stamp(secs: u64) -> String {
+/// `AAAAMMDDTHHMMSSZ` em UTC a partir de milissegundos Unix (os ms são descartados; calendário
+/// gregoriano proléptico, algoritmo `civil_from_days` de Howard Hinnant).
+fn utc_stamp(millis: u64) -> String {
+    let secs = millis / 1_000;
     let days = (secs / 86_400) as i64;
     let rem = secs % 86_400;
     let z = days + 719_468;
@@ -492,7 +493,7 @@ mod tests {
     }
 
     /// 1_700_000_000_000 ms = 2023-11-14T22:13:20Z. Lido como segundos, o mesmo valor daria um
-    /// ano de 5 dígitos (o selo do `.conflito-*` que o Warden, que passa ms, chegou a gravar).
+    /// ano de 5 dígitos no selo do `.conflito-*`.
     #[test]
     fn a_created_at_in_milliseconds_gives_a_four_digit_year_in_the_copy_name() {
         let m = run(
@@ -538,7 +539,7 @@ mod tests {
     }
 
     /// O vencedor do conflito é decidido em ms: 1 ms de diferença basta, e a cópia leva o
-    /// selo do perdedor. Dois lados no mesmo segundo, valores que em segundos seriam iguais.
+    /// selo do perdedor. Os dois lados caem no mesmo segundo.
     #[test]
     fn a_one_millisecond_difference_decides_the_winner_of_a_conflict() {
         let m = run(

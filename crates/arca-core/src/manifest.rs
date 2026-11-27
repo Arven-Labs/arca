@@ -112,7 +112,8 @@ pub struct Manifest {
     pub merged_from: Vec<Hash32>,
     pub counter: u64,
     pub device: String,
-    /// Segundos Unix (UTC).
+    /// Milissegundos Unix (UTC). Quem chama (`snapshot`, `merge`, `begin_epoch`) passa
+    /// milissegundos; o desempate de conflito compara `(created_at, id)`.
     pub created_at: u64,
     /// Em ordem estrita crescente de `path` (bytes).
     pub files: Vec<FileEntry>,
@@ -565,7 +566,7 @@ mod tests {
             merged_from: vec![],
             counter: 17,
             device: "portatil-fabio".to_string(),
-            created_at: 1_793_455_331, // 2026-10-31T14:02:11Z
+            created_at: 1_793_455_331, // número qualquer: aqui só a serialização importa
             files: vec![FileEntry {
                 path: "memoria/projeto-x.md".to_string(),
                 class: Class::Vault,
