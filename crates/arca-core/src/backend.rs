@@ -173,7 +173,7 @@ mod tests {
             merged_from: vec![],
             counter: 1,
             device: "portatil-fabio".to_string(),
-            created_at: 1_793_455_331,
+            created_at: 1_793_455_331_000,
             files: vec![FileEntry {
                 path: "memoria/projeto-x.md".to_string(),
                 class: Class::Vault,
