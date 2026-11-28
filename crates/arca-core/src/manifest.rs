@@ -566,7 +566,9 @@ mod tests {
             merged_from: vec![],
             counter: 17,
             device: "portatil-fabio".to_string(),
-            created_at: 1_793_455_331, // 2026-10-31T14:02:11Z
+            // fixture: só o formato (u64) importa; era 2026-10-31T14:02:11Z em segundos, lida
+            // hoje como ms (= 1970-01-21T18:10:55Z)
+            created_at: 1_793_455_331,
             files: vec![FileEntry {
                 path: "memoria/projeto-x.md".to_string(),
                 class: Class::Vault,
