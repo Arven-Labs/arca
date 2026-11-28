@@ -39,10 +39,10 @@
 //!   não consegue mais fazer `snapshot` enquanto o manifest de `b` existir (só apagá-lo fora da
 //!   API destrava). O veto do (a) existe para que essa escolha seja da pessoa; uma regra "ignorar
 //!   por cabeçalho" levaria ao mesmo split sem essa decisão, e o (a) é que ficaria vermelho. As
-//!   rotações simultâneas são detectadas, tarde, como `Diverged` no `snapshot` seguinte (o ADR
-//!   0018, item 5, diz que o núcleo não as detecta). Este teste não diz nada sobre reconhecimento
-//!   por faixa nem sobre um teto maior (uma faixa que cobrisse o manifest de `b` levaria ao mesmo
-//!   split com um reconhecimento).
+//!   rotações simultâneas não têm erro específico na hora, mas aparecem tarde: `NeedsNewKey` no
+//!   `begin_epoch` e `Diverged` no `snapshot` seguinte (é o que o item 5 do ADR 0018 diz). Este
+//!   teste não diz nada sobre reconhecimento por faixa nem sobre um teto maior (uma faixa que
+//!   cobrisse o manifest de `b` levaria ao mesmo split com um reconhecimento).
 
 mod common;
 
@@ -505,10 +505,11 @@ async fn with_state_one_forged_epoch_2_object_makes_the_snapshot_after_rotation_
 /// o manifest de `b` existir (só apagá-lo fora da API destrava). O veto de (a) existe para que
 /// essa escolha seja da pessoa; um `begin_epoch` que "ignorasse objeto de época igual por
 /// cabeçalho" levaria ao mesmo split sem essa decisão, e (a) é que ficaria vermelho. Rotações
-/// simultâneas são detectadas, tarde, como `Diverged` no `snapshot` seguinte (o ADR 0018, item 5,
-/// diz que o núcleo não as detecta). A conclusão vale só para "ignorar por cabeçalho": este teste
-/// não diz nada sobre reconhecimento por faixa nem sobre um teto maior (uma faixa que cobrisse o
-/// manifest de `b` levaria ao mesmo split com um reconhecimento).
+/// simultâneas não têm erro específico na hora, mas aparecem tarde: `NeedsNewKey` no
+/// `begin_epoch` e `Diverged` no `snapshot` seguinte (é o que o item 5 do ADR 0018 diz). A
+/// conclusão vale só para "ignorar por cabeçalho": este teste não diz nada sobre reconhecimento
+/// por faixa nem sobre um teto maior (uma faixa que cobrisse o manifest de `b` levaria ao mesmo
+/// split com um reconhecimento).
 async fn acknowledging_a_legitimate_rotation_then_rotating_splits_the_vault(with_state: bool) {
     let (lab, engine) = setup(with_state).await;
     let theirs = another_device_rotates(&lab).await;
