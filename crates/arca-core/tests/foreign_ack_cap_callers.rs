@@ -21,6 +21,8 @@
 //! chamar `load()` (o 257 deixa de vetar) ou em que o teto deixar de travar; é esse o sinal para
 //! atualizar o ADR 0018.
 
+mod common;
+
 use arca_core::backend::Backend;
 use arca_core::disk::DiskStore;
 use arca_core::engine::{
@@ -29,45 +31,16 @@ use arca_core::engine::{
 use arca_core::manifest::Manifest;
 use arca_core::store::BlobStore;
 use arca_core::{EpochKeys, Header, ObjectId, ObjectKind, VaultKey};
+use common::{flood, old_keys, Tmp};
 use std::collections::HashSet;
 use std::fs;
-use std::path::PathBuf;
 
 /// A época que o atacante grava: maior que a do dispositivo (1).
 const FOREIGN_EPOCH: u32 = 2;
 
-/// Pasta única em `temp_dir()`, removida no `Drop` (o `testutil` do crate não é visível aqui).
-struct Tmp(PathBuf);
-
-impl Tmp {
-    fn new() -> Tmp {
-        let mut random = [0u8; 8];
-        getrandom::fill(&mut random).unwrap();
-        let hex: String = random.iter().map(|b| format!("{b:02x}")).collect();
-        let path = std::env::temp_dir().join(format!("arca-it-{hex}"));
-        fs::create_dir_all(&path).unwrap();
-        Tmp(path)
-    }
-}
-
-impl Drop for Tmp {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
-
-fn old_keys() -> EpochKeys {
-    EpochKeys::derive(&VaultKey::from_bytes([3u8; 32]), 1)
-}
-
 /// As chaves que uma rotação de `a` usaria (época 2): os forjados também não abrem com elas.
 fn next_keys() -> EpochKeys {
     EpochKeys::derive(&VaultKey::from_bytes([4u8; 32]), 2)
-}
-
-/// As chaves de quem forja: de outra `VaultKey`. `a` nunca as tem.
-fn attacker_keys() -> EpochKeys {
-    EpochKeys::derive(&VaultKey::from_bytes([0xAA; 32]), FOREIGN_EPOCH)
 }
 
 /// O erro que bloqueia o dispositivo da época 1 quando o armazenamento mostra a época 2.
@@ -125,32 +98,10 @@ async fn setup() -> (Lab, Engine<Backend>) {
     (lab, engine)
 }
 
-/// O atacante grava `count` manifests de época 2 (corpo distinto: `counter` e nonce, id distinto).
-async fn flood(store: &Backend, count: usize) -> Vec<ObjectId> {
-    let keys = attacker_keys();
-    let mut ids = Vec::with_capacity(count);
-    for n in 0..count as u64 {
-        let manifest = Manifest {
-            format_version: 1,
-            key_epoch: FOREIGN_EPOCH,
-            base_version: None,
-            merged_from: Vec::new(),
-            counter: n + 1,
-            device: "forjador".to_string(),
-            created_at: n,
-            files: Vec::new(),
-        };
-        let sealed = manifest.seal(&keys).unwrap();
-        store.put(&sealed.id, &sealed.bytes).await.unwrap();
-        ids.push(sealed.id);
-    }
-    ids
-}
-
 /// O cenário: `a` + `count` forjados, com a premissa afirmada (ver o cabeçalho do arquivo).
 async fn scene(count: usize) -> (Lab, Engine<Backend>) {
     let (lab, engine) = setup().await;
-    let forged = flood(&lab.store, count).await;
+    let forged = flood(&lab.store, count, FOREIGN_EPOCH).await;
     let listed = lab.store.list(ObjectKind::Manifest).await.unwrap();
     assert_eq!(listed.len(), count + 1);
     assert!(listed.contains(&lab.own));
