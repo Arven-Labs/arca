@@ -44,6 +44,8 @@
 //!   por faixa nem sobre um teto maior (uma faixa que cobrisse o manifest de `b` levaria ao mesmo
 //!   split com um reconhecimento).
 
+mod common;
+
 use arca_core::backend::Backend;
 use arca_core::disk::DiskStore;
 use arca_core::engine::{Engine, EngineError, ForeignEpoch, Roots, Snapshot};
@@ -51,36 +53,13 @@ use arca_core::manifest::{Hash32, Manifest};
 use arca_core::state::DeviceState;
 use arca_core::store::BlobStore;
 use arca_core::{EpochKeys, Header, ObjectId, ObjectKind, VaultKey};
+use common::{attacker_keys, flood, old_keys, Tmp};
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 
 /// A época que a rotação cria e a que o forjador e o outro dispositivo gravam.
 const NEXT_EPOCH: u32 = 2;
-
-/// Pasta única em `temp_dir()`, removida no `Drop` (o `testutil` do crate não é visível aqui).
-struct Tmp(PathBuf);
-
-impl Tmp {
-    fn new() -> Tmp {
-        let mut random = [0u8; 8];
-        getrandom::fill(&mut random).unwrap();
-        let hex: String = random.iter().map(|b| format!("{b:02x}")).collect();
-        let path = std::env::temp_dir().join(format!("arca-it-{hex}"));
-        fs::create_dir_all(&path).unwrap();
-        Tmp(path)
-    }
-}
-
-impl Drop for Tmp {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
-
-fn old_keys() -> EpochKeys {
-    EpochKeys::derive(&VaultKey::from_bytes([3u8; 32]), 1)
-}
 
 /// K2: a chave que **este** dispositivo passa ao `begin_epoch`.
 fn k2() -> VaultKey {
@@ -98,11 +77,6 @@ fn other_vault_key() -> VaultKey {
 
 fn other_keys() -> EpochKeys {
     EpochKeys::derive(&other_vault_key(), NEXT_EPOCH)
-}
-
-/// As chaves de quem forja: de outra `VaultKey`, na época pedida.
-fn attacker_keys(epoch: u32) -> EpochKeys {
-    EpochKeys::derive(&VaultKey::from_bytes([0xAA; 32]), epoch)
 }
 
 /// O erro que o dispositivo da época 1 recebe quando o armazenamento mostra a época 2.
@@ -207,29 +181,6 @@ async fn setup(with_state: bool) -> (Lab, Engine<Backend>) {
     assert_eq!(heads.tips.len(), 1);
     assert_eq!(heads.tips[0].id, id);
     (lab, engine)
-}
-
-/// O atacante grava `count` manifests da `epoch` no armazenamento, cifrados com chave que `a` não
-/// tem (corpo distinto: `counter` e nonce), com id distinto.
-async fn flood(store: &Backend, count: usize, epoch: u32) -> Vec<ObjectId> {
-    let keys = attacker_keys(epoch);
-    let mut ids = Vec::with_capacity(count);
-    for n in 0..count as u64 {
-        let manifest = Manifest {
-            format_version: 1,
-            key_epoch: epoch,
-            base_version: None,
-            merged_from: Vec::new(),
-            counter: n + 1,
-            device: "forjador".to_string(),
-            created_at: n,
-            files: Vec::new(),
-        };
-        let sealed = manifest.seal(&keys).unwrap();
-        store.put(&sealed.id, &sealed.bytes).await.unwrap();
-        ids.push(sealed.id);
-    }
-    ids
 }
 
 /// O outro dispositivo legítimo, `b`, rotaciona com K2' sobre o mesmo armazenamento (1ª tentativa
