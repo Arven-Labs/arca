@@ -359,7 +359,8 @@ pub struct Engine<S> {
     /// Filtros de arquivos locais por classe (`with_scan_filter`).
     scan_filters: Vec<(Class, ScanFilter)>,
     /// Pendentes e reconhecidos **sem** `with_state` (ADR 0018, P-47b): vivem só neste
-    /// `Engine`. Com estado, o arquivo `<estado>.foreign` é a fonte e isto não é usado.
+    /// `Engine`. Com estado, o arquivo `<estado>.foreign` é a fonte e isto não é usado. O `Engine`
+    /// novo do `begin_epoch` herda tudo do velho, reconhecidos e pendentes.
     foreign_memory: Mutex<ForeignAcks>,
     /// Cache negativo do `pull`: manifests de outra época já classificados (só memória, com teto).
     foreign_seen: Mutex<Seen>,
@@ -536,7 +537,8 @@ impl<S: BlobStore> Engine<S> {
     /// `(época, id)` (ADR 0018). O consumidor deve mostrar a lista antes de chamar. Não apaga
     /// nada. Guarda os 256 mais recentes (passou, sai o mais antigo, que bloqueia de novo se
     /// ainda existir). Também tira do que está pendente (P-47b). Sem `with_state` o
-    /// reconhecimento vale só na memória deste `Engine`. Estado ocupado por outra operação: `Busy`.
+    /// reconhecimento vale só na memória deste `Engine` e é herdado pelo `Engine` novo do
+    /// `begin_epoch`. Estado ocupado por outra operação: `Busy`.
     pub async fn acknowledge_foreign(
         &self,
         acknowledged: &[ForeignEpoch],
@@ -1253,7 +1255,16 @@ impl<S: BlobStore> Engine<S> {
     /// rotaciona sem estado). `allow_empty` não
     /// existe aqui: uma classe esvaziada de propósito não tem saída (limite conhecido). O
     /// `Engine` antigo não deve mais ser usado depois do sucesso (ele vê a época nova como
-    /// `NeedsNewKey`).
+    /// `NeedsNewKey`). **Reconhecimentos:** o `Engine` novo herda os **reconhecidos**
+    /// (`acknowledge_foreign`) **e os pendentes** (anotados pelo `pull`) do velho, também sem
+    /// `with_state` (onde vivem só na memória), então sem estado o comportamento é o mesmo de com
+    /// estado **enquanto o processo vive**. Diferenças reais: (i) com estado `pull` e `begin_epoch`
+    /// se serializam pela trava (o outro dá `Busy`), sem estado há a corrida; (ii) reiniciar o
+    /// processo perde tudo sem estado, então a retomada depois de uma queda volta a ser fail-open
+    /// até o próximo `pull`; (iii) depois do `begin_epoch` o velho e o novo têm cópias separadas
+    /// (um `acknowledge_foreign` posterior em um não chega ao outro; com estado o arquivo é o
+    /// mesmo). O reconhecimento segue por `(época, id)`: um id novo de época mais nova ainda
+    /// veta, e um pendente não reconhecido também (inclusive na retomada).
     pub async fn begin_epoch(
         &self,
         new_key: &VaultKey,
@@ -1275,6 +1286,21 @@ impl<S: BlobStore> Engine<S> {
         };
         // uma trava só: pedi-la de novo (pelo `snapshot` do `next`) daria `Busy` contra mim mesmo
         let _state_lock = self.lock_state().await?;
+        // Sem `with_state` os reconhecimentos vivem só na memória do `Engine` (ADR 0018, item 5):
+        // o `next` herda **tudo** do velho (reconhecidos e pendentes, clone puro), senão um
+        // forjado de época 3 já reconhecido vetaria a rotação. Os pendentes (vistos pelo `pull`,
+        // não reconhecidos) também passam: descartá-los deixaria a retomada, em que só o
+        // `next.load()` roda, sem o veto que o arquivo `.foreign` já dá com `with_state`.
+        // Sem `with_state` não há trava (`lock_state` devolve `None`). O clone é um instante só
+        // (o guarda do `Mutex` cai no `;`, sem `await` entre ler e atribuir). Corrida: um
+        // reconhecimento feito depois do clone não chega ao `next`, e isso é fail-closed (veta).
+        // Um pendente anotado por um `pull` concorrente **depois** do clone não vale para esta
+        // chamada: na primeira tentativa o `self.load()` ainda o pega, se a anotação ocorrer antes
+        // dele; na retomada só o `next.load()` roda e a rotação passa nesta chamada (fail-open por
+        // esta chamada; o próximo `pull` só o traz de volta se o remoto ainda o mostrar, porque o
+        // `foreign_seen` do `next` nasce vazio).
+        let inherited = self.foreign_memory.lock().unwrap().clone();
+        *next.foreign_memory.lock().unwrap() = inherited;
         ensure_not_interrupted(roots)?;
 
         // manifests da época nova que abrem com a chave nova (tentativa anterior que caiu)
