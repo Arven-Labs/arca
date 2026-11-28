@@ -334,7 +334,7 @@ async fn a_pending_epoch_3_noted_by_pull_is_inherited_and_still_vetoes_the_new_e
 async fn without_state_a_resumed_begin_epoch_is_vetoed_by_a_pending_epoch_3_noted_by_pull() {
     let (lab, engine) = setup(false).await;
     // a tentativa anterior: publicou a época 2 (o `Engine` novo dela é descartado)
-    let (_previous_next, published) = rotate_ok(&lab, &engine).await;
+    let (_, published) = rotate_ok(&lab, &engine).await;
     // premissa: o armazenamento tem o manifest da época 1 e o da época 2 (`own` da retomada)
     assert_eq!(lab.manifest_count().await, 2);
     assert!(lab.store.has(&published).await.unwrap());
@@ -363,5 +363,11 @@ async fn without_state_a_resumed_begin_epoch_is_vetoed_by_a_pending_epoch_3_note
     engine.acknowledge_foreign(&[pending]).await.unwrap();
     let resumed = engine.begin_epoch(&next_vault_key(), &lab.roots, 32).await;
     assert_eq!(resumed.as_ref().err(), None, "a retomada devia passar");
+    let (_, snapshot) = resumed.unwrap();
+    // adotou o manifest da época 2 que a tentativa anterior publicou, sem publicar outro
+    let Snapshot::Unchanged { head, .. } = snapshot else {
+        panic!("esperava Unchanged, veio {snapshot:?}");
+    };
+    assert_eq!(head, published);
     assert_eq!(lab.manifest_count().await, 2);
 }

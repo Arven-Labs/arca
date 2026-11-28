@@ -20,13 +20,15 @@
 //! `merge_with_losers` (ambos por `merge_inner`), `snapshot` e `snapshot_allowing_empty`, `apply` e
 //! `begin_epoch`. `foreign_epochs`, `acknowledge_foreign`, `restore` e `pull` não chamam `load()` e
 //! seguem funcionando (o teste de 300 confere os quatro; `verify`, `merge_with_losers`,
-//! `snapshot_allowing_empty` e `conflicts_between` não são chamados aqui, a lista deles é por leitura).
+//! `snapshot_allowing_empty` e `conflicts_between` não são chamados aqui: eram por leitura e foram
+//! medidas no arca#222, que veta com 257 e destrava com 256).
 //!
 //! O `begin_epoch` tem dois `load()`: o `next.load()` (chaves novas), que roda sempre, e o
 //! `self.load()` (chaves velhas), que só roda na **primeira tentativa** (`own.is_empty()`, sem
 //! manifest da época nova). Na **retomada** só o `next.load()` roda, e o veto de >256 forjados de
-//! época 2 (que vem do `self.load()`) não se aplica. **Nenhum teste aqui fixa a retomada**: não
-//! verificado.
+//! época 2 (que vem do `self.load()`) não se aplica. **Nenhum teste aqui fixa a retomada**; ela foi
+//! medida no arca#222 (passa com 257 e com 1 forjado de época 2) e, com um pendente de época 3,
+//! está em `tests/begin_epoch_inherits_acks.rs`.
 //!
 //! Cenário: o dispositivo `a` (época 1, chave velha) publica um manifest legítimo com um arquivo
 //! de Vault. Um atacante grava no **mesmo** armazenamento N manifests de uma época maior, cifrados
@@ -599,7 +601,7 @@ async fn with_state_with_256_forged_manifests_of_the_next_epoch_begin_epoch_goes
 /// Achado à parte, sem relação com o teto: **um** forjado de época 3 (uma acima da que a rotação
 /// cria), reconhecido. O `next.load()` do `begin_epoch` usa um `Engine` novo, e o que ele sabe dos
 /// reconhecimentos vem do arquivo de estado, se houver, ou da memória do `Engine` novo, que herda
-/// os reconhecidos do velho (antes nascia vazia e o reconhecimento não chegava lá).
+/// tudo do velho, reconhecidos e pendentes (antes nascia vazia e o reconhecimento não chegava lá).
 async fn one_forged_manifest_of_a_later_epoch(with_state: bool) -> (Lab, Engine<Backend>) {
     let (lab, engine) = setup(with_state).await;
     let forged = flood(&lab.store, 1, 3).await;

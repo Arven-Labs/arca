@@ -1257,8 +1257,13 @@ impl<S: BlobStore> Engine<S> {
     /// `Engine` antigo não deve mais ser usado depois do sucesso (ele vê a época nova como
     /// `NeedsNewKey`). **Reconhecimentos:** o `Engine` novo herda os **reconhecidos**
     /// (`acknowledge_foreign`) **e os pendentes** (anotados pelo `pull`) do velho, também sem
-    /// `with_state` (onde vivem só na memória), então sem estado o comportamento é o de com
-    /// estado. O reconhecimento segue por `(época, id)`: um id novo de época mais nova ainda
+    /// `with_state` (onde vivem só na memória), então sem estado o comportamento é o mesmo de com
+    /// estado **enquanto o processo vive**. Diferenças reais: (i) com estado `pull` e `begin_epoch`
+    /// se serializam pela trava (o outro dá `Busy`), sem estado há a corrida; (ii) reiniciar o
+    /// processo perde tudo sem estado, então a retomada depois de uma queda volta a ser fail-open
+    /// até o próximo `pull`; (iii) depois do `begin_epoch` o velho e o novo têm cópias separadas
+    /// (um `acknowledge_foreign` posterior em um não chega ao outro; com estado o arquivo é o
+    /// mesmo). O reconhecimento segue por `(época, id)`: um id novo de época mais nova ainda
     /// veta, e um pendente não reconhecido também (inclusive na retomada).
     pub async fn begin_epoch(
         &self,
@@ -1287,9 +1292,13 @@ impl<S: BlobStore> Engine<S> {
         // não reconhecidos) também passam: descartá-los deixaria a retomada, em que só o
         // `next.load()` roda, sem o veto que o arquivo `.foreign` já dá com `with_state`.
         // Sem `with_state` não há trava (`lock_state` devolve `None`). O clone é um instante só
-        // (o guarda do `Mutex` cai no `;`, sem `await` entre ler e atribuir), e uma corrida
-        // concorrente só pode fazer o `next` perder um reconhecimento (veta: fail-closed) ou um
-        // pendente (volta no próximo `pull`).
+        // (o guarda do `Mutex` cai no `;`, sem `await` entre ler e atribuir). Corrida: um
+        // reconhecimento feito depois do clone não chega ao `next`, e isso é fail-closed (veta).
+        // Um pendente anotado por um `pull` concorrente **depois** do clone não vale para esta
+        // chamada: na primeira tentativa o `self.load()` ainda o pega, se a anotação ocorrer antes
+        // dele; na retomada só o `next.load()` roda e a rotação passa nesta chamada (fail-open por
+        // esta chamada; o próximo `pull` só o traz de volta se o remoto ainda o mostrar, porque o
+        // `foreign_seen` do `next` nasce vazio).
         let inherited = self.foreign_memory.lock().unwrap().clone();
         *next.foreign_memory.lock().unwrap() = inherited;
         ensure_not_interrupted(roots)?;
